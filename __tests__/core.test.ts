@@ -22,12 +22,12 @@ function createEnv(): { mock: MockPI; pi: ExtensionAPI } {
 }
 
 const REGISTRY_KEY = "__piToolMaskingRegistry";
-const HANDLER_GUARD_KEY = "__piToolMaskingRestoreHandlerRegistered";
+const RESTORE_EVENT_KEY = "__piToolMaskingLastRestoreEvent";
 const MODULE_STATE_KEY = "__piToolMaskingModuleState";
 
 function cleanRegistry(): void {
 	delete (globalThis as any)[REGISTRY_KEY];
-	delete (globalThis as any)[HANDLER_GUARD_KEY];
+	delete (globalThis as any)[RESTORE_EVENT_KEY];
 	delete (globalThis as any)[MODULE_STATE_KEY];
 }
 
@@ -135,12 +135,60 @@ describe("defineToolset — restore handler registration", () => {
 		expect(mock.hasHandler("session_tree")).toBe(true);
 	});
 
-	it("registers handlers only once across multiple toolsets", () => {
+	it("dedup by event identity — N handlers, one run per event", () => {
 		const { mock, pi } = createEnv();
 		defineToolset(pi, makeSpec({ id: "a.a", persistKey: "k:a.a" }));
 		defineToolset(pi, makeSpec({ id: "b.b", persistKey: "k:b.b" }));
-		expect(mock.handlerCount("session_start")).toBe(1);
-		expect(mock.handlerCount("session_tree")).toBe(1);
+		// No registration guard: each defineToolset registers its own handler
+		expect(mock.handlerCount("session_start")).toBe(2);
+		expect(mock.handlerCount("session_tree")).toBe(2);
+		// Runtime dedup: fire once, each toolset emits exactly one event
+		const emitSpy = vi.spyOn(mock.events, "emit");
+		mock.fireLifecycleEvent("session_start");
+		const changedOrRestored = emitSpy.mock.calls.filter(
+			([c]) => c === TOOLSET_EVENTS.changed || c === TOOLSET_EVENTS.restored,
+		);
+		expect(changedOrRestored.length).toBe(2);
+		emitSpy.mockRestore();
+	});
+
+	it("restore is /reload-safe — stale boolean no longer blocks fresh extension", () => {
+		const { mock: mock1, pi: pi1 } = createEnv();
+		mock1.registerTool({ name: "tool-a", description: "" });
+		const spec = makeSpec({ names: new Set(["tool-a"]) });
+		defineToolset(pi1, spec);
+
+		// Simulate /reload: new MockPI, same globalThis, no cleanRegistry between
+		const { mock: mock2, pi: pi2 } = createEnv();
+		mock2.registerTool({ name: "tool-a", description: "" });
+
+		// Pre-populate mock2's branch with persisted disabled state (simulates
+		// the entry surviving in the real session branch across /reload)
+		mock2.appendEntry("toolset-state:test.toolset", { enabled: false });
+
+		// Re-register on pi2 (as pi would on /reload)
+		defineToolset(pi2, spec);
+
+		// Assert handler was registered on pi2 despite prior registration on pi1
+		expect(mock2.hasHandler("session_start")).toBe(true);
+
+		const emitSpy = vi.spyOn(mock2.events, "emit");
+		mock2.fireLifecycleEvent("session_start");
+
+		// Restore ran on pi2: tools disabled, restored event on pi2's bus
+		expect(mock2.getActiveTools()).not.toContain("tool-a");
+		const restoredCalls = emitSpy.mock.calls.filter(
+			([c]) => c === TOOLSET_EVENTS.restored,
+		);
+		expect(restoredCalls.length).toBeGreaterThanOrEqual(1);
+
+		// Second fire with a fresh event object → restore runs again
+		mock2.fireLifecycleEvent("session_start");
+		const restoredCallsAfterSecond = emitSpy.mock.calls.filter(
+			([c]) => c === TOOLSET_EVENTS.restored,
+		);
+		expect(restoredCallsAfterSecond.length).toBeGreaterThanOrEqual(2);
+		emitSpy.mockRestore();
 	});
 });
 

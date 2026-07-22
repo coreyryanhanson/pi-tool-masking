@@ -129,8 +129,11 @@ export class MockPI implements Partial<ExtensionAPI> {
 	fireLifecycleEvent(event: string): void {
 		const handlers = this._handlers.get(event) ?? [];
 		const ctx = this.createContext();
+		// Create ONE event object — the real runner passes the same reference
+		// to every extension's handler (§6 event-identity dedup).
+		const eventObj = {};
 		for (const h of handlers) {
-			h({}, ctx);
+			h(eventObj, ctx);
 		}
 	}
 

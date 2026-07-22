@@ -61,7 +61,7 @@ export const TOOLSET_EVENTS = {
 // ---------------------------------------------------------------------------
 
 const REGISTRY_KEY = "__piToolMaskingRegistry";
-const HANDLER_GUARD_KEY = "__piToolMaskingRestoreHandlerRegistered";
+const RESTORE_EVENT_KEY = "__piToolMaskingLastRestoreEvent";
 
 interface RegistryEntry {
 	spec: ToolsetSpec;
@@ -129,17 +129,19 @@ function deepEqual(a: unknown, b: unknown): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Ensure session_start / session_tree restore handler is registered once
+// Ensure session_start / session_tree restore handler is registered
+// (dedup at runtime by event-object identity, not at registration time)
 // ---------------------------------------------------------------------------
 
 function ensureRestoreHandler(pi: ExtensionAPI): void {
-	if ((globalThis as any)[HANDLER_GUARD_KEY]) return;
-	(globalThis as any)[HANDLER_GUARD_KEY] = true;
+	// Dedup by event-object identity (§6). The runner passes the same event
+	// reference to every extension's handler in one emit() call, so the first
+	// handler wins and the rest skip. Each /reload constructs a fresh event
+	// object, so restore re-runs with the fresh pi.
+	const doRestore = (event: unknown, ctx: ExtensionContext): void => {
+		if ((globalThis as any)[RESTORE_EVENT_KEY] === event) return;
+		(globalThis as any)[RESTORE_EVENT_KEY] = event;
 
-	// Restore handler — applies persisted or default state for every registered toolset.
-	// Registered once so ordering is correct (§6 capture-ordering note).
-	// Always emits exactly one event per toolset (always-emit invariant, §6).
-	const doRestore = (_event: unknown, ctx: ExtensionContext): void => {
 		const registry = getRegistry();
 		const mode = getModuleState().defaultResolutionMode;
 		const branch = ctx.sessionManager.getBranch();
@@ -368,7 +370,9 @@ export function defineToolset(pi: ExtensionAPI, spec: ToolsetSpec): Toolset {
 
 	if (existing) {
 		if (deepEqual(existing.spec, spec)) {
-			// Idempotent re-registration — return existing toolset
+			// Idempotent re-registration — return existing toolset.
+			// Still register restore handler with current pi (/reload safety).
+			ensureRestoreHandler(pi);
 			return existing.toolset;
 		}
 		// Same id, different spec — warn and replace (reload after edit)
