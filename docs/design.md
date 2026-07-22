@@ -103,8 +103,10 @@ has:
 - a `persistKey` (the new write key, e.g. `toolset-state:portal.web`)
   for branch-aware state memory, plus optional `legacyPersistKeys` for
   one-cycle migration reads from pre-extraction entry names
-- an optional `configKey` + `defaultEnabled` for fresh-session config-file
-  defaults
+- an optional `defaultEnabled` boolean — the fresh-session fallback when
+  no branch entry exists. The **consumer resolves any config-file default
+  at the call site** and passes the resulting boolean (see §5); the
+  library does not read `settings.json`
 - an optional `masked` flag (addressability — see §4.2)
 - an optional `requires` array (dependency — see §4.4)
 - an optional `emitMemberEvents` flag (see §6)
@@ -268,9 +270,11 @@ export interface ToolsetSpec {
    *  (see §8), e.g. ["web-toggle-state"]. Generic — the library never
    *  hardcodes consumer history. */
   legacyPersistKeys?: string[];
-  /** settings.json block for fresh-session default, e.g. "browserToggle". */
-  configKey?: string;
-  /** Fresh-session default when no branch state and no config value. */
+  /** Fresh-session fallback when no branch entry exists. The consumer
+   *  resolves any config-file default at the call site and passes the
+   *  resulting boolean here — the library does not read `settings.json`
+   *  (no settings-reading method exists on `ExtensionAPI`; see
+   *  `readMergedSettings` below). */
   defaultEnabled?: boolean;
   /** Addressability: when true, members are reachable only via the group
    *  in every surface the library generates or exposes (§4.2). Default false. */
@@ -301,6 +305,15 @@ export interface Toolset {
 }
 
 export function defineToolset(pi: ExtensionAPI, spec: ToolsetSpec): Toolset;
+
+/** Read and merge pi's settings.json files (global `~/.pi/agent/settings.json`
+ *  + project `.pi/settings.json`, project overrides global). Returns `{}` on
+ *  any failure. Utility export so consumers resolve config-file defaults at
+ *  the `defineToolset` call site without each shipping their own reader —
+ *  portal and host delete their verbatim `settings-reader.ts` copies and
+ *  import this. The library itself never calls this; restore uses only
+ *  `spec.defaultEnabled` (the already-resolved value) and branch state. */
+export function readMergedSettings(): Record<string, unknown>;
 
 /** Default-resolution mode for toolsets with no branch entry (§4.5).
  *  - "exclusion" (default): no entry → spec.defaultEnabled (unknowns ON)
@@ -598,16 +611,20 @@ The canonical tests:
 ```ts
 import {
   defineToolset,
+  readMergedSettings,
   TOOLSET_EVENTS,
 } from "pi-tool-masking";
+
+// Consumer resolves the config-file default once at load time; the
+// library never reads settings.json itself (§5).
+const webDefault = readMergedSettings().browserToggle?.enabled ?? true;
 
 const webToolset = defineToolset(pi, {
   id: "portal.web",
   names: BROWSER_TOOL_NAMES,
   persistKey: "toolset-state:portal.web",
   legacyPersistKeys: ["web-toggle-state"],   // one-cycle migration read
-  configKey: "browserToggle",
-  defaultEnabled: true,
+  defaultEnabled: webDefault,
 });
 
 const learnToolset = defineToolset(pi, {
