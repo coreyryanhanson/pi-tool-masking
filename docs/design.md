@@ -10,11 +10,11 @@ This repository is the **core library** layer of a two-layer design:
 1. **`pi-tool-masking` (this package)** — a pure library. It registers
    **no tools, no commands, no event handlers** with the running pi
    process. It exports plain functions (`defineToolset`,
-   `registerToggleCommand`, `TOOLSET_EVENTS`) that *other* pi extensions
-   call. It is not a pi extension in the runtime sense (no default
-   `(pi: ExtensionAPI) => ...` factory); it is a library that targets the
-   pi extension API, the same way a React hook library targets React
-   without being a component.
+   `registerToggleCommand`, `setDefaultResolutionMode`, `TOOLSET_EVENTS`)
+   that *other* pi extensions call. It is not a pi extension in the
+   runtime sense (no default `(pi: ExtensionAPI) => ...` factory); it is a
+   library that targets the pi extension API, the same way a React hook
+   library targets React without being a component.
 2. **A separate user-facing extension** (deferred, out of scope for this
    repo — see §13) — a real pi extension that depends on
    `pi-tool-masking`, queries the registered toolsets, and offers the
@@ -47,8 +47,9 @@ absent, portal/host fail to load.
    glyph) need no import coupling.
 5. **Enable a future manager extension** to offer user-tagged tool
    groups (`on`/`off`/`focus` on tagged lists) without the library's own
-   API changing — the registry + event surface (§6.1, §6) already expose
-   what such a manager needs.
+   API changing — the registry + event surface (§6, §6.1) and the
+   default-resolution mode (§4.5) already expose what such a manager
+   needs, including durable focus.
 
 ## 3. Non-goals
 
@@ -91,14 +92,21 @@ has:
 
 - an `id` (e.g. `"portal.web"`, `"portal.learn"`, `"host.api"`)
 - a `names` Set of tool names it governs
-- an optional status-bar `slot` + `glyphs`
 - a `persistKey` (the new write key, e.g. `toolset-state:portal.web`)
   for branch-aware state memory, plus optional `legacyPersistKeys` for
   one-cycle migration reads from pre-extraction entry names
 - an optional `configKey` + `defaultEnabled` for fresh-session config-file
   defaults
 - an optional `masked` flag (addressability — see §4.2)
+- an optional `requires` array (dependency — see §4.4)
 - an optional `emitMemberEvents` flag (see §6)
+
+The library does **not** own status-bar glyphs. A toolset has no `slot` /
+`glyphs` fields. The side-effect of updating a status-bar slot belongs to
+whoever owns that slot, driven by `pi.events` (see §9). This keeps the
+library out of UI presentation and makes portal's `browser` slot work
+exactly like search's `search` slot — both listen for their own
+toolset's `changed`/`restored` events and render their own glyph.
 
 There is **no `learn` field**. "Learn mode" is not a grouping primitive;
 it is a two-toolset pattern a consumer composes at the call site (base
@@ -129,6 +137,83 @@ registry at actuation time) is deferred: it only earns its keep if
 toolset membership changes dynamically after registration, which nothing
 today does.
 
+### 4.4 Toolset dependencies (`requires`)
+
+A toolset may declare `requires: string[]` — the ids of other toolsets
+that must be enabled for it to be enabled. This is a **generic
+dependency primitive**, not consumer vocabulary: "A requires B" says
+nothing about browsing, learning, or APIs. It exists because portal and
+host share the identical pattern (an extended toolset that is
+meaningless without its base), and the invariant must hold regardless of
+*who* triggers the toggle — the owning extension's command handler, the
+downstream manager (§13), or a future tag operation.
+
+Rules the library enforces (one copy, one test — the peer-composition
+invariant's sibling, §9):
+
+- `enable(A)` where `A.requires = [B, C]` → transitively `enable(B)`,
+  `enable(C)` before enabling A. Cycles are a spec error, detected lazily
+  at first graph resolution (not at `defineToolset` time — `requires` may
+  forward-reference a toolset registered later by another extension, so
+  the full graph is not available at any single `defineToolset` call).
+- `disable(B)` → cascade `disable` to every registered toolset whose
+  `requires` contains `B` (and transitively, their dependents).
+
+This is what prevents the incoherent state `portal.learn.enabled = true`
+while `portal.web.enabled = false`: `portal.learn` declares
+`requires: ["portal.web"]`, so enabling learn pulls web on and disabling
+web pushes learn off — no matter which surface actuates it. The
+consumer's command handler no longer re-implements the composition at
+every call site (see §10).
+
+### 4.5 Default-resolution mode (exclusion vs inclusion)
+
+The library's per-toolset persistence record (`{ enabled }`, §7) is, by
+default, an **exclusion record**: a toolset with no branch entry falls
+back to `spec.defaultEnabled` (typically on). This matches today's
+portal/host behavior — tools are on unless explicitly turned off.
+
+An **inclusion mode** flips only the fallback for *unknown* toolsets:
+the per-toolset record shape is unchanged, but a toolset with no branch
+entry defaults **off** instead of to `spec.defaultEnabled`. The
+mechanism is a default-resolution policy, not a new record type — same
+`{ enabled }` entries, one mode bit on the restore path the library
+already owns (§7.1).
+
+```
+Exclusion mode (default):  no entry → spec.defaultEnabled   → unknowns ON
+Inclusion mode (focus):     no entry → false                 → unknowns OFF
+```
+
+This is the durability mechanism for focus (§13.2): when a new
+extension is installed and registers toolsets E, F, G after a focus
+snapshot was taken, E/F/G have no branch entry. Under exclusion mode
+they would default on and silently break focus; under inclusion mode
+they default off and focus survives the installation. No event-watching,
+no manager re-apply loop — the library holds the line at restore time.
+
+Scope and defaults:
+
+- The mode is **library-level** (one setting for the whole registry),
+  not per-toolset. It governs the fallback for toolsets without a
+  branch entry; toolsets *with* an entry always restore that entry's
+  `enabled` regardless of mode.
+- It composes with `requires` (§4.4): a new toolset E (no entry) under
+  inclusion mode stays off even if its `requires` target is on — focus
+  means "only what I explicitly enabled." E's `requires` only fires
+  when E is actuated, and it isn't.
+- Portal and host never set inclusion mode — they run in the default
+  exclusion mode for their entire lifecycle. The mode exists for the
+  manager's focus feature. It is built into the library now (along with
+  the persist schema, §7) so the v1 storage shape and API are stable
+  before any consumer ships against them; the manager later flips the
+  mode and supplies the focus *intent* (which toolsets are in the
+  allowlist). See §13.2.
+
+The mode is not consumer vocabulary baked into the core — it is a policy
+on default resolution, which is already a library concern (§7, §8). One
+bit, one place, one test.
+
 ## 5. Public API (proposed, pre-freeze)
 
 The entire surface — keep it this small. This is a **library API**
@@ -142,10 +227,6 @@ export interface ToolsetSpec {
   id: string;
   /** Tool names this toolset governs. */
   names: Set<string>;
-  /** Status-bar slot, e.g. "browser". Omit for toolsets with no glyph. */
-  slot?: string;
-  /** Per-state glyphs for the slot. */
-  glyphs?: { on: string; off: string };
   /** Primary persistence key the toolset writes, e.g.
    *  "toolset-state:portal.web". */
   persistKey: string;
@@ -160,19 +241,40 @@ export interface ToolsetSpec {
   /** Addressability: when true, members are reachable only via the group
    *  in every surface the library generates or exposes (§4.2). Default false. */
   masked?: boolean;
-  /** When true, a group toggle also emits one `changed` event per member
-   *  tool, for per-tool UIs (the downstream picker, §13). Default false:
-   *  one group-level event per toggle. */
+  /** Dependency: ids of toolsets that must be enabled for this one to be
+   *  enabled. `enable` transitively enables them; `disable` of a required
+   *  toolset cascades `disable` to every toolset that `requires` it. This
+   *  is the peer-composition invariant's sibling — one copy, one test
+   *  (§4.4, §9). Generic: "A requires B", never consumer vocabulary. */
+  requires?: string[];
+  /** When true, a group toggle additionally emits one `changed` event per
+   *  member tool (with the member name in `event.member`), for per-tool UIs
+   *  (the downstream picker, §13). The group-level event always fires.
+   *  Default false: one group-level event per toggle. */
   emitMemberEvents?: boolean;
 }
 
 export interface Toolset {
-  enable(pi: ExtensionAPI, ctx: ExtensionContext): void;
-  disable(pi: ExtensionAPI, ctx: ExtensionContext): void;
+  enable(pi: ExtensionAPI): void;
+  disable(pi: ExtensionAPI): void;
   isEnabled(pi: ExtensionAPI): boolean;
 }
 
 export function defineToolset(pi: ExtensionAPI, spec: ToolsetSpec): Toolset;
+
+/** Default-resolution mode for toolsets with no branch entry (§4.5).
+ *  - "exclusion" (default): no entry → spec.defaultEnabled (unknowns ON)
+ *  - "inclusion":           no entry → false            (unknowns OFF)
+ *  Library-level: one setting for the whole registry. Portal/host stay
+ *  in exclusion mode; the manager sets inclusion mode for focus (§13.2). */
+export type DefaultResolutionMode = "exclusion" | "inclusion";
+
+export function setDefaultResolutionMode(
+  pi: ExtensionAPI,
+  mode: DefaultResolutionMode,
+): void;
+
+export function getDefaultResolutionMode(pi: ExtensionAPI): DefaultResolutionMode;
 
 export interface ToggleCommandOptions {
   command: string;                       // e.g. "web", "api"
@@ -202,13 +304,21 @@ with worse decoupling.
 
 ```ts
 export interface ToolsetChangedEvent {
+  /** Toolset id (e.g. "portal.web"). Always set. */
   id: string;
   enabled: boolean;
+  /** Present only when emitMemberEvents is on and this is a per-member fanout
+   *  event: the member tool's name. Absent on the group-level event. Consumers
+   *  that only care about group state check `if (!event.member)` or ignore
+   *  member events entirely — a listener for `id === "portal.web"` still
+   *  receives the group-level event regardless of emitMemberEvents. */
+  member?: string;
 }
 
 export const TOOLSET_EVENTS = {
-  /** Emitted on enable/disable (and, if emitMemberEvents is set, once per
-   *  member tool with that tool's name in `id`). */
+  /** Emitted on enable/disable. Always one group-level event (id = toolset id).
+   *  When emitMemberEvents is set, additionally one event per member tool with
+   *  that tool's name in `member` (and the same group `id`). */
   changed: "toolset:changed",    // ToolsetChangedEvent
   /** Emitted after session_start / session_tree restore re-applies state. */
   restored: "toolset:restored",  // ToolsetChangedEvent
@@ -220,10 +330,21 @@ status slot: portal emits nothing, search listens for `restored`/`changed`
 for the `portal.web` toolset and owns its own `search` glyph. Portal no
 longer references search.
 
+> **`ctx` capture pattern.** `pi.events` listeners receive only `(data)`,
+> not `ctx`, so a listener that needs to touch the UI (e.g.
+> `ctx.ui.setStatus`) captures `ctx` from its own `session_start` handler
+> into a module variable and reuses `ctx.ui` in the bus listener.
+> `ctx.ui` is stable across the session; only `ctx.sessionManager` is
+> stale-sensitive (not used by glyph listeners). This is the documented
+> pattern — see pi's `examples/extensions/event-bus.ts`.
+
 `emitMemberEvents` is the one forward-compat knob for the downstream
-picker (§13): a group toggle can fan out to one event per member so a
-per-tool UI updates without the manager re-deriving membership. Default
-`false` keeps today's one-event-per-group behavior.
+picker (§13): when on, a group toggle additionally fans out to one
+`changed` event per member tool (with the member name in `event.member`)
+so a per-tool UI updates without the manager re-deriving membership. The
+group-level event always fires regardless — consumers keyed to a toolset
+id (search listening for `portal.web`) are unaffected by the flag.
+Default `false` keeps today's one-event-per-group behavior.
 
 ### 6.1 Shared registry on `globalThis` (cross-instance)
 
@@ -246,15 +367,15 @@ proven in `pi-lean-portal`'s `portal-projection.ts` boundary-safe
 detection (`globalThis.__piLeanPortalRegisterGuideProvider`).
 
 The registry stores each toolset's `spec` (at minimum `id`, `names`,
-`masked`) plus the `Toolset` object, keyed by `spec.id`. The manager
-extension queries it and calls `toolset.enable(pi, ctx)` /
-`disable(pi, ctx)` with its **own** `pi`/`ctx` — all extensions in a pi
-session share the same underlying runtime, so `setActiveTools` /
-`appendEntry` issued through the manager's `pi` act on the same
-session state the registering extension would touch. Passing `pi` /
-`ctx` explicitly to each call (rather than capturing them at
-`defineToolset` time) keeps the registry from holding session-bound
-references that could go stale across `/reload` / `/resume`.
+`masked`, `requires`) plus the `Toolset` object, keyed by `spec.id`. The
+manager extension queries it and calls `toolset.enable(pi)` /
+`disable(pi)` with its **own** `pi` — all extensions in a pi session
+share the same underlying runtime, so `setActiveTools` / `appendEntry`
+issued through the manager's `pi` act on the same session state the
+registering extension would touch. Passing `pi` explicitly to each call
+(rather than capturing it at `defineToolset` time) keeps the registry
+from holding session-bound references that could go stale across
+`/reload` / `/resume`.
 
 Exposing `names` + `masked` in the registry is what lets the downstream
 picker (§13) derive addressable units: a tool is individually
@@ -275,7 +396,10 @@ The package owns **toolset on/off memory only**. Each toolset
 persists `{ enabled }` under its `persistKey` (the new
 `toolset-state:<id>` key), with a one-cycle legacy-read path over
 `legacyPersistKeys` (§8), and restores it on `session_start` +
-`session_tree`.
+`session_tree`. The persist schema is stable from v1: the same `{ enabled }`
+record is read the same way under both default-resolution modes (§4.5) —
+the mode only changes the fallback for a toolset with *no* branch entry,
+never the shape of an entry that exists.
 
 **Consumer-specific conversation config does NOT move.** The motivating
 case is portal's `defaultProfile` field, which today rides inside the
@@ -305,12 +429,16 @@ calls one extra `appendEntry` — negligible cost.
 
 ### 7.1 Restore independence
 
-Each toolset restores from its own `toolset-state:<id>` entry. Portal's
-restore does not depend on host's `session_start` handler firing first,
-and vice versa. The only cross-toolset observer is search (for its slot
-glyph), and it reacts to the `restored` event rather than to handler
-ordering — which also eliminates the current
-portal-`session_start`-vs-search-`session_start` race.
+Each toolset restores from its own `toolset-state:<id>` entry. A toolset
+*with* an entry always restores that entry's `enabled`, regardless of the
+default-resolution mode (§4.5) — the mode only affects toolsets with *no*
+entry. Portal's restore does not depend on host's `session_start` handler
+firing first, and vice versa. The only cross-*extension* observer is
+search (for its slot glyph), and it reacts to the `restored` event
+rather than to handler ordering — which also eliminates the current
+portal-`session_start`-vs-search-`session_start` race. (Portal also
+listens for its own toolset events to render its `browser` glyph, but
+that is a same-extension observer, not a cross-extension one.)
 
 ## 8. Legacy persistence migration
 
@@ -338,22 +466,29 @@ silently loses toggle state — the data-loss class that must not be cut.
 The single most important line in the package. Lives in `disable()`:
 
 ```ts
-disable(pi: ExtensionAPI, ctx: ExtensionContext): void {
+disable(pi: ExtensionAPI): void {
   const current = pi.getActiveTools();        // NOT getAllTools()
   pi.setActiveTools(current.filter((n) => !this.spec.names.has(n)));
+  // then cascade disable to dependents (§4.4)
 }
 ```
 
 `enable()` is additive: `[...new Set([...current, ...registered])]`,
 where `registered` is `spec.names` filtered to tools actually present in
 `pi.getAllTools()` (see §4 — a toolset tolerates unregistered names).
+`enable()` also transitively `enable()`s every toolset in `spec.requires`
+before applying its own change (§4.4).
 
-`ctx` is required on every method because the library owns the status-bar
-slot contract: `enable`/`disable` call `ctx.ui.setStatus(spec.slot,
-glyph)` from `spec.glyphs` after applying the active-tool change and
-before emitting `TOOLSET_EVENTS.changed`. Consumers that want custom
-glyph logic can omit `spec.slot`/`spec.glyphs` and drive the slot
-themselves off the event.
+`disable()` filters `spec.names` out of the *currently active* set (the
+rule below), then cascades `disable()` to every registered toolset whose
+`requires` contains this one's id (§4.4).
+
+The library does **not** call `ctx.ui.setStatus`. `enable`/`disable`
+take only `pi` (for `setActiveTools` + `appendEntry`), not `ctx`. Status-
+bar glyphs are a side-effect owned by whoever owns the slot: the consumer
+listens for `TOOLSET_EVENTS.changed`/`restored` and renders its own glyph.
+This makes portal's `browser` slot work exactly like search's `search`
+slot — both listen, neither is reached into. See §10.
 
 **Why `getActiveTools()` and not `getAllTools()` on disable:** using
 `getAllTools()` would re-activate every registered tool outside this
@@ -361,9 +496,15 @@ toolset's set, silently re-enabling tools another toggle (e.g. host's
 `/api off`) has already disabled. This is the bug class the extraction
 exists to kill. One copy, one test, one place to break it.
 
-The canonical test: two toolsets A and B, both enabled; disable A; assert
-B's tools remain active and A's are gone. Disable B; assert A's tools are
-*not* re-activated.
+The canonical tests:
+
+- **Peer composition:** two toolsets A and B, both enabled; disable A;
+  assert B's tools remain active and A's are gone. Disable B; assert A's
+  tools are *not* re-activated.
+- **Dependency cascade:** toolset L declares `requires: ["B"]`; `enable(L)`
+  → B is enabled too; `disable(B)` → L is disabled too; `enable(L)` while
+  B is independently disabled re-enables B. No path produces
+  `L.enabled && !B.enabled`.
 
 ## 10. Consumer integration (post-extraction)
 
@@ -372,13 +513,15 @@ B's tools remain active and A's are gone. Disable B; assert A's tools are
 `browser-toggle.ts` collapses from ~450 lines to roughly:
 
 ```ts
-import { defineToolset, registerToggleCommand } from "pi-tool-masking";
+import {
+  defineToolset,
+  registerToggleCommand,
+  TOOLSET_EVENTS,
+} from "pi-tool-masking";
 
 const webToolset = defineToolset(pi, {
   id: "portal.web",
   names: BROWSER_TOOL_NAMES,
-  slot: "browser",
-  glyphs: { on: "● idle", off: "○ web off" },
   persistKey: "toolset-state:portal.web",
   legacyPersistKeys: ["web-toggle-state"],   // one-cycle migration read
   configKey: "browserToggle",
@@ -391,18 +534,38 @@ const learnToolset = defineToolset(pi, {
   persistKey: "toolset-state:portal.learn",
   legacyPersistKeys: ["web-toggle-state"],   // same legacy entry, read during migration
   defaultEnabled: false,                     // learn starts off
+  requires: ["portal.web"],                  // learn is meaningless without web (§4.4)
 });
 
 registerToggleCommand(pi, { command: "web", toolsets: [webToolset, learnToolset], /* ... */ });
+
+// Portal owns its own `browser` status-bar slot — listens, renders glyph.
+// `pi.events` listeners receive only `(data)`, no `ctx`, so capture `ctx`
+// from session_start and reuse its `.ui` (the documented pattern — see
+// pi's examples/extensions/event-bus.ts). `ctx.ui` is stable across the
+// session; only `ctx.sessionManager` is stale-sensitive (not used here).
+let ui: ExtensionContext["ui"] | undefined;
+pi.on("session_start", async (_e, ctx) => { ui = ctx.ui; });
+
+const render = () => {
+  if (!ui) return;
+  const on = webToolset.isEnabled(pi), learn = learnToolset.isEnabled(pi);
+  ui.setStatus("browser",
+    !on ? "○ web off"
+      : learn ? ui.theme.fg("success", "●") + " idle"
+      : ui.theme.fg("accent", "●") + " idle");
+};
+pi.events.on(TOOLSET_EVENTS.changed, render);
+pi.events.on(TOOLSET_EVENTS.restored, render);
 ```
 
-The `/web` command handler composes the three states from the two
-toolsets — this is the "learn is a two-toolset pattern" from §4.1:
+The `/web` command handler no longer re-implements the composition — the
+`requires` invariant (§4.4) enforces it:
 
 ```ts
-// /web on    → web.enable(pi, ctx);  learn.disable(pi, ctx);
-// /web learn → web.enable(pi, ctx);  learn.enable(pi, ctx);
-// /web off   → web.disable(pi, ctx); learn.disable(pi, ctx);
+// /web on    → web.enable(pi);   learn.disable(pi);   // learn off, web on
+// /web learn → learn.enable(pi);                      // pulls web on via requires
+// /web off   → web.disable(pi);                       // cascades learn off via requires
 ```
 
 - `SIBLING_TOOL_NAMES` / `setSearchSlot` block: **deleted**. Search's slot
@@ -410,6 +573,8 @@ toolsets — this is the "learn is a two-toolset pattern" from §4.1:
 - `defaultProfile`: portal keeps a separate `appendEntry`.
 - `restoreFromBranch` / `applyConfigDefault` / `session_start` restore
   wiring: **deleted** — owned by `defineToolset`.
+- Status-bar glyph logic: portal's own `changed`/`restored` listener,
+  not a library concern.
 
 ### pi-lean-host
 
@@ -418,15 +583,21 @@ toolsets — this is the "learn is a two-toolset pattern" from §4.1:
 
 ### pi-lean-search
 
-Adds a listener:
+Adds a listener (same `ctx`-capture pattern as portal above —
+`pi.events` listeners get only `(data)`, so `ctx.ui` is captured from
+`session_start`):
 
 ```ts
-pi.events.on(TOOLSET_EVENTS.changed, ({ id, enabled }) => {
-  if (id === "portal.web") updateSearchGlyph(enabled);
-});
-pi.events.on(TOOLSET_EVENTS.restored, ({ id, enabled }) => {
-  if (id === "portal.web") updateSearchGlyph(enabled);
-});
+let ui: ExtensionContext["ui"] | undefined;
+pi.on("session_start", async (_e, ctx) => { ui = ctx.ui; });
+
+const render = (id: string, enabled: boolean) => {
+  if (id !== "portal.web" || !ui) return;
+  // search glyph reflects portal.web activation; health probe is separate
+  ui.setStatus("search", enabled ? /* healthy color */ : "○ searxng");
+};
+pi.events.on(TOOLSET_EVENTS.changed, ({ id, enabled }) => render(id, enabled));
+pi.events.on(TOOLSET_EVENTS.restored, ({ id, enabled }) => render(id, enabled));
 ```
 
 Portal no longer references search at all.
@@ -452,7 +623,11 @@ Portal no longer references search at all.
 - **In `pi-tool-masking`'s repo:** a MockPI that records
   `setActiveTools` / `appendEntry` calls. The canonical test is the
   peer-composition invariant from §9. Plus persistence round-trip
-  (write → restore → assert re-applied) and the legacy-key read path.
+  (write → restore → assert re-applied), the legacy-key read path, and
+  the default-resolution mode test: register toolset A (with entry,
+  enabled) and toolset B (no entry); under exclusion mode B defaults on,
+  under inclusion mode B defaults off, while A's entry is honored in
+  both — proving the mode flips only the fallback for unknown toolsets.
 - **In `pi-lean-portal` / `pi-lean-host`:** thin integration tests that
   call `defineToolset` against a MockPI, plus consumer-specific glyph /
   command tests. **Do not** duplicate the invariant tests here — one
@@ -496,8 +671,10 @@ computes the addressable-unit list:
 Tags are user-assigned labels on **addressable units** (tools or groups),
 stored in the manager's own user config. The library never knows what a
 tag is. `on`/`off`/`focus` on a tag resolves the tag → its addressable
-units → activates/deactivates each. Because a masked group's members are
-not addressable units, they cannot be tagged individually — the user tags
+units → activates/deactivates each (focus additionally flips the
+library's default-resolution mode to inclusion so the focus set survives
+new-tool drift — see §13.2). Because a masked group's members are not
+addressable units, they cannot be tagged individually — the user tags
 the group, and the operation hits the group as a whole. This is the
 "trade visibility with group abstraction" behavior, and it falls out of
 the two-axis model with no new library machinery: `masked` is the single
@@ -505,9 +682,67 @@ source of truth, and every surface (commands, picker, tagging) respects
 it.
 
 `emitMemberEvents` (§6) is the one library-side affordance the picker may
-opt into: a group toggle can fan out to one `changed` event per member so
-a per-tool UI updates without the manager re-deriving which members moved.
-Default `false`; the manager sets it on toolsets it renders per-tool.
+opt into: a group toggle can additionally fan out to one `changed` event
+per member (with `event.member` set) so a per-tool UI updates without the
+manager re-deriving which members moved. The group-level event always
+fires regardless. Default `false`; the manager sets it on toolsets it
+renders per-tool.
+
+### 13.2 "Only" / focus mode: library mechanism, manager intent
+
+The user-facing "focus on this tag" / "only these tools" operation —
+reduce the active tool set to just the named tools, and keep it that way
+as new tools are installed — splits cleanly into **library mechanism**
+and **manager intent**.
+
+The **drift problem** a naive focus snapshot has: focus is a batch of
+`disable()` calls producing "active = {A, B}" at a moment in time. It
+records *what's off* (C, D), not a forward-going intent. When a new
+extension registers toolsets E, F, G and the user `/reload`s, E/F/G have
+no branch entry — under the default exclusion mode (§4.5) they fall back
+to `spec.defaultEnabled` (on) and silently break focus. A manager-only
+fix (re-apply the allowlist on every `session_start`) works but is racy
+and re-implements default resolution at the wrong layer.
+
+The **library mechanism** is inclusion mode (§4.5): the manager calls
+`setDefaultResolutionMode(pi, "inclusion")`, and unknown toolsets
+(those with no branch entry) default **off** instead of on. Same `{
+enabled }` persist records, one mode bit on the restore path the library
+already owns. New toolsets E/F/G default off → focus survives the
+installation. No event-watching, no manager re-apply loop. The mechanism
+is built into the library from v1 so the persist schema and API are
+stable before any consumer ships against them; portal/host never set it
+and run in exclusion mode for their entire lifecycle.
+
+The **manager intent** is *which* toolsets are in the focus set (the
+positive allowlist / tag). The manager owns that choice in its own user
+config; the library holds the line against drift once the mode is set.
+A focus operation is therefore:
+
+```ts
+// manager: "focus on tag X"
+setDefaultResolutionMode(pi, "inclusion");      // library: unknowns stay off
+const keep = new Set(tagX.toolsetIds);
+for (const ts of registry.allToolsets()) {
+  if (keep.has(ts.spec.id)) ts.enable(pi);      // allowlist on (requires pulls deps)
+  else ts.disable(pi);                          // everything else off
+}
+```
+
+There is **no `focus()` verb on `Toolset`** — focus is a composition
+over `enable`/`disable` plus a mode flip, not a third activation verb.
+Adding one would bake a one-consumer recipe into the core. The library's
+contribution is the mode (one bit, default resolution); the manager's
+is the intent (the allowlist). The split keeps the library free of tag
+vocabulary while giving focus a durable foundation.
+
+**Pi's built-in tools (`read`, `bash`, …) are preserved emergently.**
+Disabling a toolset only removes *its own members* from the active set;
+builtins are not members of any `defineToolset` toolset, so disabling
+every non-allowlist toolset leaves builtins active. No "protected
+builtin group" registration is load-bearing for focus. If the manager
+later wants builtins to be a taggable/toggleable unit, it can register a
+`pi.builtin` toolset then — optional, deferred, and a manager concern.
 
 Also still deferred (orthogonal to the manager):
 
