@@ -1,7 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type {
+	ExtensionAPI,
+	ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 
 // ---------------------------------------------------------------------------
 // §5 Public API — types
@@ -133,14 +136,62 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 	if ((globalThis as any)[HANDLER_GUARD_KEY]) return;
 	(globalThis as any)[HANDLER_GUARD_KEY] = true;
 
-	// Restore handler — body filled in Sprint 3.
-	// Registered now to ensure correct ordering (§6 capture-ordering note).
-	pi.on("session_start", () => {
-		// Sprint 3: restore state from branch entries
-	});
-	pi.on("session_tree", () => {
-		// Sprint 3: restore state from branch entries
-	});
+	// Restore handler — applies persisted or default state for every registered toolset.
+	// Registered once so ordering is correct (§6 capture-ordering note).
+	// Always emits exactly one event per toolset (always-emit invariant, §6).
+	const doRestore = (_event: unknown, ctx: ExtensionContext): void => {
+		const registry = getRegistry();
+		const mode = getModuleState().defaultResolutionMode;
+		const branch = ctx.sessionManager.getBranch();
+
+		for (const [, entry] of registry) {
+			const { spec } = entry;
+
+			// Find persisted entry for this toolset (last-writer-wins)
+			const persistEntries = branch.filter(
+				(b: any) => b.customType === spec.persistKey && b.data != null,
+			);
+
+			if (persistEntries.length > 0) {
+				const lastEntry = persistEntries[persistEntries.length - 1];
+				const enabled = (lastEntry as any).data?.enabled;
+				if (typeof enabled === "boolean") {
+					_applyRestoreToolset(spec, pi, enabled, true);
+				}
+			} else {
+				// No entry — resolve default based on mode (§4.5)
+				const fallback = spec.defaultEnabled ?? true;
+				const enabled = mode === "inclusion" ? false : fallback;
+				_applyRestoreToolset(spec, pi, enabled, false);
+			}
+		}
+	};
+
+	pi.on("session_start", doRestore);
+	pi.on("session_tree", doRestore);
+}
+
+// ---------------------------------------------------------------------------
+// Event emission helper (group + optional member fanout)
+// ---------------------------------------------------------------------------
+
+function _emitToolsetEvents(
+	spec: ToolsetSpec,
+	pi: ExtensionAPI,
+	eventType: string,
+	enabled: boolean,
+): void {
+	pi.events.emit(eventType, { id: spec.id, enabled });
+
+	if (spec.emitMemberEvents) {
+		for (const name of spec.names) {
+			pi.events.emit(eventType, {
+				id: spec.id,
+				enabled,
+				member: name,
+			});
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -158,10 +209,7 @@ function _applyEnable(spec: ToolsetSpec, pi: ExtensionAPI): void {
 	const next = [...new Set([...current, ...registeredNames])];
 	pi.setActiveTools(next);
 	pi.appendEntry(spec.persistKey, { enabled: true });
-	pi.events.emit(TOOLSET_EVENTS.changed, {
-		id: spec.id,
-		enabled: true,
-	});
+	_emitToolsetEvents(spec, pi, TOOLSET_EVENTS.changed, true);
 }
 
 // ---------------------------------------------------------------------------
@@ -176,10 +224,39 @@ function _applyDisable(spec: ToolsetSpec, pi: ExtensionAPI): void {
 
 	pi.setActiveTools(filtered);
 	pi.appendEntry(spec.persistKey, { enabled: false });
-	pi.events.emit(TOOLSET_EVENTS.changed, {
-		id: spec.id,
-		enabled: false,
-	});
+	_emitToolsetEvents(spec, pi, TOOLSET_EVENTS.changed, false);
+}
+
+// ---------------------------------------------------------------------------
+// Restore-specific apply: applies state without persisting, always emits
+// isPersistedEntry=true → restored event, false → changed event
+// ---------------------------------------------------------------------------
+
+function _applyRestoreToolset(
+	spec: ToolsetSpec,
+	pi: ExtensionAPI,
+	enabled: boolean,
+	isPersistedEntry: boolean,
+): void {
+	const registeredNames = [...spec.names].filter((n) =>
+		pi.getAllTools().some((t) => t.name === n),
+	);
+
+	if (enabled) {
+		const current = new Set(pi.getActiveTools());
+		const next = [...new Set([...current, ...registeredNames])];
+		pi.setActiveTools(next);
+	} else {
+		const current = pi.getActiveTools();
+		const filtered = current.filter((n) => !registeredNames.includes(n));
+		pi.setActiveTools(filtered);
+	}
+
+	// Always emit regardless of state (always-emit invariant, §6)
+	const eventType = isPersistedEntry
+		? TOOLSET_EVENTS.restored
+		: TOOLSET_EVENTS.changed;
+	_emitToolsetEvents(spec, pi, eventType, enabled);
 }
 
 // ---------------------------------------------------------------------------
