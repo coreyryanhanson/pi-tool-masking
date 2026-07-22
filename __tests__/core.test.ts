@@ -1074,7 +1074,7 @@ describe("Reverse cascade on disable (§4.4, §9)", () => {
 // ===================================================================
 
 describe("Cycle detection on disable (§4.4)", () => {
-	it("throws on disable of a toolset in a reverse cycle", () => {
+	it("throws on enable of a toolset in a cycle", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "a-tool", description: "" });
 		mock.registerTool({ name: "b-tool", description: "" });
@@ -1106,6 +1106,42 @@ describe("Cycle detection on disable (§4.4)", () => {
 			}),
 		);
 		expect(() => tsA.enable(pi)).toThrow("Cycle detected");
+	});
+
+	it("throws on disable of a toolset in a reverse cycle", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "a-tool", description: "" });
+		mock.registerTool({ name: "b-tool", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "A",
+				persistKey: "k:A",
+				names: new Set(["a-tool"]),
+				requires: ["B"],
+			}),
+		);
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "B",
+				persistKey: "k:B",
+				names: new Set(["b-tool"]),
+				requires: ["A"],
+			}),
+		);
+		const tsA = defineToolset(
+			pi,
+			makeSpec({
+				id: "A",
+				persistKey: "k:A",
+				names: new Set(["a-tool"]),
+				requires: ["B"],
+			}),
+		);
+		// Note: _applyDisable(self) for A runs before the throw (a side effect),
+		// but the assertion is only on the throw, which is fine.
+		expect(() => tsA.disable(pi)).toThrow("Cycle detected on disable");
 	});
 });
 
