@@ -361,9 +361,11 @@ export const TOOLSET_EVENTS = {
 ```
 
 This replaces portal's current `setSearchSlot()` reach into search's
-status slot: portal emits nothing, search listens for `restored`/`changed`
-for the `portal.web` toolset and owns its own `search` glyph. Portal no
-longer references search.
+status slot: portal emits nothing, search registers its own `search.web`
+toolset, co-activates it by listening for `changed` on `portal.web`, and
+owns its own `search` glyph (tracking `search.web`'s state). Portal no
+longer references search. See §10 / §10.1 for the full pattern and the
+companion-vs-`requires` distinction.
 
 > **`ctx` capture pattern.** `pi.events` listeners receive only `(data)`,
 > not `ctx`, so a listener that needs to touch the UI (e.g.
@@ -469,8 +471,10 @@ Each toolset restores from its own `toolset-state:<id>` entry. A toolset
 default-resolution mode (§4.5) — the mode only affects toolsets with *no*
 entry. Portal's restore does not depend on host's `session_start` handler
 firing first, and vice versa. The only cross-*extension* observer is
-search (for its slot glyph), and it reacts to the `restored` event
-rather than to handler ordering — which also eliminates the current
+search, which co-activates its own `search.web` toolset off `portal.web`'s
+`changed` event and renders its glyph off `search.web`'s own
+`changed`/`restored` events (§10.1) — so neither depends on the other's
+`session_start` handler firing first, eliminating the current
 portal-`session_start`-vs-search-`session_start` race. (Portal also
 listens for its own toolset events to render its `browser` glyph, but
 that is a same-extension observer, not a cross-extension one.)
@@ -622,8 +626,10 @@ The `requires` invariant (§4.4) makes the composition a one-liner:
 // /web off   → webToolset.disable(pi);                           // cascades learn off via requires
 ```
 
-- `SIBLING_TOOL_NAMES` / `setSearchSlot` block: **deleted**. Search's slot
-  is now search's problem, driven by `pi.events`.
+- `SIBLING_TOOL_NAMES` / `setSearchSlot` block: **deleted**. Search owns
+  its own `search.web` toolset and co-activates off `portal.web`'s
+  `changed` event — see §10.1. Portal no longer touches search's tools
+  or its status slot.
 - `defaultProfile`: portal keeps a separate `appendEntry`.
 - `restoreFromBranch` / `applyConfigDefault` / `session_start` restore
   wiring: **deleted** — owned by `defineToolset`.
@@ -637,24 +643,84 @@ The `requires` invariant (§4.4) makes the composition a one-liner:
 
 ### pi-lean-search
 
-Adds a listener (same `ctx`-capture pattern as portal above —
-`pi.events` listeners get only `(data)`, so `ctx.ui` is captured from
-`session_start`):
+Search registers its **own** `search.web` toolset (so the tool is
+toggleable, persistent, and discoverable by the deferred manager §13)
+and co-activates it with `portal.web` by listening for `changed` events
+— not `restored`. The glyph then tracks `search.web`'s own state, not
+portal's.
 
 ```ts
+import { defineToolset, TOOLSET_EVENTS } from "pi-tool-masking";
+
+const searchToolset = defineToolset(pi, {
+  id: "search.web",
+  names: new Set(["web-search"]),
+  persistKey: "toolset-state:search.web",
+  defaultEnabled: true,
+});
+
+// Co-activation: /web on brings search on, /web off takes it off.
+// Listen on `changed` ONLY — not `restored`. On restore, each toolset
+// honors its own persist entry, so an independent manager disable of
+// search survives session restart (see §10.1).
+pi.events.on(TOOLSET_EVENTS.changed, ({ id, enabled }) => {
+  if (id === "portal.web") {
+    if (enabled) searchToolset.enable(pi);
+    else searchToolset.disable(pi);
+  }
+});
+
+// Glyph tracks search.web's OWN state (not portal.web's). The chain is:
+// /web on → portal.web changed → co-activation enables search.web →
+// search.web changed → glyph renders. One direction, no double-toggle.
 let ui: ExtensionContext["ui"] | undefined;
 pi.on("session_start", async (_e, ctx) => { ui = ctx.ui; });
-
 const render = (id: string, enabled: boolean) => {
-  if (id !== "portal.web" || !ui) return;
-  // search glyph reflects portal.web activation; health probe is separate
+  if (id !== "search.web" || !ui) return;
+  // search glyph reflects search.web activation; health probe is separate
   ui.setStatus("search", enabled ? /* healthy color */ : "○ searxng");
 };
 pi.events.on(TOOLSET_EVENTS.changed, ({ id, enabled }) => render(id, enabled));
 pi.events.on(TOOLSET_EVENTS.restored, ({ id, enabled }) => render(id, enabled));
 ```
 
-Portal no longer references search at all.
+Portal no longer references search at all. The coupling direction is
+**companion listens for base**, never the reverse: portal (the base
+capability) stays ignorant of search (the add-on) — the correct
+dependency direction, and what §6 already wants.
+
+### 10.1 Companion co-activation vs `requires`
+
+Portal/search is **not** a `requires` (§4.4) relationship. `requires`
+models an asymmetric dependency — "learn is meaningless without web" —
+and only gives one direction for free: `disable(B)` cascades to
+dependents. The enable direction is deliberately not symmetric
+(`enable(A)` pulls in `A.requires`, but enabling B does **not** enable
+A's dependents — otherwise `/web on` would force-enable `portal.learn`,
+which shares the same `requires: ["portal.web"]`).
+
+Portal/search is symmetric **UX co-activation**: the user thinks of
+`/web on` as "turn on the web tools," and `web-search` is one of those
+tools. `requires` is the wrong primitive here, both semantically (search
+is a stateless SearXNG fetch that works fine with no browser) and
+directionally. The event-listener mirror above is the right primitive:
+symmetric, one-directional (companion listens for base), and it leaves
+`requires` doing only what it's good at.
+
+**Why `changed` and not `restored` for the co-activation mirror.** On
+restore, every toolset reads its own `toolset-state:<id>` entry. The
+co-activation listener writes `toolset-state:search.web` whenever portal
+toggles, so after a restart search restores to whatever the cascade
+last set — consistent with portal without any `restored` listener. If a
+future manager (§13) independently disables search while portal stays
+on, that choice is persisted and honored on restore; a `restored`
+listener that mirrored portal would clobber it. So: `changed` mirrors,
+`restored` does not. This is the invariant that lets an independent
+search toggle coexist with the group behavior.
+
+If a second sibling group ever appears, promote the listener to a
+declarative `companions: string[]` primitive (undirected companion
+graph, registry-resolved) — but one group today does not justify it.
 
 ## 11. Dependency & versioning strategy
 
