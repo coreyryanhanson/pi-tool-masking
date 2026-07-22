@@ -250,7 +250,10 @@ function _applyRestoreToolset(
 		pi.setActiveTools(next);
 	} else {
 		const current = pi.getActiveTools();
-		const filtered = current.filter((n) => !registeredNames.includes(n));
+		// Use spec.names.has(n) (not registeredNames) to match _applyDisable —
+		// an unregistered spec member active in the list must be removed on
+		// restore just like a manual disable would.
+		const filtered = current.filter((n) => !spec.names.has(n));
 		pi.setActiveTools(filtered);
 	}
 

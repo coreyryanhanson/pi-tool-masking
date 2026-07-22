@@ -1151,6 +1151,33 @@ describe("Restore — persistence round-trip (§6, §12)", () => {
 		mock.fireLifecycleEvent("session_start");
 		expect(mock.getActiveTools()).toContain("tool-a");
 	});
+
+	it("restore disable removes unregistered spec members (matching _applyDisable)", () => {
+		const { mock, pi } = createEnv();
+		// Spec names "unreg-tool" but it's never registered with registerTool
+		const ts = defineToolset(
+			pi,
+			makeSpec({
+				id: "with-unreg",
+				persistKey: "k:with-unreg",
+				names: new Set(["tool-a", "unreg-tool"]),
+			}),
+		);
+		mock.registerTool({ name: "tool-a", description: "" });
+		ts.enable(pi);
+		// "unreg-tool" wasn't added (not registered), so manually inject it
+		// to simulate an externally-added tool matching a spec name
+		mock.setActiveTools(["tool-a", "unreg-tool"]);
+
+		// Persist disabled and restore
+		mock.appendEntry("k:with-unreg", { enabled: false });
+		mock.fireLifecycleEvent("session_start");
+
+		// Both should be removed: tool-a (registered, removed by spec.names.has)
+		// and unreg-tool (unregistered, also removed by spec.names.has)
+		expect(mock.getActiveTools()).not.toContain("tool-a");
+		expect(mock.getActiveTools()).not.toContain("unreg-tool");
+	});
 });
 
 // ===================================================================
