@@ -10,11 +10,14 @@ This repository is the **core library** layer of a two-layer design:
 1. **`pi-tool-masking` (this package)** — a pure library. It registers
    **no tools, no commands, no event handlers** with the running pi
    process. It exports plain functions (`defineToolset`,
-   `registerToggleCommand`, `setDefaultResolutionMode`, `TOOLSET_EVENTS`)
-   that *other* pi extensions call. It is not a pi extension in the
-   runtime sense (no default `(pi: ExtensionAPI) => ...` factory); it is a
-   library that targets the pi extension API, the same way a React hook
-   library targets React without being a component.
+   `setDefaultResolutionMode`, `getDefaultResolutionMode`) and the
+   `TOOLSET_EVENTS` constant that *other* pi extensions call. It is not
+   a pi extension in the runtime sense (no default
+   `(pi: ExtensionAPI) => ...` factory); it is a library that targets
+   the pi extension API, the same way a React hook library targets React
+   without being a component. It does **not** register or generate any
+   user-facing command (`/web`, `/api`, …) — consumers own their commands
+   and call the library's primitives inside (§10).
 2. **A separate user-facing extension** (deferred, out of scope for this
    repo — see §13) — a real pi extension that depends on
    `pi-tool-masking`, queries the registered toolsets, and offers the
@@ -53,9 +56,14 @@ absent, portal/host fail to load.
 
 ## 3. Non-goals
 
-- **Not** a framework. The public API is ~3 exports. The moment
-  `ToolsetSpec` sprouts fields only one consumer uses, this has become
-  the wrong abstraction.
+- **Not** a framework. The public API is a handful of exports — two
+  functions (`defineToolset`, `setDefaultResolutionMode`), one getter
+  (`getDefaultResolutionMode`), the `TOOLSET_EVENTS` constant, and their
+  accompanying types. The library does **not** register or generate any
+  user-facing command — consumers own `/web`, `/api`, etc. and call the
+  library's `enable`/`disable` primitives inside their own command
+  handlers (§10). The moment `ToolsetSpec` sprouts fields only one
+  consumer uses, this has become the wrong abstraction.
 - **Not** a tool marketplace or discovery layer. Consumers register
   toolsets they already define; the package never invents tools.
 - **Not** a home for consumer-specific conversation config. Portal's
@@ -307,25 +315,20 @@ export function setDefaultResolutionMode(
 ): void;
 
 export function getDefaultResolutionMode(pi: ExtensionAPI): DefaultResolutionMode;
-
-export interface ToggleCommandOptions {
-  command: string;                       // e.g. "web", "api"
-  toolsets: Toolset[];                   // toolsets this command governs
-  // Subcommand wiring: the package generates on/off/status from the
-  // toolsets. "learn" and other multi-toolset compositions are NOT
-  // generated — the library doesn't know which toolsets to compose
-  // (learn is a consumer pattern, §4.1). Consumer-specific subcommands
-  // (portal's /web learn, /web profile, /web cookies) are supplied via
-  // an override hook. To be finalized in implementation; lean toward
-  // generated-by-default + override.
-  // ...
-}
-
-export function registerToggleCommand(
-  pi: ExtensionAPI,
-  opts: ToggleCommandOptions,
-): void;
 ```
+
+There is **no `registerToggleCommand` export**. The library does not
+own or generate user-facing commands — `/web`, `/api`, and any
+subcommands (`on`, `off`, `learn`, `profile`, `cookies`, `status`, …)
+are registered by the consuming extension via `pi.registerCommand()`
+and call `toolset.enable(pi)` / `toolset.disable(pi)` inside. The
+peer-composition invariant (§9) and the `requires` cascade (§4.4) live
+in `enable`/`disable`, so a ~10-line command handler gets the full
+invariant for free without a library-side command abstraction. An
+auto-generated command surface with an override hook was considered and
+rejected: its first real consumer (portal's `/web`) overrides roughly
+half the generated subcommands, so the "default" is dead weight and the
+override hook costs more than the dispatch it saves (see §15).
 
 ## 6. Change notification: `pi.events`, not custom hooks
 
@@ -547,7 +550,6 @@ The canonical tests:
 ```ts
 import {
   defineToolset,
-  registerToggleCommand,
   TOOLSET_EVENTS,
 } from "pi-tool-masking";
 
@@ -569,7 +571,25 @@ const learnToolset = defineToolset(pi, {
   requires: ["portal.web"],                  // learn is meaningless without web (§4.4)
 });
 
-registerToggleCommand(pi, { command: "web", toolsets: [webToolset, learnToolset], /* ... */ });
+// Portal owns the /web command outright — no library command generator.
+// The requires invariant (§4.4) does the composition; the handler is
+// ~10 lines of dispatch calling toolset.enable/disable.
+pi.registerCommand("web", {
+  description: "Enable/disable browser automation tools. Usage: /web on | off | learn | status | profile | cookies",
+  handler: async (args, ctx) => {
+    const cmd = args.trim().toLowerCase();
+    if (cmd === "on")         { webToolset.enable(pi); learnToolset.disable(pi); }
+    else if (cmd === "learn") { learnToolset.enable(pi); }        // pulls web on via requires
+    else if (cmd === "off")   { webToolset.disable(pi); }         // cascades learn off via requires
+    else if (cmd === "profile" || cmd.startsWith("profile "))
+      await handleProfileSubcommand(cmd.slice("profile".length).trim(), ctx, pi);
+    else if (cmd === "cookies" || cmd.startsWith("cookies "))
+      await handleCookiesSubcommand(cmd.slice("cookies".length).trim(), ctx);
+    else if (cmd === "status")
+      handleStatusSubcommand(ctx, webToolset.isEnabled(pi), learnToolset.isEnabled(pi));
+    else /* default */ ctx.ui.notify(/* …status help… */, "info");
+  },
+});
 
 // Portal owns its own `browser` status-bar slot — listens, renders glyph.
 // `pi.events` listeners receive only `(data)`, no `ctx`, so capture `ctx`
@@ -591,13 +611,15 @@ pi.events.on(TOOLSET_EVENTS.changed, render);
 pi.events.on(TOOLSET_EVENTS.restored, render);
 ```
 
-The `/web` command handler no longer re-implements the composition — the
-`requires` invariant (§4.4) enforces it:
+The `/web` command handler is portal's own — `profile`, `cookies`, and
+`status` (portal's status shows sessions/plugins/profiles, not just
+on/off) stay where they belong, with no library override hook needed.
+The `requires` invariant (§4.4) makes the composition a one-liner:
 
 ```ts
-// /web on    → web.enable(pi);   learn.disable(pi);   // learn off, web on
-// /web learn → learn.enable(pi);                      // pulls web on via requires
-// /web off   → web.disable(pi);                       // cascades learn off via requires
+// /web on    → webToolset.enable(pi);   learnToolset.disable(pi);   // learn off, web on
+// /web learn → learnToolset.enable(pi);                          // pulls web on via requires
+// /web off   → webToolset.disable(pi);                           // cascades learn off via requires
 ```
 
 - `SIBLING_TOOL_NAMES` / `setSearchSlot` block: **deleted**. Search's slot
@@ -639,8 +661,8 @@ Portal no longer references search at all.
 - `pi-tool-masking` is a hard `dependency` of portal, host, and search —
   **not** a `peerDependency`. A hard dep is not a user choice. (Search
   depends on it for the `TOOLSET_EVENTS` constant it listens for in §10;
-  portal and host depend on it for `defineToolset` /
-  `registerToggleCommand`.)
+  portal and host depend on it for `defineToolset` and the
+  `Toolset.enable`/`disable` primitives their command handlers call.)
 - Pin `"pi-tool-masking": "^1.0.0"` (or `"1.x"`) in each consumer's
   `package.json`.
 - Lockstep versioning across the **four** repos (pi-tool-masking +
@@ -807,10 +829,19 @@ decisions, both independent:
 
 ## 15. Open implementation questions (resolve before v1.0.0)
 
-1. **`registerToggleCommand` subcommand shape.** Generated-by-default
-   from the toolsets, with an optional override hook for consumer-specific
-   subcommands (portal's `/web profile`, `/web cookies`)? Or fully
-   consumer-supplied? Lean generated-by-default + override.
-2. **Event payload typing.** Ship a `ToolsetChangedEvent` type, or keep
-   payloads as `Record<string, unknown>` and let consumers narrow? Ship
-   the type — it's free and prevents the bag-of-anything drift.
+None open. Decisions recorded here so they don't re-surface:
+
+1. **No library command generator.** The library does not register or
+   generate any user-facing command. Consumers own `/web`, `/api`, etc.
+   via `pi.registerCommand()` and call `toolset.enable(pi)` /
+   `toolset.disable(pi)` inside (§10). An auto-generated command surface
+   with an override hook was rejected: its first real consumer (portal's
+   `/web`) overrides roughly half the generated subcommands (`profile`,
+   `cookies`, a richer `status`), so the "default" is dead weight and the
+   override hook costs more than the ~10 lines of trivial dispatch it
+   would save. The peer-composition invariant (§9) and the `requires`
+   cascade (§4.4) live in `enable`/`disable`, so a hand-written handler
+   gets the full invariant for free.
+2. **Typed event payloads.** Events ship a typed `ToolsetChangedEvent`
+   (§6), not `Record<string, unknown>` — the type is free and prevents
+   bag-of-anything drift.
