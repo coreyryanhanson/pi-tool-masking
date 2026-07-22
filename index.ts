@@ -144,6 +144,105 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 }
 
 // ---------------------------------------------------------------------------
+// Helper: enable a single toolset (writes entry + emits if state changed)
+// ---------------------------------------------------------------------------
+
+function _applyEnable(spec: ToolsetSpec, pi: ExtensionAPI): void {
+	const current = new Set(pi.getActiveTools());
+	const registeredNames = [...spec.names].filter((n) =>
+		pi.getAllTools().some((t) => t.name === n),
+	);
+
+	if (registeredNames.every((n) => current.has(n))) return;
+
+	const next = [...new Set([...current, ...registeredNames])];
+	pi.setActiveTools(next);
+	pi.appendEntry(spec.persistKey, { enabled: true });
+	pi.events.emit(TOOLSET_EVENTS.changed, {
+		id: spec.id,
+		enabled: true,
+	});
+}
+
+// ---------------------------------------------------------------------------
+// Helper: disable a single toolset (writes entry + emits if state changed)
+// ---------------------------------------------------------------------------
+
+function _applyDisable(spec: ToolsetSpec, pi: ExtensionAPI): void {
+	const current = pi.getActiveTools();
+	const filtered = current.filter((n) => !spec.names.has(n));
+
+	if (filtered.length === current.length) return;
+
+	pi.setActiveTools(filtered);
+	pi.appendEntry(spec.persistKey, { enabled: false });
+	pi.events.emit(TOOLSET_EVENTS.changed, {
+		id: spec.id,
+		enabled: false,
+	});
+}
+
+// ---------------------------------------------------------------------------
+// Enable cascade + cycle detection (§4.4, §9)
+// ---------------------------------------------------------------------------
+
+function _enableToolset(
+	registry: Registry,
+	spec: ToolsetSpec,
+	pi: ExtensionAPI,
+	path: string[],
+): void {
+	if (path.includes(spec.id)) {
+		throw new Error(
+			`[pi-tool-masking] Cycle detected: ${[...path, spec.id].join(" \u2192 ")}`,
+		);
+	}
+
+	path.push(spec.id);
+
+	// Always cascade to dependencies first
+	if (spec.requires) {
+		for (const depId of spec.requires) {
+			const dep = registry.get(depId);
+			if (!dep) continue; // forward reference — not yet registered
+			_enableToolset(registry, dep.spec, pi, path);
+		}
+	}
+
+	// Then enable self (no-op if already fully enabled)
+	_applyEnable(spec, pi);
+
+	path.pop();
+}
+
+// ---------------------------------------------------------------------------
+// Disable reverse-cascade (§4.4, §9)
+// ---------------------------------------------------------------------------
+
+function _disableDependents(
+	registry: Registry,
+	disabledId: string,
+	pi: ExtensionAPI,
+	path: string[],
+): void {
+	for (const [id, entry] of registry) {
+		if (!entry.spec.requires?.includes(disabledId)) continue;
+
+		if (path.includes(id)) {
+			throw new Error(
+				`[pi-tool-masking] Cycle detected on disable: ${[...path, id].join(" \u2192 ")}`,
+			);
+		}
+
+		// Disable this dependent
+		_applyDisable(entry.spec, pi);
+
+		// Recurse to its dependents
+		_disableDependents(registry, id, pi, [...path, id]);
+	}
+}
+
+// ---------------------------------------------------------------------------
 // ToolsetImpl — concrete Toolset returned by defineToolset
 // ---------------------------------------------------------------------------
 
@@ -151,36 +250,20 @@ class ToolsetImpl implements Toolset {
 	constructor(private readonly spec: ToolsetSpec) {}
 
 	enable(pi: ExtensionAPI): void {
-		const current = new Set(pi.getActiveTools());
-		const registeredNames = [...this.spec.names].filter((n) =>
-			pi.getAllTools().some((t) => t.name === n),
-		);
-
-		// Already fully enabled — no-op
-		if (registeredNames.every((n) => current.has(n))) return;
-
-		const next = [...new Set([...current, ...registeredNames])];
-		pi.setActiveTools(next);
-		pi.appendEntry(this.spec.persistKey, { enabled: true });
-		pi.events.emit(TOOLSET_EVENTS.changed, {
-			id: this.spec.id,
-			enabled: true,
-		});
+		const registry = getRegistry();
+		const path: string[] = [];
+		_enableToolset(registry, this.spec, pi, path);
 	}
 
 	disable(pi: ExtensionAPI): void {
-		const current = pi.getActiveTools();
-		const filtered = current.filter((n) => !this.spec.names.has(n));
+		const registry = getRegistry();
+		const path: string[] = [this.spec.id];
 
-		// Already fully disabled — no-op
-		if (filtered.length === current.length) return;
+		// Disable self
+		_applyDisable(this.spec, pi);
 
-		pi.setActiveTools(filtered);
-		pi.appendEntry(this.spec.persistKey, { enabled: false });
-		pi.events.emit(TOOLSET_EVENTS.changed, {
-			id: this.spec.id,
-			enabled: false,
-		});
+		// Cascade to dependents (toolsets whose requires contains this one's id)
+		_disableDependents(registry, this.spec.id, pi, path);
 	}
 
 	isEnabled(pi: ExtensionAPI): boolean {
