@@ -407,6 +407,28 @@ just wrote — same final state, no double-emit, no race. This is what
 eliminates the current "portal's `session_start` must fire before
 search's" ordering constraint.
 
+**Restore never persists a default fallback.** When restore resolves a
+toolset with *no* branch entry to `spec.defaultEnabled`, it applies the
+resolved state and emits `changed` — but it does **not** call
+`appendEntry`. Only an explicit `enable()`/`disable()` persists an entry
+(including a companion-mirror call like `searchToolset.disable(pi)`,
+which is an explicit toggle action, not a default persistence). The
+persist record is an *override*, and a toolset with no entry is
+*unoverridden*: its default is recomputed from `spec.defaultEnabled`
+(resolved by the consumer from config at `defineToolset` time) on every
+restore, so a config-default edit takes effect on the next entry-less
+restore instead of being shadowed by a stale persisted fallback.
+
+This is what makes the `changed`/`restored` split load-bearing across
+`/resume` and `/fork`, not just on a cold `session_start`. If restore
+persisted the default, the *first* `session_start` would emit `changed`
+(good), but every subsequent `session_tree` would find an entry and emit
+`restored` — and the §10.1 "fresh config off → search mirrors → off"
+row silently breaks on the second fork: `portal.web` emits `restored`,
+the companion mirror listens on `changed` only, and `web-search` stays
+live despite `browserToggle: false`. Keeping the default unpersisted
+holds the §10.1 matrix uniformly across every restore path.
+
 This replaces portal's current `setSearchSlot()` reach into search's
 status slot: portal emits nothing, search registers its own `search.web`
 toolset, co-activates it by listening for `changed` on `portal.web`, and
@@ -532,15 +554,32 @@ calls one extra `appendEntry` — negligible cost.
 Each toolset restores from its own `toolset-state:<id>` entry. A toolset
 *with* an entry always restores that entry's `enabled`, regardless of the
 default-resolution mode (§4.5) — the mode only affects toolsets with *no*
-entry. Portal's restore does not depend on host's `session_start` handler
-firing first, and vice versa. The only cross-*extension* observer is
-search, which co-activates its own `search.web` toolset off `portal.web`'s
-`changed` event and renders its glyph off `search.web`'s own
-`changed`/`restored` events (§10.1) — so neither depends on the other's
-`session_start` handler firing first, eliminating the current
-portal-`session_start`-vs-search-`session_start` race. (Portal also
-listens for its own toolset events to render its `browser` glyph, but
-that is a same-extension observer, not a cross-extension one.)
+entry. A toolset with *no* entry resolves to `spec.defaultEnabled`, emits
+`changed`, and does **not** persist (§6: restore never persists a
+default fallback). Portal's restore does not depend on host's
+`session_start` handler firing first, and vice versa. The only
+cross-*extension* observer is search, which co-activates its own
+`search.web` toolset off `portal.web`'s `changed` event and renders its
+glyph off `search.web`'s own `changed`/`restored` events (§10.1) — so
+neither depends on the other's `session_start` handler firing first,
+eliminating the current portal-`session_start`-vs-search-`session_start`
+race. (Portal also listens for its own toolset events to render its
+`browser` glyph, but that is a same-extension observer, not a
+cross-extension one.)
+
+**`session_tree` vs today's code.** The current `browser-toggle.ts`
+`session_tree` handler calls only `restoreFromBranch` and is a no-op on
+an entry-less branch (tools stay in their current in-memory state). The
+library's restore instead *always* resolves — entry or recomputed
+default — and emits. On an entry-less branch (e.g. a fresh fork that
+didn't inherit entries) this applies the config default where today it
+is a no-op. This is an intended improvement, not a regression: an
+unoverridden toolset converges to `spec.defaultEnabled` on every branch,
+and because the default is not persisted (§6), the next `/resume` of an
+*unoverridden* branch still recomputes fresh — config-default edits
+remain effective across forks. An *overridden* branch (one that wrote
+an explicit toggle) restores that override as `restored`, unchanged
+from today's semantics.
 
 ## 8. No legacy persistence migration
 
