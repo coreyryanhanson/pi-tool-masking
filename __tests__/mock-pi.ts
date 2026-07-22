@@ -27,6 +27,8 @@ export class MockPI implements Partial<ExtensionAPI> {
 	private _entries: CustomEntryRecord[] = [];
 	private _sessionEntries: SessionEntry[] = [];
 	private _eventEmitter = new EventEmitter();
+	private _handlers = new Map<string, Array<(...args: any[]) => void>>();
+	private _eventBus: EventBus | null = null;
 
 	// --- Tool management ---
 
@@ -88,25 +90,48 @@ export class MockPI implements Partial<ExtensionAPI> {
 
 	// --- Events ---
 
-	on: ExtensionAPI["on"] = (_event: any, _handler: any) => {
-		// ponytail: no-op stub for Sprint 0. Sprint 1's defineToolset calls
-		// pi.on("session_start", ...) and pi.on("session_tree", ...) to register
-		// restore handlers. When the tests need to capture those registrations,
-		// this must store handlers keyed by event name.
-	};
+	on(event: any, handler: any): void {
+		const key = String(event);
+		if (!this._handlers.has(key)) {
+			this._handlers.set(key, []);
+		}
+		this._handlers.get(key)!.push(handler);
+	}
 
 	get events(): EventBus {
-		return {
-			emit: (channel: string, data: unknown) => {
-				this._eventEmitter.emit(channel, data);
-			},
-			on: (channel: string, handler: (data: unknown) => void) => {
-				this._eventEmitter.on(channel, handler);
-				return () => {
-					this._eventEmitter.off(channel, handler);
-				};
-			},
-		};
+		if (!this._eventBus) {
+			this._eventBus = {
+				emit: (channel: string, data: unknown) => {
+					this._eventEmitter.emit(channel, data);
+				},
+				on: (channel: string, handler: (data: unknown) => void) => {
+					this._eventEmitter.on(channel, handler);
+					return () => {
+						this._eventEmitter.off(channel, handler);
+					};
+				},
+			};
+		}
+		return this._eventBus;
+	}
+
+	/** Check if a handler was registered for a lifecycle event (session_start, session_tree, etc.). */
+	hasHandler(event: string): boolean {
+		return (this._handlers.get(event)?.length ?? 0) > 0;
+	}
+
+	/** Return how many handlers are registered for a given event. */
+	handlerCount(event: string): number {
+		return this._handlers.get(event)?.length ?? 0;
+	}
+
+	/** Fire a lifecycle event (session_start, session_tree) to registered handlers. */
+	fireLifecycleEvent(event: string): void {
+		const handlers = this._handlers.get(event) ?? [];
+		const ctx = this.createContext();
+		for (const h of handlers) {
+			h({}, ctx);
+		}
 	}
 
 	/** Direct emit for tests that need to simulate events. */
