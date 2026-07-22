@@ -1,13 +1,17 @@
 # pi-tool-masking — Implementation Plan
 
 > Source of truth: [`design.md`](./design.md). This plan operationalizes it.
-> Status: draft (pre-implementation).
+> Status: **library complete** (Sprints 0–4 + the review-fix pass, shipped as
+> `pi-tool-masking@1.0.0` on the `initial-commit` branch). Consumer migration
+> (Sprints 5–8, in the `pi-lean-dimension` monorepo) is still pending.
 
 ## Scope & sequencing
 
-**In scope:** build the `pi-tool-masking` library (in this repo, `initial-commit`
-branch), then migrate **`main`** of the `pi-lean-dimension` monorepo (portal +
-search) onto it, and cut the `0.3.x` release.
+**Done in this repo:** built the `pi-tool-masking` library (`initial-commit`
+branch), then ran a review and applied the documented fixes.
+
+**Pending (in the `pi-lean-dimension` monorepo):** migrate **`main`**
+(portal + search) onto the library and cut the `0.3.x` release.
 
 **Out of scope (host):** `pi-lean-host` is *not* migrated in this plan. The
 `feat/pi-lean-host` branch is used only as (a) a code reference when porting
@@ -22,23 +26,24 @@ one.
 
 ### Repos & branches at a glance
 
-| Repo | Branch | Role |
-|------|--------|------|
-| `pi-tool-masking` (this repo) | `initial-commit` | Library implementation |
-| `pi-lean-dimension` (monorepo) | `main` | Portal + search migration → `0.3.0` |
-| `pi-lean-dimension` (monorepo) | `feat/pi-lean-host` | Reference + rebase check only |
+| Repo | Branch | Role | Status |
+|------|--------|------|--------|
+| `pi-tool-masking` (this repo) | `initial-commit` | Library implementation | ✅ done (`1.0.0`) |
+| `pi-lean-dimension` (monorepo) | `main` | Portal + search migration → `0.3.0` | ⏳ pending |
+| `pi-lean-dimension` (monorepo) | `feat/pi-lean-host` | Reference + rebase check only | ⏳ pending |
 
 ### Versioning
 
 - Library: `pi-tool-masking` ships `1.0.0` (stable v1 API surface per §5; the
   persist schema and `DefaultResolutionMode` are frozen from v1 per §4.5/§7).
-- Consumers: portal + search + dimension bump `0.2.4 → 0.3.0` and add
+  **Done.**
+- Consumers (pending): portal + search + dimension bump `0.2.4 → 0.3.0` and add
   `pi-tool-masking` as a hard `dependency` (`^1.0.0`).
 - Host (later, out of scope): `0.4.0` when it migrates.
 - Lockstep across the four repos via the monorepo's `scripts/sync-versions.js`
   discipline (extended to cover the new external dep — see Sprint 7).
 
-### Current main-branch baseline (verified)
+### Current main-branch baseline (verified, still the migration starting point)
 
 - `packages/pi-lean-portal/browser-toggle.ts` — 497 lines, owns toggle +
   restore + `setSearchSlot` reach-through + `SIBLING_TOOL_NAMES`.
@@ -52,271 +57,114 @@ one.
 
 ---
 
-## Sprint 0 — Library scaffolding
+## Completed — Sprints 0–4 (library)
 
-**Repo:** `pi-tool-masking`, `initial-commit` branch.
-**Goal:** a loadable, testable TypeScript package with the public type surface
-from §5 declared (bodies can be stubs), so Sprint 1–4 fill it in against a
-stable shape.
+All four library sprints shipped on the `initial-commit` branch. `npm test` is
+green: **86 tests across 2 files** (`core.test.ts`, `registry-convergence.test.ts`).
+What each sprint delivered:
 
-**Work:**
+### Sprint 0 — Library scaffolding ✅
 
-1. `package.json` — `name: "pi-tool-masking"`, `version: "1.0.0"`, `type:
-   "module"`, no `pi` manifest / no default factory (it is a library, §1/§14),
-   `keywords` **without** `pi-package` (§14 — not gallery-marketed). `devDependencies`:
-   `vitest`, `@earendil-works/pi-coding-agent` (for the `ExtensionAPI` type),
-   `@types/node`.
-2. `tsconfig.json` mirroring the monorepo's strict flags
-   (`exactOptionalPropertyTypes`, `noUncheckedIndexedAccess`, `module:
-   "nodenext"`, `isolatedModules`, `moduleDetection: "force"`,
-   `noUncheckedSideEffectImports`, `noEmit: true`) — the §5 doc calls out
-   `exactOptionalPropertyTypes` specifically for the conditional-spread pattern.
-3. `index.ts` exporting the §5 surface as stubs: `ToolsetSpec`, `Toolset`,
-   `ToolsetChangedEvent`, `DefaultResolutionMode`, `TOOLSET_EVENTS`,
-   `defineToolset`, `setDefaultResolutionMode`, `getDefaultResolutionMode`,
-   `readMergedSettings`. No bodies yet beyond `throw new Error("not
-   implemented")` / `return "exclusion"`.
-4. `__tests__/` dir with a `mock-pi.ts` harness: a `MockPI` implementing
-   `ExtensionAPI`'s masking-relevant subset — `setActiveTools` / `getActiveTools`
-   / `getAllTools` (returns `ToolInfo[]` objects `{ name, description, ... }`,
-   matching the real `ExtensionAPI.getAllTools()` return type — **not** plain
-   strings) / `appendEntry` (records writes keyed by `customType`) / `on` /
-   `events` (a real Node `EventEmitter` stood up as the `EventBus`).
-   `registerTool` so `getAllTools` can be populated. This is the §12 MockPI.
+A loadable, source-only TypeScript package (`package.json`: `name:
+"pi-tool-masking"`, `version: "1.0.0"`, `type: "module"`, no default factory,
+no `extensions/` manifest, no `pi-package` keyword). `tsconfig.json` mirrors
+the monorepo's strict flags (`exactOptionalPropertyTypes`,
+`noUncheckedIndexedAccess`, `module: "nodenext"`, `isolatedModules`,
+`moduleDetection: "force"`, `noUncheckedSideEffectImports`, `noEmit: true`).
+`index.ts` exports the full §5 surface. The test harness `__tests__/mock-pi.ts`
+ships a `MockPI` implementing the masking-relevant `ExtensionAPI` subset:
+`setActiveTools` / `getActiveTools` / `getAllTools` (returns `ToolInfo[]`
+objects, not strings) / `appendEntry` (records writes keyed by `customType`) /
+`on` / `events` (a real Node `EventEmitter`) / `registerTool`, plus
+`sessionManager.getBranch()` returning the recorded `SessionEntry[]`. Restore
+reads via `ctx.sessionManager.getBranch()` — `ExtensionAPI` has no `readEntry`
+counterpart to `appendEntry` — so the mock exposes `getBranch()`, not a
+fictional `readEntry`.
 
-   **Restore reads via `ctx.sessionManager.getBranch()`, not `pi.readEntry`.**
-   `ExtensionAPI` has no read counterpart to `appendEntry` (verified in pi's
-   `types.d.ts`); the real restore path reads entries via the `ctx` parameter
-   from the event handler signature `(event, ctx) => ...` —
-   `ctx.sessionManager.getBranch()` returns `SessionEntry[]` with
-   `type` / `customType` / `data` fields (matching the existing
-   `browser-toggle.test.ts` mock at `sessionManager: { getBranch: vi.fn(...) }`).
-   The MockPI therefore exposes a `sessionManager.getBranch()` that returns the
-   recorded entries, **not** a fictional `pi.readEntry`.
-5. `npm test` runs (a single trivial placeholder test) green.
+### Sprint 1 — Core primitives ✅
 
-**Acceptance criteria:**
+`defineToolset` / `enable` / `disable` / `isEnabled` with the §9
+peer-composition invariant and the §6.1 globalThis registry + collision policy.
+Registry on `globalThis.__piToolMaskingRegistry`, idempotent init, keyed by
+`spec.id`. Collision policy throws on a duplicate `spec.id` (different spec)
+and on a duplicate `persistKey`, but is **idempotent by content** for
+`deepEqual`-identical re-registration (the `/reload`/`/resume` case — returns
+the existing handle, no throw). `enable` is additive
+(`[...new Set([...current, ...registered])]`, `registered = spec.names ∩
+getAllTools()`); `disable` filters `spec.names` out of `getActiveTools()` (not
+`getAllTools()`). Both idempotent. Tests: peer composition, additive-enable,
+disable-uses-getActiveTools, collision throws, idempotent re-registration,
+registry idempotency, enable/disable idempotency.
 
-- [ ] `npm test` is green with zero real tests (only the placeholder).
-- [ ] `import { defineToolset, TOOLSET_EVENTS } from "../index.js"` resolves in
-      a `.test.ts` file with no type errors under `tsc --noEmit`.
-- [ ] `package.json` has no default factory, no `extensions/` manifest, and no
-      `pi-package` keyword.
-- [ ] `MockPI` supports `setActiveTools`/`getActiveTools`/`getAllTools`
-      (returning `ToolInfo[]` objects, not strings)/`appendEntry`/
-      `sessionManager.getBranch()` (returning recorded `SessionEntry[]`)/`on`/
-      `events.emit` and is exercised by one trivial round-trip test. The mock
-      **must not** expose a `readEntry` method (none exists on `ExtensionAPI`).
+### Sprint 2 — `requires` cascade + default-resolution mode ✅
 
-**Skipped:** nothing — this is the minimum to make subsequent sprints testable.
+`enable` transitively enables `spec.requires` (graph walk with visited-stack);
+`disable` reverse-cascades to every toolset whose `requires` contains this
+one's id. Cycle detection is lazy (first graph resolution, not
+`defineToolset` time) — the walk throws on a stack revisit, naming the cycle
+path (`A → B → C → A`). Forward-references are allowed (a `requires` id not yet
+registered is skipped until it appears). `setDefaultResolutionMode` /
+`getDefaultResolutionMode` store the library-level mode in globalThis state
+(default `"exclusion"`). Tests: dependency cascade (all four §9 directions),
+cycle throw with path, forward-reference, mode set/get, no-path-yields-
+`L.enabled && !B.enabled`.
 
----
+### Sprint 3 — Restore, events, `readMergedSettings` ✅
 
-## Sprint 1 — Core primitives: `defineToolset`, `enable`/`disable`, registry
+The `session_start` / `session_tree` restore handler (registered in Sprint 1,
+bodied here): per registered toolset, read `spec.persistKey` from
+`ctx.sessionManager.getBranch()`; an entry → apply its `enabled`, emit
+`restored`; no entry → resolve `spec.defaultEnabled` under exclusion mode or
+`false` under inclusion mode, apply, emit `changed`, and **do not call
+`appendEntry`** (restore never persists a default fallback, §6). Always emits
+exactly one event per toolset per restore (the always-emit invariant).
+`TOOLSET_EVENTS` (`changed`/`restored`) + `ToolsetChangedEvent` payloads with
+optional `emitMemberEvents` per-member fanout. `readMergedSettings()` merges
+global + project settings (project wins), returns `{}` on any failure, never
+throws. Tests: persistence round-trip, no-entry restore (exclusion +
+inclusion), always-emit, the `changed`/`restored` split, `emitMemberEvents`
+N+1 fanout, idempotent/last-writer-wins restore, `session_tree` restore,
+`readMergedSettings` merge + error handling, default-resolution entry-vs-
+no-entry.
 
-**Goal:** the peer-composition invariant (§9) and the globalThis registry
-(§6.1) with its collision policy, behind the §5 API.
+### Sprint 4 — Library test suite complete (§12) ✅
 
-**Work:**
-
-1. `defineToolset(pi, spec)`: validate `spec.id` / `spec.persistKey` are
-   non-empty; record `{ spec, toolset }` in the registry; return a `Toolset`
-   with `enable` / `disable` / `isEnabled`. Register the `session_start` /
-   `session_tree` restore handler here (body filled in Sprint 3, registered now
-   so ordering is correct — §6 capture-ordering note).
-2. **Registry on `globalThis.__piToolMaskingRegistry`** (§6.1): idempotent init,
-   keyed by `spec.id`. **Collision policy (v1):** `defineToolset` throws on a
-   duplicate `spec.id` **and** on a duplicate `persistKey` (§6.1) — **except**
-   when the duplicate is an idempotent re-registration of the same toolset from
-   the same source (see §6.1's reload/resume-safe re-registration rule, below).
-   Error message names the colliding id/key.
-
-   **Reload/resume-safe re-registration.** The registry lives on `globalThis`,
-   which pi does **not** clear on `/reload` or `/resume` (verified in pi's
-   `agent-session.js` reload path). Both reload (jiti re-evaluates the module
-   and re-invokes every factory) and `/resume` (re-invokes the factory against
-   the cached module) call `defineToolset` again with the same `spec.id`. A
-   naive throw-on-duplicate would break both paths. The current `browser-toggle`
-   code dodges this with module-level state + an explicit `resetToggleModuleState()`
-   call; the library cannot, because the registry's whole purpose is to persist
-   across module copies. Resolution: **`defineToolset` is idempotent by content**
-   — a second call with the same `id` + a `deepEqual`-identical `spec` is a
-   no-op that returns the existing `Toolset` handle (the reload/resume case,
-   no edit in between); a second call with the same `id` + a changed `spec`
-   replaces the entry and warns (reload after an edit). A genuine cross-
-   extension same-`id` collision (two different extensions, same `id`,
-   non-`deepEqual` specs) still throws — that is the programmer error the
-   collision guard exists for. This keeps the registry persistent for its
-   cross-instance purpose without making `/reload` or `/resume` fatal. (See
-   design §6.1 for the full rationale and the `deepEqual` choice.)
-3. `enable(pi)`: additive — `[...new Set([...current, ...registered])]` where
-   `registered = spec.names ∩ pi.getAllTools()` (tolerates unregistered names,
-   §4.1). Idempotent: no-op + no emit if already in target state.
-4. `disable(pi)`: filters `spec.names` out of `pi.getActiveTools()` — **not**
-   `getAllTools()` (§9). Idempotent.
-5. `isEnabled(pi)`: any member of `spec.names` present in `pi.getActiveTools()`
-   (matches today's `isBrowserEnabled` partial semantics).
-6. `appendEntry` write on every `enable`/`disable` call: `spec.persistKey` →
-   `{ enabled }`. (Restore reads it in Sprint 3.)
-
-**Acceptance criteria:**
-
-- [ ] **Peer composition (§9 canonical test):** toolsets A, B both enabled;
-      `disable(A)` → A's tools gone, B's tools remain; `disable(B)` → A's tools
-      are **not** re-activated. One test, in this repo.
-- [ ] `enable` is additive and never drops tools another toggle removed
-      (assert against a MockPI with a third disabled toolset's members absent).
-- [ ] `disable` uses `getActiveTools()`, not `getAllTools()` — verified by a
-      test that pre-disables a peer toolset and asserts `disable` does not
-      revive it.
-- [ ] Duplicate `spec.id` from a *different* spec throws; duplicate
-      `persistKey` throws; distinct ids/keys register cleanly.
-- [ ] **Idempotent re-registration:** a second `defineToolset` with the same
-      `id` + a `deepEqual`-identical `spec` returns the existing handle and
-      does **not** throw (simulates `/reload` / `/resume` re-entry); a second
-      call with the same `id` + a changed `spec` replaces and warns.
-- [ ] `globalThis.__piToolMaskingRegistry` is initialized idempotently (assert
-      the same object survives a second `defineToolset` in the same process).
-- [ ] Idempotent: `enable` then `enable` writes once and emits once; same for
-      `disable`.
-- [ ] `globalThis.__piToolMaskingRegistry` is initialized idempotently (assert
-      the same object survives a second `defineToolset` in the same process).
-
-**Skipped:** `requires` cascade (Sprint 2), restore + events (Sprint 3), the
-multi-instance convergence test (Sprint 4 — needs the cache-clear harness).
+The novel **globalThis registry convergence test**
+(`__tests__/registry-convergence.test.ts`): simulates two isolated module
+loads against one shared `globalThis` — registers a toolset from copy A,
+asserts copy B's registry enumerates it. This is the one mechanism that cannot
+be verified by reading code alone. All §12 bullets are covered in this repo;
+no invariant test is duplicated in a consumer repo (consumers not yet
+migrated — asserted in Sprints 5/6).
 
 ---
 
-## Sprint 2 — `requires` cascade + default-resolution mode
+## Completed — Review-fix pass
 
-**Goal:** the dependency primitive (§4.4) and the mode bit (§4.5).
+After Sprints 0–4, a review found five issues; all were addressed. The
+normative rationale lives in design §6 (the `/reload`-safety pitfall +
+event-identity dedup) and §7.1 (restore-disable filter + no-cascade-on-
+restore); this section is just a compact record of the changes:
 
-**Work:**
+1. **(HIGH) Restore handler not `/reload`-safe.** Dropped the stale
+   `globalThis` boolean guard; restore now dedups by event-object identity
+   at runtime and re-registers on every `defineToolset`. Regression test
+   added (a second `MockPI` without clearing `globalThis`). See design §6.
+2. **(LOW) Restore disable-branch inconsistent with `_applyDisable`.**
+   `_applyRestoreToolset`'s disable branch now filters by `spec.names.has(n)`
+   (matching live `disable`), not `registeredNames`. Test added. See §7.1.
+3. **(LOW) "Cycle on disable" test didn't call disable.** Renamed the
+   mislabeled enable-cycle test; added a real disable-cycle test asserting
+   `toThrow("Cycle detected on disable")`.
+4. **(NIT) Restore skips the `requires` cascade (by design).** Added a
+   `// ponytail:` comment naming the reliance. No behavior change. See §7.1.
+5. **(NIT) Path-tracking style split.** No action (cosmetic).
 
-1. `enable(pi)` now transitively `enable`s every `spec.requires` id before
-   applying its own change, via a graph walk with a visited-stack.
-2. `disable(pi)` cascades `disable` to every registered toolset whose `requires`
-   contains this one's id (and transitively).
-3. **Cycle detection (§4.4):** the walk throws on a revisit in the current
-   stack — `Error` naming the cycle path (`A → B → C → A`). Lazy: detected at
-   first graph resolution, not at `defineToolset` time (forward-references
-   allowed). No separate validation pass.
-4. `setDefaultResolutionMode(pi, mode)` / `getDefaultResolutionMode(pi)` —
-   library-level, persisted to in-memory state (not `appendEntry`; the mode is
-   runtime policy, not conversation state). Default `"exclusion"`.
-
-**Acceptance criteria:**
-
-- [ ] **Dependency cascade (§9 canonical test):** `L requires [B]`; `enable(L)`
-      → B enabled; `disable(B)` → L disabled; `enable(L)` while B independently
-      disabled re-enables B. No path yields `L.enabled && !B.enabled`.
-- [ ] Cycle throws with the path in the message; the throw is raised on the
-      first `enable`/`disable` that traverses the cycle, not at `defineToolset`.
-- [ ] Forward-reference: `defineToolset(A)` with `requires: ["B"]` before B is
-      registered does **not** throw; `enable(A)` after B registers works.
-- [ ] **Mode test (§12):** toolset A (entry, enabled) + toolset B (no entry);
-      exclusion → B defaults on; inclusion → B defaults off; A's entry honored
-      in both. (Uses the restore path from Sprint 3 — wire the assertion once
-      Sprint 3 lands, but the mode setter/getter is testable now against the
-      in-memory default.)
-
-**Skipped:** restore wiring (Sprint 3) — the mode is settable now, its
-restore-path effect is asserted once restore exists.
+`npx tsc --noEmit` clean; `npx vitest run` green (86 tests).
 
 ---
 
-## Sprint 3 — Restore, events, `readMergedSettings`
-
-**Goal:** conversation-state ownership (§7), the `changed`/`restored` event
-split (§6), and the shared settings reader (§5).
-
-**Work:**
-
-1. **Restore handler** (registered in Sprint 1, bodied now): on
-   `session_start` and `session_tree`, for each registered toolset:
-   - read `spec.persistKey` from branch state via the event handler's `ctx` —
-     `ctx.sessionManager.getBranch()` returns `SessionEntry[]`; filter by
-     `entry.customType === spec.persistKey` and read `entry.data` (this is the
-     real `ExtensionAPI` read path; `pi` itself has no `readEntry` method —
-     see Sprint 0's MockPI note);
-   - **entry exists** → apply its `enabled`, emit `restored` (one group-level
-     event; member fanout if `emitMemberEvents`);
-   - **no entry** → resolve to `spec.defaultEnabled` under exclusion mode, or
-     `false` under inclusion mode (§4.5); apply; emit `changed`; **do not call
-     `appendEntry`** (§6 — restore never persists a default fallback).
-   - Always emits exactly one event per toolset per restore (the always-emit
-     invariant, §6). No skip-on-equals-default.
-2. **`TOOLSET_EVENTS`** constant + `ToolsetChangedEvent` payloads emitted from
-   `enable`/`disable` (`changed`) and restore (`changed` | `restored`). Group
-   event always fires; `emitMemberEvents` adds per-member fanout with
-   `event.member` set.
-3. **`readMergedSettings()`** export (§5): reads `~/.pi/agent/settings.json` +
-   project `.pi/settings.json`, project overrides global, returns `{}` on any
-   failure. The library never calls this itself (restore uses
-   `spec.defaultEnabled`); it is a utility so consumers delete their
-   `settings-reader.ts` copies.
-
-**Acceptance criteria:**
-
-- [ ] **Persistence round-trip (§12):** `disable` writes `{ enabled: false }`
-      under `persistKey`; a subsequent restore reads it, applies false, emits
-      `restored`.
-- [ ] **No-entry restore (exclusion):** entry-less toolset with
-      `defaultEnabled: true` → applies on, emits `changed`, does **not** write
-      `appendEntry`. Assert the entry count is unchanged after restore.
-- [ ] **No-entry restore (inclusion):** same toolset → applies off, emits
-      `changed`, no `appendEntry`.
-- [ ] **Always-emit:** restore emits exactly one event per registered toolset,
-      even when the resolved state equals the current in-memory state.
-- [ ] `changed` fires on `enable`/`disable` + default-fallback restore;
-      `restored` fires **only** on persisted-entry restore. A test asserts the
-      split by inspecting event type + payload.
-- [ ] `emitMemberEvents: true` produces N+1 events (1 group + N members) on a
-      toggle; `false` produces 1. Members carry `event.member`.
-- [ ] `readMergedSettings()` merges global + project (project wins), returns
-      `{}` on missing/malformed files, never throws.
-- [ ] Restore is idempotent / last-writer-wins: a second restore on the same
-      branch produces the same state and does not double-write.
-
-**Skipped:** the multi-instance globalThis convergence test (Sprint 4) and the
-full §10.1 companion-matrix assertion (Sprint 6, after search migrates).
-
----
-
-## Sprint 4 — Library test suite complete (§12)
-
-**Goal:** every test §12 names lives in this repo, including the novel
-globalThis convergence test.
-
-**Work:**
-
-1. **GlobalThis registry convergence test (§12, required):** simulate two
-   isolated module loads against one shared `globalThis` — clear the module
-   cache, re-import the library under a fresh jiti/require context, register a
-   toolset from copy A, assert copy B's registry enumerates it. This is the one
-   mechanism that cannot be verified by reading code alone.
-2. Consolidate Sprint 1–3 tests into the §12 shape: peer composition,
-   dependency cascade, cycle throw, persistence round-trip, default-resolution
-   mode, always-emit/split.
-3. Add a `demo()`/self-check or one focused test for the §9 invariant line
-   (the `getActiveTools`-not-`getAllTools` disable) so the single load-bearing
-   rule has its own failing-if-broken check.
-
-**Acceptance criteria:**
-
-- [ ] The globalThis convergence test passes and fails deliberately if the
-      registry is moved to module-level state (verify by temporarily reverting
-      and watching it go red).
-- [ ] `npm test` in this repo is green and covers every §12 bullet.
-- [ ] No invariant test is duplicated in a consumer repo (the §12
-      "one home for the invariant" rule) — this is a review check, asserted in
-      Sprint 5/6 by confirming portal/search tests are thin integration only.
-
-**Skipped:** consumer-side tests (Sprint 5/6).
-
----
-
-## Sprint 5 — Portal migration (monorepo `main`)
+## Pending — Sprint 5 — Portal migration (monorepo `main`)
 
 **Repo:** `pi-lean-dimension`, `main` branch.
 **Goal:** `browser-toggle.ts` collapses onto the library per §10.
@@ -372,11 +220,9 @@ globalThis convergence test.
 - [ ] No portal test reaches into the library's internal registry — it uses
       only the public API.
 
-**Skipped:** host migration (out of scope); search migration (Sprint 6).
-
 ---
 
-## Sprint 6 — Search migration (monorepo `main`)
+## Pending — Sprint 6 — Search migration (monorepo `main`)
 
 **Goal:** search owns its own `search.web` toolset and co-activates off
 `portal.web`'s `changed` event per §10/§10.1.
@@ -418,12 +264,9 @@ globalThis convergence test.
 - [ ] `session_shutdown` still clears the `search` glyph.
 - [ ] `npx vitest run packages/pi-lean-search` is green.
 
-**Skipped:** the deferred `companions: string[]` primitive (§10.1 — one group
-today does not justify it).
-
 ---
 
-## Sprint 7 — Version bump, dependency wiring, release prep (`0.3.0`)
+## Pending — Sprint 7 — Version bump, dependency wiring, release prep (`0.3.0`)
 
 **Goal:** cut the `0.3.x` release with `pi-tool-masking` as a hard dep.
 
@@ -459,12 +302,9 @@ today does not justify it).
 - [ ] CHANGELOG documents the `session_tree` entry-less-branch behavior change
       and the no-legacy-migration stance.
 
-**Skipped:** the actual `npm run publish` (release execution is a separate
-human step); host release (0.4.x, out of scope).
-
 ---
 
-## Sprint 8 — Verify `feat/pi-lean-host` rebases cleanly
+## Pending — Sprint 8 — Verify `feat/pi-lean-host` rebases cleanly
 
 **Goal:** confirm the host branch is not blocked by the main migration — it
 should rebase onto the updated `main` with only host-package conflicts
@@ -495,22 +335,22 @@ resolvable by reference to the same library.
       compiles (tsc clean) — it is the reference for the eventual 0.4.x
       migration, unchanged in behavior.
 
-**Skipped:** the host migration itself (0.4.x, out of scope per the plan).
-
 ---
 
 ## Cross-cutting acceptance (whole plan)
 
-- [ ] The peer-composition invariant (§9) and the `requires` cascade (§4.4)
-      have **exactly one** test home: `pi-tool-masking`'s repo. No consumer
-      re-tests them.
+- [x] The peer-composition invariant (§9) and the `requires` cascade (§4.4)
+      have **exactly one** test home: `pi-tool-masking`'s repo. (Library side
+      done; confirmed no consumer duplication once Sprints 5/6 land.)
 - [ ] `rg "web-toggle-state|api-toggle-state"` across the monorepo `main`
       returns only CHANGELOG/history references — the old persist keys are gone
       from live code.
 - [ ] `rg "settings-reader"` across the monorepo `main` returns nothing — both
       copies are deleted, replaced by `readMergedSettings`.
-- [ ] `globalThis.__piToolMaskingRegistry` is the only cross-instance shared
+- [x] `globalThis.__piToolMaskingRegistry` is the only cross-instance shared
       surface; toggle actuation remains a static import (§6.1 boundary).
+- [x] The restore handler is `/reload`-safe via event-object-identity dedup
+      (review Finding 1) — verified by the regression test.
 - [ ] `npm test` is green on `main` at `0.3.0` and on `feat/pi-lean-host`
       rebased onto it.
 

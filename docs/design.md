@@ -1,7 +1,9 @@
 # pi-tool-masking — Design Document
 
-> Status: draft (pre-implementation). API is not yet frozen; this document
-> is the source of truth until v1.0.0.
+> Status: v1.0.0 library implemented (Sprints 0–4 + the review-fix pass).
+> The API surface (§5), persist schema (§7), and `DefaultResolutionMode`
+> (§4.5) are frozen. Consumer migration (portal/search onto the library)
+> is still pending — see `implementation-plan.md`.
 
 ## 1. Purpose
 
@@ -473,6 +475,33 @@ companion-vs-`requires` distinction.
 > forks/resumes where `ui` is already captured). See §10 for the concrete
 > shape in both the portal and search blocks.
 
+> **Restore-handler dedup (and the `/reload` pitfall it fixes).** Every
+> `defineToolset` call registers a `session_start` + `session_tree` restore
+> handler on its `pi` (one per toolset per extension — cheap). Restore is
+> deduped **at runtime by event-object identity**, not at registration
+> time: the runner passes one shared `event` reference to every
+> extension's handler in a single `emit()` call, so the first handler
+> stamps `globalThis.__piToolMaskingLastRestoreEvent = event` and runs
+> restore; the remaining handlers see the same `event` and no-op. Each
+> `/reload` (and each `session_tree`/resume/fork emit) constructs a fresh
+> event object, so restore re-runs against the fresh `pi` with no stale
+> guard. The handler closes over the *current* `pi`, so a post-reload
+> handler captures the fresh, non-stale API.
+>
+> This is the fix for a real pitfall caught in review: an earlier version
+> guarded registration with a boolean on `globalThis`
+> (`__piToolMaskingRestoreHandlerRegistered`). On `/reload`, pi discards
+> the old `Extension` and builds a fresh `ExtensionAPI` per extension but
+> does **not** clear `globalThis` — so the stale `true` survived, the
+> fresh extension's `defineToolset` skipped handler registration, and
+> `session_start` dispatched to an empty handler list: **restore silently
+> never ran.** Dedup-by-event-identity makes the guard runtime instead of
+> registration-time, so a fresh extension always registers a fresh handler
+> and a fresh event always re-runs restore. This is distinct from the
+> registry's own reload-safety (§6.1, idempotent-by-content
+> re-registration) — that governs the *registry*; this governs the
+> *restore handler*. The two mechanisms are independent and both required.
+
 `emitMemberEvents` is the one forward-compat knob for the downstream
 picker (§13): when on, a group toggle additionally fans out to one
 `changed` event per member tool (with the member name in `event.member`)
@@ -661,6 +690,18 @@ produce an inconsistent restored state either. Register toolsets in
 dependency order (base before dependent: `portal.web` before
 `portal.learn`) as defense-in-depth — it is cheap and keeps the restore
 trace readable — but the invariant does not depend on it.
+
+Two restore-path details, both deliberate and verified by tests: (1)
+restore applies each toolset's entry **independently and does NOT re-run
+the `requires` cascade** — persisted state is already consistent (the
+live cascade made any incoherent combo unreachable), so re-cascading on
+restore would only double-toggle and break the independence above. (2)
+restore's disable branch filters active tools by `spec.names.has(n)` —
+the full spec membership, not just the registered subset — so it matches
+live `disable()` (`_applyDisable`, §9): an unregistered spec member that
+is somehow active is removed on restore exactly as a manual `disable`
+would remove it. The enable-side filter-to-registered stays (you cannot
+activate an unregistered tool, §4.1).
 
 ## 8. No legacy persistence migration
 
