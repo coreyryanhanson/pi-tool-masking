@@ -1,42 +1,60 @@
 # pi-tool-masking — Implementation Plan
 
 > Source of truth: [`design.md`](./design.md). This plan operationalizes it.
-> Status: **library complete** (Sprints 0–4 + the review-fix pass, shipped as
-> `pi-tool-masking@1.0.0` on the `initial-commit` branch). Consumer migration
-> (Sprints 5–8, in the `pi-lean-dimension` monorepo) is still pending.
+> Status: **library code complete** (Sprints 0–4 + the review-fix pass) but
+> **not yet published**. The library has not shipped — it made it through the
+> Sprints but remains under review. We will not publish until the later
+> stages (consumer migration + manager) are done. A minimum implementation of
+> the manager extension will be built first, giving us flexibility to debug
+> issues before locking ourselves to the API.
 
 ## Scope & sequencing
 
 **Done in this repo:** built the `pi-tool-masking` library (`initial-commit`
-branch), then ran a review and applied the documented fixes.
+branch), then ran a review and applied the documented fixes. The library is
+**not published** — it exists only on the `initial-commit` branch.
+
+**Pending (manager extension, built before publishing):** a minimum
+implementation of the user-facing manager extension (§13 in design.md) will
+be built *before* the library is published. This gives us flexibility to
+debug issues against a real consumer before locking ourselves to the API.
+The manager is built in this repo (or a sibling repo) as a real pi
+extension that depends on `pi-tool-masking`, exercises the globalThis
+registry convergence, and validates the event surface — catching any
+integration bugs that the library's own MockPI tests cannot.
 
 **Pending (in the `pi-lean-dimension` monorepo):** migrate **`main`**
 (portal + search) onto the library and cut the `0.3.x` release.
 
 **Out of scope (host):** `pi-lean-host` is *not* migrated in this plan. The
 `feat/pi-lean-host` branch is used only as (a) a code reference when porting
-the shared toggle logic, and (b) a rebase target — Sprint 8 verifies it rebases
+the shared toggle logic, and (b) a rebase target — Sprint 9 verifies it rebases
 cleanly onto the updated `main`. Host's own migration ships later as `0.4.x`.
 
 **Why this order:** main has no host package, so it is the smaller, cleaner
 migration and lands the library + invariant in one place first. The host
 branch then rebases onto a main that already depends on `pi-tool-masking`, so
 its eventual migration is a single-package change rather than a foundational
-one.
+one. The manager is built before publishing so we can debug against a real
+consumer before locking ourselves to the API.
 
 ### Repos & branches at a glance
 
 | Repo | Branch | Role | Status |
 |------|--------|------|--------|
-| `pi-tool-masking` (this repo) | `initial-commit` | Library implementation | ✅ done (`1.0.0`) |
+| `pi-tool-masking` (this repo) | `initial-commit` | Library implementation | ✅ code complete, **not published** |
+| TBD (new repo) | `main` | Minimum manager extension | ⏳ to build before publishing |
 | `pi-lean-dimension` (monorepo) | `main` | Portal + search migration → `0.3.0` | ⏳ pending |
 | `pi-lean-dimension` (monorepo) | `feat/pi-lean-host` | Reference + rebase check only | ⏳ pending |
 
 ### Versioning
 
-- Library: `pi-tool-masking` ships `1.0.0` (stable v1 API surface per §5; the
+- Library: `pi-tool-masking` will ship `1.0.0` (stable v1 API surface per §5; the
   persist schema and `DefaultResolutionMode` are frozen from v1 per §4.5/§7).
-  **Done.**
+  **Not yet published** — still under review.
+- Manager: a minimum implementation built in this repo before publishing,
+  exercising the globalThis registry convergence and event surface against
+  a real pi extension lifecycle.
 - Consumers (pending): portal + search + dimension bump `0.2.4 → 0.3.0` and add
   `pi-tool-masking` as a hard `dependency` (`^1.0.0`).
 - Host (later, out of scope): `0.4.0` when it migrates.
