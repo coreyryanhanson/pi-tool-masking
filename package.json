@@ -1,0 +1,27 @@
+{
+	"name": "pi-tool-masking",
+	"version": "1.0.0",
+	"private": false,
+	"type": "module",
+	"description": "Core library for grouping pi tools into toggleable toolsets with persistent state and cross-extension events.",
+	"keywords": ["tool-masking", "pi-extension"],
+	"license": "MIT",
+	"author": "",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/coreyryanhanson/pi-tool-masking.git"
+	},
+	"scripts": {
+		"test": "vitest run",
+		"test:watch": "vitest"
+	},
+	"main": "index.ts",
+	"exports": {
+		".": "./index.ts"
+	},
+	"devDependencies": {
+		"@earendil-works/pi-coding-agent": "^0.78.0",
+		"@types/node": "^22.0.0",
+		"vitest": "^4.0.0"
+	}
+}
