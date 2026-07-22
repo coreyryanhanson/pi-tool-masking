@@ -225,6 +225,32 @@ The entire surface — keep it this small. This is a **library API**
 export interface ToolsetSpec {
   /** Stable id, e.g. "portal.web". Used in persist keys and event payloads. */
   id: string;
+  /** Human-readable name for the group as a unit, e.g. "Web Browsing".
+   *  Reuses the tool-metadata field name verbatim — `pi.registerTool()`
+   *  already takes `label` on individual tools, and `pi.getAllTools()`
+   *  returns it. Same field, same contract, so a presenter renders a
+   *  toolset row and a tool row with identical field logic. No new field
+   *  name is introduced.
+   *
+   *  The *value* is a net-new string the consumer authors for the group:
+   *  no union of member `label`s synthesizes a useful group name. The
+   *  library treats it as opaque pass-through — it never reads, branches
+   *  on, or renders it; it stores it on the registry for presenters
+   *  (picker rows, command help, the downstream manager §13).
+   *
+   *  Optional — presenters fall back to `id` (trimmed at the last `.` for
+   *  namespaced ids: `portal.web` → `web`) when absent. */
+  label?: string;
+  /** One-line description of what enabling the group does, e.g.
+   *  "Interactive browser automation: navigate, click, type, inspect."
+   *  Reuses the tool-metadata field name verbatim — same field individual
+   *  tools expose via `pi.registerTool()` / `pi.getAllTools()`.
+   *
+   *  The *value* is authored for the group (not derived from member
+   *  `description`s); the library treats it as opaque pass-through for
+   *  presenters (picker detail, command help). Optional — presenters
+   *  omit the detail line when absent. */
+  description?: string;
   /** Tool names this toolset governs. */
   names: Set<string>;
   /** Primary persistence key the toolset writes, e.g.
@@ -253,6 +279,12 @@ export interface ToolsetSpec {
    *  Default false: one group-level event per toggle. */
   emitMemberEvents?: boolean;
 }
+
+// Presenters (the manager §13, a future /toolsets command) read
+// `label`/`description` from the registry. Fallback when absent:
+//   label  → id trimmed at last '.' ("portal.web" → "web")
+//   description → omit the detail line
+// The library never renders these; it only stores and exposes them.
 
 export interface Toolset {
   enable(pi: ExtensionAPI): void;
