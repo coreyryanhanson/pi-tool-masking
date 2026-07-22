@@ -101,8 +101,7 @@ has:
 - an `id` (e.g. `"portal.web"`, `"portal.learn"`, `"host.api"`)
 - a `names` Set of tool names it governs
 - a `persistKey` (the new write key, e.g. `toolset-state:portal.web`)
-  for branch-aware state memory, plus optional `legacyPersistKeys` for
-  one-cycle migration reads from pre-extraction entry names
+  for branch-aware state memory
 - an optional `defaultEnabled` boolean — the fresh-session fallback when
   no branch entry exists. The **consumer resolves any config-file default
   at the call site** and passes the resulting boolean (see §5); the
@@ -165,7 +164,13 @@ invariant's sibling, §9):
   `enable(C)` before enabling A. Cycles are a spec error, detected lazily
   at first graph resolution (not at `defineToolset` time — `requires` may
   forward-reference a toolset registered later by another extension, so
-  the full graph is not available at any single `defineToolset` call).
+  the full graph is not available at any single `defineToolset` call). The
+  cascade's graph walk carries a visited-stack; on a revisit in the
+  current stack it throws `Error` naming the cycle path (e.g.
+  `A → B → C → A`). No separate validation pass — the walk that resolves
+  `requires` is the walk that detects it. Log-and-skip is explicitly
+  *not* used: a cycle is an incoherent spec and silent partial resolution
+  would produce wrong state.
 - `disable(B)` → cascade `disable` to every registered toolset whose
   `requires` contains `B` (and transitively, their dependents).
 
@@ -266,10 +271,6 @@ export interface ToolsetSpec {
   /** Primary persistence key the toolset writes, e.g.
    *  "toolset-state:portal.web". */
   persistKey: string;
-  /** Legacy entry names to read during the one-cycle migration window
-   *  (see §8), e.g. ["web-toggle-state"]. Generic — the library never
-   *  hardcodes consumer history. */
-  legacyPersistKeys?: string[];
   /** Fresh-session fallback when no branch entry exists. The consumer
    *  resolves any config-file default at the call site and passes the
    *  resulting boolean here — the library does not read `settings.json`
@@ -297,6 +298,12 @@ export interface ToolsetSpec {
 //   label  → id trimmed at last '.' ("portal.web" → "web")
 //   description → omit the detail line
 // The library never renders these; it only stores and exposes them.
+
+// Under `exactOptionalPropertyTypes: true` (the monorepo's setting),
+// optional fields must be OMITTED, not set to `undefined`. When a field's
+// value comes from a possibly-`undefined` variable, use conditional
+// spread rather than assigning `undefined`:
+//   defineToolset(pi, { id, names, persistKey, ...(m !== undefined && { masked: m }) });
 
 export interface Toolset {
   enable(pi: ExtensionAPI): void;
@@ -488,8 +495,7 @@ static-import consumer — uses globalThis. Clean split, proven pattern.
 
 The package owns **toolset on/off memory only**. Each toolset
 persists `{ enabled }` under its `persistKey` (the new
-`toolset-state:<id>` key), with a one-cycle legacy-read path over
-`legacyPersistKeys` (§8), and restores it on `session_start` +
+`toolset-state:<id>` key) and restores it on `session_start` +
 `session_tree`. The persist schema is stable from v1: the same `{ enabled }`
 record is read the same way under both default-resolution modes (§4.5) —
 the mode only changes the fallback for a toolset with *no* branch entry,
@@ -536,26 +542,30 @@ portal-`session_start`-vs-search-`session_start` race. (Portal also
 listens for its own toolset events to render its `browser` glyph, but
 that is a same-extension observer, not a cross-extension one.)
 
-## 8. Legacy persistence migration
+## 8. No legacy persistence migration
 
-For one release cycle, `restore()` scans the branch for both the toolset's
-`persistKey` and any `legacyPersistKeys` (e.g. `web-toggle-state`,
-`api-toggle-state`). The legacy entries were overloaded blobs
-(`{ browserToolsEnabled, learnToolsEnabled, defaultProfile }`); each
-toolset reads only the boolean that maps to its own `enabled` and ignores
-the rest (portal's `defaultProfile` is read by portal, not the library —
-§7). So `portal.web` reads `browserToolsEnabled`, `portal.learn` reads
-`learnToolsEnabled`, `host.api` reads `apiToolsEnabled`, etc. After that
-cycle the `legacyPersistKeys` array is cleared from each consumer's spec
-and the legacy read path goes dead.
+There is **no** legacy read path. Branches created before 0.3.0 (the
+release that introduces `pi-tool-masking`) restore tools to
+`spec.defaultEnabled` and portal's `defaultProfile` to the fresh-session
+default. The genuinely valuable persisted state — cookies, localStorage,
+named profiles, `browser-state/<profile>/storage-state.json` — lives in
+`~/.pi/agent/pi-lean-portal/browser-state/`, completely outside the old
+`web-toggle-state` / `api-toggle-state` entries, and is unaffected.
 
-```ts
-// ponytail: legacy web-toggle-state / api-toggle-state read path.
-// Drop in the release after portal+host ship the new persistKey.
-```
+What an old branch loses on first `/resume` under 0.3.0 is exactly two
+one-toggle corrections: tool on/off memory (tools return to the config
+default) and `defaultProfile` (returns to session/none). No cookies
+evaporate, no named profile is deleted. A user who'd done `/web off`
+sees tools back on and re-runs `/web off`; a user who'd set a profile
+re-runs `/web profile <name>`. That is a one-time UX blip per old branch
+on upgrade, not data loss, and does not justify a `legacyPersistKeys`
+field on every `ToolsetSpec`, a scan-and-boolean-map read path in
+`restore()`, a cross-consumer "drop after one cycle" coordination
+burden, and dedicated legacy-read tests — nor the portal-side dual-read
+the library-only-reads-booleans split would force for `defaultProfile`.
 
-Without this, `/resume` into a branch created before the migration
-silently loses toggle state — the data-loss class that must not be cut.
+// ponytail: no legacy read path. Old branches reset to defaults; the
+// persisted browser state that actually matters lives outside the entry.
 
 ## 9. The peer-composition invariant (load-bearing)
 
@@ -623,7 +633,6 @@ const webToolset = defineToolset(pi, {
   id: "portal.web",
   names: BROWSER_TOOL_NAMES,
   persistKey: "toolset-state:portal.web",
-  legacyPersistKeys: ["web-toggle-state"],   // one-cycle migration read
   defaultEnabled: webDefault,
 });
 
@@ -631,7 +640,6 @@ const learnToolset = defineToolset(pi, {
   id: "portal.learn",
   names: LEARN_TOOL_NAMES,
   persistKey: "toolset-state:portal.learn",
-  legacyPersistKeys: ["web-toggle-state"],   // same legacy entry, read during migration
   defaultEnabled: false,                     // learn starts off
   requires: ["portal.web"],                  // learn is meaningless without web (§4.4)
 });
@@ -832,7 +840,7 @@ graph, registry-resolved) — but one group today does not justify it.
 - **In `pi-tool-masking`'s repo:** a MockPI that records
   `setActiveTools` / `appendEntry` calls. The canonical test is the
   peer-composition invariant from §9. Plus persistence round-trip
-  (write → restore → assert re-applied), the legacy-key read path, and
+  (write → restore → assert re-applied), the `requires`-cycle throw, and
   the default-resolution mode test: register toolset A (with entry,
   enabled) and toolset B (no entry); under exclusion mode B defaults on,
   under inclusion mode B defaults off, while A's entry is honored in
