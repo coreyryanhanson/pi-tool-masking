@@ -27,7 +27,7 @@ The library centralizes the logic for grouping tools into toggleable
 **toolsets** and remembering which toolsets are active across pi-session
 boundaries (`/reload`, `/resume`, `/fork`, `/tree` navigation). It is
 extracted from the near-identical toggle implementations in
-`pi-lean-portal` (`browser-toggle.ts`) and `pi-lean-host` (`api-toggle.ts`),
+`pi-lean-portal` (`browser-toggle.ts`) and `pi-lean-host` (`core/api-toggle.ts`),
 which duplicate ~90% of their structure: a tool-name Set, an
 additive-on / filter-off `setActiveTools` dance, an `appendEntry`-based
 persistence schema, and a `session_start`/`session_tree` restore path.
@@ -134,7 +134,11 @@ exposes (command subcommands, registry enumeration, downstream picker
 derivation). `masked: false` (default) leaves members individually
 addressable. `setActiveTools` is always flat — "inseparable" is enforced
 as an addressability contract at the surface layer, never by routing
-tricks, and never against a caller that bypasses the library.
+tricks, and never against a caller that bypasses the library. In
+practice only the deferred manager's picker (§13) honors `masked`: it
+is a presentation/addressability contract over the surfaces the library
+*generates*, not a security boundary against direct `setActiveTools`
+calls (see §13.2).
 
 ### 4.3 Toolset composition
 
@@ -436,6 +440,14 @@ owns its own `search` glyph (tracking `search.web`'s state). Portal no
 longer references search. See §10 / §10.1 for the full pattern and the
 companion-vs-`requires` distinction.
 
+> **Listener lifecycle.** `pi.events.on(...)` returns a cleanup
+> function, but toolset-event listeners are **session-lifetime** — the
+> library and its consumers register them once at module load and never
+> unregister. Pi does not unload extensions mid-session, so storing /
+> invoking the cleanup function is unnecessary. (If pi ever gains
+> mid-session extension unloading, revisit this — the library would need
+> to own cleanup for its own restore listener then.)
+
 > **`ctx` capture pattern.** `pi.events` listeners receive only `(data)`,
 > not `ctx`, so a listener that needs to touch the UI (e.g.
 > `ctx.ui.setStatus`) captures `ctx` from its own `session_start` handler
@@ -499,6 +511,18 @@ registering extension would touch. Passing `pi` explicitly to each call
 (rather than capturing it at `defineToolset` time) keeps the registry
 from holding session-bound references that could go stale across
 `/reload` / `/resume`.
+
+**Collision policy (v1).** `defineToolset` **throws** on a duplicate
+`spec.id` and on a duplicate `persistKey` — both are programmer errors,
+not recoverable states, and a throw at registration beats silent
+clobbering of another extension's `{ enabled }` entry or registry slot.
+With three+ independent extensions plus a future manager all funneling
+into one shared registry, an unenforced collision is the most likely
+silent-failure mode. The `toolset-state:<id>` convention keeps collisions
+unlikely in practice; validating uniqueness at registration makes them
+impossible in production. (If `persistKey` is later derived from `id`
+inside the library, the second check becomes trivially true — leave the
+consumer-supplied field for now, but keep the guard.)
 
 Exposing `names` + `masked` in the registry is what lets the downstream
 picker (§13) derive addressable units: a tool is individually
@@ -580,6 +604,17 @@ and because the default is not persisted (§6), the next `/resume` of an
 remain effective across forks. An *overridden* branch (one that wrote
 an explicit toggle) restores that override as `restored`, unchanged
 from today's semantics.
+
+**Persisted state is always consistent.** The `requires` cascade
+(§4.4) makes an incoherent persisted combo unreachable during live
+toggling — you cannot persist `portal.web = false` while
+`portal.learn = true`, because `enable(learn)` transitively enables
+`web` and `disable(web)` cascades `disable` to `learn`. Restore reads
+each toolset's own entry independently, so registration order cannot
+produce an inconsistent restored state either. Register toolsets in
+dependency order (base before dependent: `portal.web` before
+`portal.learn`) as defense-in-depth — it is cheap and keeps the restore
+trace readable — but the invariant does not depend on it.
 
 ## 8. No legacy persistence migration
 
@@ -666,7 +701,7 @@ import {
 
 // Consumer resolves the config-file default once at load time; the
 // library never reads settings.json itself (§5).
-const webDefault = readMergedSettings().browserToggle?.enabled ?? true;
+const webDefault = readMergedSettings().browserToggle?.defaultEnabled ?? true;
 
 const webToolset = defineToolset(pi, {
   id: "portal.web",
@@ -750,8 +785,9 @@ The `requires` invariant (§4.4) makes the composition a one-liner:
 
 ### pi-lean-host
 
-`api-toggle.ts` collapses the same way against `host.api` /
-`api-toggle-state`.
+`core/api-toggle.ts` collapses the same way against `host.api` /
+`api-toggle-state`, resolving its config default as
+`readMergedSettings().apiToggle?.defaultEnabled ?? false`.
 
 ### pi-lean-search
 
@@ -804,6 +840,12 @@ Portal no longer references search at all. The coupling direction is
 **companion listens for base**, never the reverse: portal (the base
 capability) stays ignorant of search (the add-on) — the correct
 dependency direction, and what §6 already wants.
+
+Each consumer that owns a status-bar slot keeps its own
+`session_shutdown` handler to clear it (search already does this for
+its `search` slot today). The library never registers a shutdown
+handler — glyph cleanup is a consumer concern, symmetric with glyph
+ownership.
 
 ### 10.1 Companion co-activation vs `requires`
 
@@ -884,6 +926,16 @@ graph, registry-resolved) — but one group today does not justify it.
   enabled) and toolset B (no entry); under exclusion mode B defaults on,
   under inclusion mode B defaults off, while A's entry is honored in
   both — proving the mode flips only the fallback for unknown toolsets.
+- **GlobalThis registry convergence (required).** The most novel
+  mechanism is the multi-instance `globalThis.__piToolMaskingRegistry` —
+  it cannot be verified by reading code alone and is the primary thing
+  that could silently fail in production (portal registers into its own
+  module copy, the manager reads an empty registry). The test simulates
+  two isolated module loads against one shared `globalThis` (e.g. clear
+  the module cache, import the library a second time under a fresh
+  `jiti` instance), registers a toolset from copy A, and asserts copy B's
+  registry enumerates it. Without this, the §6.1 convergence guarantee
+  is asserted only by prose.
 - **In `pi-lean-portal` / `pi-lean-host`:** thin integration tests that
   call `defineToolset` against a MockPI, plus consumer-specific glyph /
   command tests. **Do not** duplicate the invariant tests here — one
