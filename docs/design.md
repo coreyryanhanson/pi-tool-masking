@@ -351,14 +351,41 @@ export interface ToolsetChangedEvent {
 }
 
 export const TOOLSET_EVENTS = {
-  /** Emitted on enable/disable. Always one group-level event (id = toolset id).
-   *  When emitMemberEvents is set, additionally one event per member tool with
-   *  that tool's name in `member` (and the same group `id`). */
+  /** Emitted on enable/disable AND on initial-state establishment from a
+   *  config/packaged default (the no-persist-entry fresh-session case).
+   *  Always one group-level event (id = toolset id). When emitMemberEvents
+   *  is set, additionally one event per member tool with that tool's name in
+   *  `member` (and the same group `id`). */
   changed: "toolset:changed",    // ToolsetChangedEvent
-  /** Emitted after session_start / session_tree restore re-applies state. */
+  /** Emitted after session_start / session_tree restore re-applies a
+   *  PERSISTED entry from a prior session (restoration of prior intent).
+   *  NOT emitted when a toolset falls back to its config/packaged default
+   *  — that is initial-state establishment, which emits `changed`. The
+   *  split lets a companion (§10.1) mirror a config default without
+   *  clobbering an independent manager-disable on restart. */
   restored: "toolset:restored",  // ToolsetChangedEvent
 } as const;
 ```
+
+**The always-emit invariant.** Restore emits exactly one event per
+registered toolset on every `session_start` / `session_tree` — `changed`
+for a default fallback, `restored` for a persisted entry. It does **not**
+skip the emit when the resolved state happens to equal the default.
+Skipping would break the companion mirror in the fresh-default case
+(search would never learn portal configured itself off) and would leave
+`search.web` with no persist entry, violating the manager-independence
+invariant (§10.1). One event per toolset, every restore, no exceptions.
+
+**Restore is idempotent / last-writer-wins.** `enable`/`disable` are
+idempotent (a second call with the same state is a no-op and emits
+nothing), and restore writes its resolved state once. This keeps the
+load-order interleaving safe: if search loads after portal, portal's
+restore runs first and the companion mirror calls
+`searchToolset.disable(pi)` (writing `toolset-state:search.web`), then
+search's own restore reads the branch and finds the entry the mirror
+just wrote — same final state, no double-emit, no race. This is what
+eliminates the current "portal's `session_start` must fire before
+search's" ordering constraint.
 
 This replaces portal's current `setSearchSlot()` reach into search's
 status slot: portal emits nothing, search registers its own `search.web`
@@ -374,6 +401,23 @@ companion-vs-`requires` distinction.
 > `ctx.ui` is stable across the session; only `ctx.sessionManager` is
 > stale-sensitive (not used by glyph listeners). This is the documented
 > pattern — see pi's `examples/extensions/event-bus.ts`.
+>
+> **Capture-ordering hazard.** Pi's extension runner dispatches
+> `session_start` to handlers **in registration order** (the runner
+> `await`s each handler sequentially), and `pi.events.emit` dispatches
+> **synchronously** (Node `EventEmitter`). `defineToolset` registers its
+> restore handler during the factory call, so if a consumer registers its
+> `ctx.ui`-capture handler *after* calling `defineToolset`, the library's
+> restore fires first, emits `restored`/`changed`, and the glyph `render`
+> listener early-returns (`ui` still `undefined`) — the consumer's capture
+> handler runs later but the event has already passed. **Fix: call
+> `render()` at the end of the capture handler itself**
+> (`pi.on("session_start", … => { ui = ctx.ui; render(); })`). This paints
+> the post-restore state exactly once, regardless of whether capture was
+> registered before or after `defineToolset`. The `changed`/`restored`
+> listeners still own all subsequent updates (mid-session `session_tree`
+> forks/resumes where `ui` is already captured). See §10 for the concrete
+> shape in both the portal and search blocks.
 
 `emitMemberEvents` is the one forward-compat knob for the downstream
 picker (§13): when on, a group toggle additionally fans out to one
@@ -601,7 +645,7 @@ pi.registerCommand("web", {
 // pi's examples/extensions/event-bus.ts). `ctx.ui` is stable across the
 // session; only `ctx.sessionManager` is stale-sensitive (not used here).
 let ui: ExtensionContext["ui"] | undefined;
-pi.on("session_start", async (_e, ctx) => { ui = ctx.ui; });
+pi.on("session_start", async (_e, ctx) => { ui = ctx.ui; render(); });
 
 const render = () => {
   if (!ui) return;
@@ -614,6 +658,10 @@ const render = () => {
 pi.events.on(TOOLSET_EVENTS.changed, render);
 pi.events.on(TOOLSET_EVENTS.restored, render);
 ```
+
+`render()` is called from inside the `session_start` capture handler so
+the first paint lands on the post-restore state regardless of handler
+registration order (see the capture-ordering note in §6).
 
 The `/web` command handler is portal's own — `profile`, `cookies`, and
 `status` (portal's status shows sessions/plugins/profiles, not just
@@ -674,7 +722,7 @@ pi.events.on(TOOLSET_EVENTS.changed, ({ id, enabled }) => {
 // /web on → portal.web changed → co-activation enables search.web →
 // search.web changed → glyph renders. One direction, no double-toggle.
 let ui: ExtensionContext["ui"] | undefined;
-pi.on("session_start", async (_e, ctx) => { ui = ctx.ui; });
+pi.on("session_start", async (_e, ctx) => { ui = ctx.ui; render("search.web", searchToolset.isEnabled(pi)); });
 const render = (id: string, enabled: boolean) => {
   if (id !== "search.web" || !ui) return;
   // search glyph reflects search.web activation; health probe is separate
@@ -683,6 +731,10 @@ const render = (id: string, enabled: boolean) => {
 pi.events.on(TOOLSET_EVENTS.changed, ({ id, enabled }) => render(id, enabled));
 pi.events.on(TOOLSET_EVENTS.restored, ({ id, enabled }) => render(id, enabled));
 ```
+
+`render()` is called from inside the capture handler (with search.web's
+own post-restore state) so the first paint lands regardless of handler
+registration order — see the capture-ordering note in §6.
 
 Portal no longer references search at all. The coupling direction is
 **companion listens for base**, never the reverse: portal (the base
@@ -707,16 +759,36 @@ directionally. The event-listener mirror above is the right primitive:
 symmetric, one-directional (companion listens for base), and it leaves
 `requires` doing only what it's good at.
 
-**Why `changed` and not `restored` for the co-activation mirror.** On
-restore, every toolset reads its own `toolset-state:<id>` entry. The
-co-activation listener writes `toolset-state:search.web` whenever portal
-toggles, so after a restart search restores to whatever the cascade
-last set — consistent with portal without any `restored` listener. If a
-future manager (§13) independently disables search while portal stays
-on, that choice is persisted and honored on restore; a `restored`
-listener that mirrored portal would clobber it. So: `changed` mirrors,
-`restored` does not. This is the invariant that lets an independent
-search toggle coexist with the group behavior.
+**Why `changed` and not `restored` for the co-activation mirror.** The
+`changed` vs `restored` split (§6) is what makes this work:
+
+- **Persisted entry from a prior session** → `restored`. Companions hold
+  their ground: their own persist entries win, so an independent manager
+  disable of search survives a restart instead of being clobbered by a
+  portal `restored` listener.
+- **Config/packaged default (no persist entry)** → `changed`. This is
+  initial-state establishment, not restoration of prior intent, so the
+  companion mirrors it — a fresh session with `browserToggle: false` in
+  settings propagates `/web off` to search, and `web-search` starts
+  disabled. Without this, search would stay live (pi activates every
+  extension tool at startup) despite the user configuring the web tools
+  off.
+
+The mirror listens on `changed` only. On restart, each toolset restores
+from its own `toolset-state:<id>` entry: `search.web` restores to
+whatever the cascade last persisted (consistent with portal), but a
+prior independent manager disable is also honored (its own entry
+wins). The matrix:
+
+| Scenario | portal.web | event | search.web |
+|----------|-----------|-------|------------|
+| Fresh, config off | default false | `changed` | mirrors → off |
+| Fresh, default on | default true | `changed` | mirrors → on |
+| Restart after `/web off` | persisted false | `restored` | own persist false |
+| Restart, manager disabled search (portal on) | persisted true | `restored` | own persist false (not mirrored) |
+
+This is the invariant that lets an independent search toggle coexist
+with the group behavior, while still syncing the config-default case.
 
 If a second sibling group ever appears, promote the listener to a
 declarative `companions: string[]` primitive (undirected companion
