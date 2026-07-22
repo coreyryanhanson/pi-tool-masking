@@ -146,6 +146,11 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		const mode = getModuleState().defaultResolutionMode;
 		const branch = ctx.sessionManager.getBranch();
 
+		// ponytail: restore applies each toolset's entry independently and does
+		// NOT re-run the requires cascade. Safe because §7.1 guarantees persisted
+		// state is always consistent — the live-toggling cascade (§4.4) makes an
+		// incoherent persisted combo unreachable. Re-adding cascade here would
+		// double-toggle and break restore independence.
 		for (const [, entry] of registry) {
 			const { spec } = entry;
 
@@ -320,7 +325,9 @@ function _disableDependents(
 		_applyDisable(entry.spec, pi);
 
 		// Recurse to its dependents
-		_disableDependents(registry, id, pi, [...path, id]);
+		path.push(id);
+		_disableDependents(registry, id, pi, path);
+		path.pop();
 	}
 }
 
