@@ -78,10 +78,21 @@ stable shape.
    implemented")` / `return "exclusion"`.
 4. `__tests__/` dir with a `mock-pi.ts` harness: a `MockPI` implementing
    `ExtensionAPI`'s masking-relevant subset — `setActiveTools` / `getActiveTools`
-   / `getAllTools` (returns registered tool names) / `appendEntry` (records
-   writes keyed by `customType`) / `readEntry` / `on` / `events` (a real Node
-   `EventEmitter` stood up as the `EventBus`). `registerTool` so `getAllTools`
-   can be populated. This is the §12 MockPI.
+   / `getAllTools` (returns `ToolInfo[]` objects `{ name, description, ... }`,
+   matching the real `ExtensionAPI.getAllTools()` return type — **not** plain
+   strings) / `appendEntry` (records writes keyed by `customType`) / `on` /
+   `events` (a real Node `EventEmitter` stood up as the `EventBus`).
+   `registerTool` so `getAllTools` can be populated. This is the §12 MockPI.
+
+   **Restore reads via `ctx.sessionManager.getBranch()`, not `pi.readEntry`.**
+   `ExtensionAPI` has no read counterpart to `appendEntry` (verified in pi's
+   `types.d.ts`); the real restore path reads entries via the `ctx` parameter
+   from the event handler signature `(event, ctx) => ...` —
+   `ctx.sessionManager.getBranch()` returns `SessionEntry[]` with
+   `type` / `customType` / `data` fields (matching the existing
+   `browser-toggle.test.ts` mock at `sessionManager: { getBranch: vi.fn(...) }`).
+   The MockPI therefore exposes a `sessionManager.getBranch()` that returns the
+   recorded entries, **not** a fictional `pi.readEntry`.
 5. `npm test` runs (a single trivial placeholder test) green.
 
 **Acceptance criteria:**
@@ -91,9 +102,11 @@ stable shape.
       a `.test.ts` file with no type errors under `tsc --noEmit`.
 - [ ] `package.json` has no default factory, no `extensions/` manifest, and no
       `pi-package` keyword.
-- [ ] `MockPI` supports `setActiveTools`/`getActiveTools`/`getAllTools`/
-      `appendEntry`/`readEntry`/`on`/`events.emit` and is exercised by one
-      trivial round-trip test.
+- [ ] `MockPI` supports `setActiveTools`/`getActiveTools`/`getAllTools`
+      (returning `ToolInfo[]` objects, not strings)/`appendEntry`/
+      `sessionManager.getBranch()` (returning recorded `SessionEntry[]`)/`on`/
+      `events.emit` and is exercised by one trivial round-trip test. The mock
+      **must not** expose a `readEntry` method (none exists on `ExtensionAPI`).
 
 **Skipped:** nothing — this is the minimum to make subsequent sprints testable.
 
@@ -113,8 +126,29 @@ stable shape.
    so ordering is correct — §6 capture-ordering note).
 2. **Registry on `globalThis.__piToolMaskingRegistry`** (§6.1): idempotent init,
    keyed by `spec.id`. **Collision policy (v1):** `defineToolset` throws on a
-   duplicate `spec.id` **and** on a duplicate `persistKey` (§6.1). Error message
-   names the colliding id/key.
+   duplicate `spec.id` **and** on a duplicate `persistKey` (§6.1) — **except**
+   when the duplicate is an idempotent re-registration of the same toolset from
+   the same source (see §6.1's reload/resume-safe re-registration rule, below).
+   Error message names the colliding id/key.
+
+   **Reload/resume-safe re-registration.** The registry lives on `globalThis`,
+   which pi does **not** clear on `/reload` or `/resume` (verified in pi's
+   `agent-session.js` reload path). Both reload (jiti re-evaluates the module
+   and re-invokes every factory) and `/resume` (re-invokes the factory against
+   the cached module) call `defineToolset` again with the same `spec.id`. A
+   naive throw-on-duplicate would break both paths. The current `browser-toggle`
+   code dodges this with module-level state + an explicit `resetToggleModuleState()`
+   call; the library cannot, because the registry's whole purpose is to persist
+   across module copies. Resolution: **`defineToolset` is idempotent by content**
+   — a second call with the same `id` + a `deepEqual`-identical `spec` is a
+   no-op that returns the existing `Toolset` handle (the reload/resume case,
+   no edit in between); a second call with the same `id` + a changed `spec`
+   replaces the entry and warns (reload after an edit). A genuine cross-
+   extension same-`id` collision (two different extensions, same `id`,
+   non-`deepEqual` specs) still throws — that is the programmer error the
+   collision guard exists for. This keeps the registry persistent for its
+   cross-instance purpose without making `/reload` or `/resume` fatal. (See
+   design §6.1 for the full rationale and the `deepEqual` choice.)
 3. `enable(pi)`: additive — `[...new Set([...current, ...registered])]` where
    `registered = spec.names ∩ pi.getAllTools()` (tolerates unregistered names,
    §4.1). Idempotent: no-op + no emit if already in target state.
@@ -135,8 +169,14 @@ stable shape.
 - [ ] `disable` uses `getActiveTools()`, not `getAllTools()` — verified by a
       test that pre-disables a peer toolset and asserts `disable` does not
       revive it.
-- [ ] Duplicate `spec.id` throws; duplicate `persistKey` throws; distinct
-      ids/keys register cleanly.
+- [ ] Duplicate `spec.id` from a *different* spec throws; duplicate
+      `persistKey` throws; distinct ids/keys register cleanly.
+- [ ] **Idempotent re-registration:** a second `defineToolset` with the same
+      `id` + a `deepEqual`-identical `spec` returns the existing handle and
+      does **not** throw (simulates `/reload` / `/resume` re-entry); a second
+      call with the same `id` + a changed `spec` replaces and warns.
+- [ ] `globalThis.__piToolMaskingRegistry` is initialized idempotently (assert
+      the same object survives a second `defineToolset` in the same process).
 - [ ] Idempotent: `enable` then `enable` writes once and emits once; same for
       `disable`.
 - [ ] `globalThis.__piToolMaskingRegistry` is initialized idempotently (assert
@@ -194,7 +234,11 @@ split (§6), and the shared settings reader (§5).
 
 1. **Restore handler** (registered in Sprint 1, bodied now): on
    `session_start` and `session_tree`, for each registered toolset:
-   - read `spec.persistKey` from branch state (`pi.readEntry` equivalent);
+   - read `spec.persistKey` from branch state via the event handler's `ctx` —
+     `ctx.sessionManager.getBranch()` returns `SessionEntry[]`; filter by
+     `entry.customType === spec.persistKey` and read `entry.data` (this is the
+     real `ExtensionAPI` read path; `pi` itself has no `readEntry` method —
+     see Sprint 0's MockPI note);
    - **entry exists** → apply its `enabled`, emit `restored` (one group-level
      event; member fanout if `emitMemberEvents`);
    - **no entry** → resolve to `spec.defaultEnabled` under exclusion mode, or

@@ -497,9 +497,12 @@ portal registers into its copy, the manager reads its own empty copy.
 
 `globalThis.__piToolMaskingRegistry` (idempotently initialized by every
 copy of the library) converges all instances on one registry regardless
-of how many times jiti loads the module. This is the same pattern already
-proven in `pi-lean-portal`'s `portal-projection.ts` boundary-safe
-detection (`globalThis.__piLeanPortalRegisterGuideProvider`).
+of how many times jiti loads the module. This is the same pattern used in
+`pi-lean-host`'s `portal-projection.ts` boundary-safe detection
+(`globalThis.__piLeanPortalRegisterGuideProvider`); note that pattern
+ships on the `feat/pi-lean-host` branch and is not yet on `main`, so the
+`globalThis` convergence mechanism is sound but not yet proven in a
+released `pi-lean-portal` on `main`.
 
 The registry stores each toolset's `spec` (at minimum `id`, `names`,
 `masked`, `requires`) plus the `Toolset` object, keyed by `spec.id`. The
@@ -523,6 +526,49 @@ unlikely in practice; validating uniqueness at registration makes them
 impossible in production. (If `persistKey` is later derived from `id`
 inside the library, the second check becomes trivially true — leave the
 consumer-supplied field for now, but keep the guard.)
+
+**Reload/resume-safe re-registration.** The registry lives on
+`globalThis`, which pi does **not** clear on `/reload` or `/resume`
+(verified in pi's `agent-session.js` reload path: no `globalThis`
+cleanup; `resourceLoader.reload()` re-invokes every factory). On
+`/reload`, jiti re-evaluates the module (`moduleCache: false`) and every
+factory calls `defineToolset(pi, { id: "portal.web", ... })` again. On
+`/resume`, the factory is re-invoked against the same cached module —
+same call. A naive throw-on-duplicate would make both paths fatal: the
+second `defineToolset` finds the prior entry on the persistent
+`globalThis` registry and throws. The current `browser-toggle.ts` dodges
+this with module-level state (re-created on reload) plus an explicit
+`resetToggleModuleState()` call at the top of the factory; the library
+cannot, because the registry's whole purpose (§6.1) is to persist across
+module copies.
+
+Resolution: **`defineToolset` is idempotent by content.** A second call
+with the same `id` and a `deepEqual`-identical `spec` is a no-op that
+returns the existing `Toolset` handle — this is the `/reload` /
+`/resume` case (no edit in between, so the spec is byte-identical). A
+second call with the same `id` and a *changed* `spec` replaces the entry
+and warns (the reload-after-edit case). A genuine cross-extension
+collision — two different extensions registering the same `id` with
+non-`deepEqual` specs — still throws; that is the programmer error the
+guard exists for, and it is distinguishable from reload re-entry because
+the spec differs. `deepEqual` (not reference equality) is the right
+comparison: jiti hands back a fresh module object on every reload, so
+the `spec` argument is always a new object even when semantically
+identical — reference equality would throw on every reload.
+
+This dissolves the obvious follow-up — "does `defineToolset` need to
+distinguish same-source re-registration from cross-extension collisions?"
+— without needing source-path tracking or a shutdown handler: "same
+registration" is defined as "same `id` + `deepEqual` spec," which is
+unambiguous and does not depend on module identity (which changes every
+reload). The design's "the library never registers a shutdown handler"
+stance (§10) is preserved: the registry is **not** cleared on
+`session_shutdown`, it is reconciled on re-entry. If a cross-extension
+id clash ever becomes a real config bug in practice, pair this with a
+`session_shutdown` registry clear as defense-in-depth (within one load
+pass collisions still throw; reload/resume re-entry is still safe) — but
+ship idempotent-by-content first, since it alone covers both reload and
+resume.
 
 Exposing `names` + `masked` in the registry is what lets the downstream
 picker (§13) derive addressable units: a tool is individually
