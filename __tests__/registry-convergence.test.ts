@@ -20,12 +20,12 @@ function createEnv(): { mock: MockPI; pi: ExtensionAPI } {
 }
 
 const REGISTRY_KEY = "__piToolMaskingRegistry";
-const HANDLER_GUARD_KEY = "__piToolMaskingRestoreHandlerRegistered";
+const RESTORE_EVENT_KEY = "__piToolMaskingLastRestoreEvent";
 const MODULE_STATE_KEY = "__piToolMaskingModuleState";
 
 function cleanRegistry(): void {
 	delete (globalThis as any)[REGISTRY_KEY];
-	delete (globalThis as any)[HANDLER_GUARD_KEY];
+	delete (globalThis as any)[RESTORE_EVENT_KEY];
 	delete (globalThis as any)[MODULE_STATE_KEY];
 }
 

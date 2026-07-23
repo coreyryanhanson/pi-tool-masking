@@ -913,6 +913,21 @@ describe("Cycle detection on enable (§4.4)", () => {
 		expect(mock.getActiveTools()).toContain("c-tool");
 		expect(mock.getActiveTools()).toContain("d-tool");
 	});
+
+	it("throws on self-require (A → A)", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "a-tool", description: "" });
+		const tsA = defineToolset(
+			pi,
+			makeSpec({
+				id: "A",
+				persistKey: "k:A",
+				names: new Set(["a-tool"]),
+				requires: ["A"],
+			}),
+		);
+		expect(() => tsA.enable(pi)).toThrow("Cycle detected");
+	});
 });
 
 // ===================================================================
@@ -1603,6 +1618,67 @@ describe("Restore — session_tree (§6)", () => {
 		);
 		expect(changedCalls.length).toBeGreaterThanOrEqual(1);
 		emitSpy.mockRestore();
+	});
+
+	it("session_tree restores persisted entry and emits restored", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		const ts = defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
+		ts.enable(pi);
+		ts.disable(pi);
+		const emitSpy = vi.spyOn(mock.events, "emit");
+		mock.fireLifecycleEvent("session_tree");
+		expect(mock.getActiveTools()).not.toContain("tool-a");
+		const restoredCalls = emitSpy.mock.calls.filter(
+			([c]) => c === TOOLSET_EVENTS.restored,
+		);
+		expect(restoredCalls.length).toBeGreaterThanOrEqual(1);
+		expect(restoredCalls[0]?.[1]).toMatchObject({
+			id: "test.toolset",
+			enabled: false,
+		});
+		emitSpy.mockRestore();
+	});
+});
+
+// ===================================================================
+// Restore independence with requires (§7.1)
+// ===================================================================
+
+describe("Restore independence — does not cascade (§7.1)", () => {
+	it("restore applies persisted entries independently without cascading requires", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "b-tool", description: "" });
+		mock.registerTool({ name: "l-tool", description: "" });
+		const tsB = defineToolset(
+			pi,
+			makeSpec({ id: "B", persistKey: "k:B", names: new Set(["b-tool"]) }),
+		);
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "L",
+				persistKey: "k:L",
+				names: new Set(["l-tool"]),
+				requires: ["B"],
+			}),
+		);
+		// Enable both, then manually persist an "incoherent" combo
+		// that the live cascade would prevent but restore should honor.
+		tsB.enable(pi);
+		// Manually inject persisted entries for B (disabled) and L (enabled)
+		mock.appendEntry("k:B", { enabled: false });
+		mock.appendEntry("k:L", { enabled: true });
+		// Clear active tools to simulate a fresh session state
+		mock.setActiveTools([]);
+		mock.fireLifecycleEvent("session_start");
+		// Restore should apply each entry independently:
+		// B gets its persisted false, L gets its persisted true.
+		// No cascade runs — L does not re-enable B, and B being off
+		// does not push L off.
+		expect(tsB.isEnabled(pi)).toBe(false);
+		expect(mock.getActiveTools()).not.toContain("b-tool");
+		expect(mock.getActiveTools()).toContain("l-tool");
 	});
 });
 
