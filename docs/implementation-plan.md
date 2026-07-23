@@ -157,31 +157,6 @@ migrated — asserted in Sprints 5/6).
 
 ---
 
-## Completed — Review-fix pass
-
-After Sprints 0–4, a review found five issues; all were addressed. The
-normative rationale lives in design §6 (the `/reload`-safety pitfall +
-event-identity dedup) and §7.1 (restore-disable filter + no-cascade-on-
-restore); this section is just a compact record of the changes:
-
-1. **(HIGH) Restore handler not `/reload`-safe.** Dropped the stale
-   `globalThis` boolean guard; restore now dedups by event-object identity
-   at runtime and re-registers on every `defineToolset`. Regression test
-   added (a second `MockPI` without clearing `globalThis`). See design §6.
-2. **(LOW) Restore disable-branch inconsistent with `_applyDisable`.**
-   `_applyRestoreToolset`'s disable branch now filters by `spec.names.has(n)`
-   (matching live `disable`), not `registeredNames`. Test added. See §7.1.
-3. **(LOW) "Cycle on disable" test didn't call disable.** Renamed the
-   mislabeled enable-cycle test; added a real disable-cycle test asserting
-   `toThrow("Cycle detected on disable")`.
-4. **(NIT) Restore skips the `requires` cascade (by design).** Added a
-   `// ponytail:` comment naming the reliance. No behavior change. See §7.1.
-5. **(NIT) Path-tracking style split.** No action (cosmetic).
-
-`npx tsc --noEmit` clean; `npx vitest run` green (86 tests).
-
----
-
 ## Pending — Sprint 5 — Portal migration (monorepo `main`)
 
 **Repo:** `pi-lean-dimension`, `main` branch.
