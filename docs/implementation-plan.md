@@ -127,7 +127,7 @@ registered is skipped until it appears). `setDefaultResolutionMode` /
 cycle throw with path, forward-reference, mode set/get, no-path-yields-
 `L.enabled && !B.enabled`.
 
-### Sprint 3 — Restore, events, `readMergedSettings` ✅
+### Sprint 3 — Restore, events ✅
 
 The `session_start` / `session_tree` restore handler (registered in Sprint 1,
 bodied here): per registered toolset, read `spec.persistKey` from
@@ -137,13 +137,18 @@ bodied here): per registered toolset, read `spec.persistKey` from
 `appendEntry`** (restore never persists a default fallback, §6). Always emits
 exactly one event per toolset per restore (the always-emit invariant).
 `TOOLSET_EVENTS` (`changed`/`restored`) + `ToolsetChangedEvent` payloads with
-optional `emitMemberEvents` per-member fanout. `readMergedSettings()` merges
-global + project settings (project wins), returns `{}` on any failure, never
-throws. Tests: persistence round-trip, no-entry restore (exclusion +
-inclusion), always-emit, the `changed`/`restored` split, `emitMemberEvents`
-N+1 fanout, idempotent/last-writer-wins restore, `session_tree` restore,
-`readMergedSettings` merge + error handling, default-resolution entry-vs-
-no-entry.
+optional `emitMemberEvents` per-member fanout. Settings reading is **out
+of scope** for the library (§5.1) — consumers keep a local reader
+(portal's `core/shared/settings-reader.ts`) and pass the resolved
+boolean as `spec.defaultEnabled`. Tests: persistence round-trip, no-entry
+restore (exclusion + inclusion), always-emit, the `changed`/`restored`
+split, `emitMemberEvents` N+1 fanout, idempotent/last-writer-wins
+restore, `session_tree` restore, default-resolution entry-vs-no-entry.
+
+> **Revert note:** Sprint 3 originally shipped a `readMergedSettings`
+> utility export on the library. It was removed before v1 shipped — see
+> [`revert-settings-reader.md`](./revert-settings-reader.md). The library
+> exports no settings reader; do not re-add one (§5.1).
 
 ### Sprint 4 — Library test suite complete (§12) ✅
 
@@ -168,7 +173,9 @@ migrated — asserted in Sprints 5/6).
    `dependencies`. `npm install` to wire it.
 2. Rewrite `browser-toggle.ts` to the §10 shape:
    - `defineToolset` for `portal.web` (`BROWSER_TOOL_NAMES`, `defaultEnabled`
-     from `readMergedSettings().browserToggle?.defaultEnabled ?? true`) and
+     from `readMergedSettings().browserToggle?.defaultEnabled ?? true`,
+     where `readMergedSettings` is portal's own `core/shared/settings-reader.ts`
+     — the library exports no settings reader, §5.1) and
      `portal.learn` (`LEARN_TOOL_NAMES`, `defaultEnabled: false`, `requires:
      ["portal.web"]`).
    - `/web` command handler ~10 lines dispatching to `enable`/`disable`; `learn`
@@ -181,8 +188,10 @@ migrated — asserted in Sprints 5/6).
    - Glyph: portal's own `changed`/`restored` listener rendering the `browser`
      slot; `render()` called from inside the `session_start` capture handler
      (§6 capture-ordering fix).
-3. Delete `packages/pi-lean-portal/core/shared/settings-reader.ts` — replaced
-   by `readMergedSettings` from the library. Grep for any other importer first.
+3. Keep `packages/pi-lean-portal/core/shared/settings-reader.ts` — the
+   library exports no settings reader (§5.1). `browser-toggle.ts`
+   imports `readMergedSettings` from it. Grep for any inlined duplicate
+   first (`rg "function readMergedSettings\|function readSettingsFile"`).
 4. Update `packages/pi-lean-portal/index.ts` imports if the toggle export
    surface changed.
 5. **Tests:** delete the 80 `browser-toggle.test.ts` tests that duplicated the
@@ -196,8 +205,10 @@ migrated — asserted in Sprints 5/6).
 **Acceptance criteria:**
 
 - [ ] `browser-toggle.ts` is ≤ ~150 lines (down from 497).
-- [ ] `packages/pi-lean-portal/core/shared/settings-reader.ts` is deleted and
-      no importer remains (`rg settings-reader` in the portal package is empty).
+- [ ] `packages/pi-lean-portal/core/shared/settings-reader.ts` is kept and
+      imported by `browser-toggle.ts` (and `plugin-config.ts`, the test helper);
+      `rg "function readMergedSettings\|function readSettingsFile"` in the
+      portal package returns no inlined copies.
 - [ ] `SIBLING_TOOL_NAMES` / `setSearchSlot` are gone; `rg setSearchSlot` and
       `rg SIBLING_TOOL_NAMES` are empty across the monorepo.
 - [ ] `/web on`, `/web off`, `/web learn` behave exactly as before against a
@@ -338,8 +349,9 @@ resolvable by reference to the same library.
 - [ ] `rg "web-toggle-state|api-toggle-state"` across the monorepo `main`
       returns only CHANGELOG/history references — the old persist keys are gone
       from live code.
-- [ ] `rg "settings-reader"` across the monorepo `main` returns nothing — both
-      copies are deleted, replaced by `readMergedSettings`.
+- [ ] `rg "settings-reader"` across the monorepo `main` returns the portal
+      reader only — the library exports no settings reader (§5.1), and no
+      consumer imports `readMergedSettings` from `pi-tool-masking`.
 - [x] `globalThis.__piToolMaskingRegistry` is the only cross-instance shared
       surface; toggle actuation remains a static import (§6.1 boundary).
 - [x] The restore handler is `/reload`-safe via event-object-identity dedup
@@ -356,3 +368,6 @@ resolvable by reference to the same library.
   concerns).
 - Do **not** add a legacy persistence migration read path (§8).
 - Do **not** tag the library `pi-package` in `keywords` (§14).
+- Do **not** add a settings-reader export (`readMergedSettings` or any
+  `settings.json` reader) to the library (§5.1 — see
+  `revert-settings-reader.md`). Consumers keep a local reader.

@@ -107,7 +107,7 @@ has:
 - an optional `defaultEnabled` boolean — the fresh-session fallback when
   no branch entry exists. The **consumer resolves any config-file default
   at the call site** and passes the resulting boolean (see §5); the
-  library does not read `settings.json`
+  library does not read `settings.json` (§5.1 — no library-side reader)
 - an optional `masked` flag (addressability — see §4.2)
 - an optional `requires` array (dependency — see §4.4)
 - an optional `emitMemberEvents` flag (see §6)
@@ -279,9 +279,14 @@ export interface ToolsetSpec {
   persistKey: string;
   /** Fresh-session fallback when no branch entry exists. The consumer
    *  resolves any config-file default at the call site and passes the
-   *  resulting boolean here — the library does not read `settings.json`
-   *  (no settings-reading method exists on `ExtensionAPI`; see
-   *  `readMergedSettings` below). */
+   *  resulting boolean here — the library does not read `settings.json`.
+   *  There is intentionally **no** settings-reading helper on this
+   *  library: merging pi's global + project `settings.json` is a
+   *  pi-platform concern, not a tool-masking concern, and freezing it
+   *  into a v1-frozen library surface couples this library to pi's
+   *  settings layout for no toggle-related benefit. Consumers keep a
+   *  local reader (portal's `core/shared/settings-reader.ts`); do not
+   *  add a shared reader here — see §5.1. */
   defaultEnabled?: boolean;
   /** Addressability: when true, members are reachable only via the group
    *  in every surface the library generates or exposes (§4.2). Default false. */
@@ -319,15 +324,6 @@ export interface Toolset {
 
 export function defineToolset(pi: ExtensionAPI, spec: ToolsetSpec): Toolset;
 
-/** Read and merge pi's settings.json files (global `~/.pi/agent/settings.json`
- *  + project `.pi/settings.json`, project overrides global). Returns `{}` on
- *  any failure. Utility export so consumers resolve config-file defaults at
- *  the `defineToolset` call site without each shipping their own reader —
- *  portal and host delete their verbatim `settings-reader.ts` copies and
- *  import this. The library itself never calls this; restore uses only
- *  `spec.defaultEnabled` (the already-resolved value) and branch state. */
-export function readMergedSettings(): Record<string, unknown>;
-
 /** Default-resolution mode for toolsets with no branch entry (§4.5).
  *  - "exclusion" (default): no entry → spec.defaultEnabled (unknowns ON)
  *  - "inclusion":           no entry → false            (unknowns OFF)
@@ -355,6 +351,42 @@ auto-generated command surface with an override hook was considered and
 rejected: its first real consumer (portal's `/web`) overrides roughly
 half the generated subcommands, so the "default" is dead weight and the
 override hook costs more than the dispatch it saves (see §15).
+
+### 5.1. No settings reader (intentional)
+
+The library exports **no** settings-reading helper and never reads
+`settings.json`. `restore`/`enable`/`disable` use only
+`spec.defaultEnabled` — a boolean the consumer already resolved before
+calling `defineToolset`. That contract is unchanged by the absence of a
+library-side reader; the consumer just reads its own settings to
+produce the boolean.
+
+Rationale:
+
+- **Wrong scope.** Merging pi's global + project `settings.json` is a
+  pi-platform concern any extension might want, not a tool-masking
+  concern. Shipping it here makes the tool-masking library the
+  accidental home of "how to read pi settings" simply because it was the
+  first package that needed a default.
+- **Freeze cost.** The §5 surface is frozen at v1. A reader here locks
+  its assumptions (`~/.pi/agent/settings.json` + `.pi/settings.json`,
+  project overrides global, JSON, sync reads) into a published library
+  whose core logic never touches the disk. If pi's settings storage
+  changes, a toggle library breaks for reasons unrelated to toggling.
+- **Small duplication.** The reader exists to delete ~15-line copies in
+  portal and host. Two copies of a trivial file reader, in two repos, is
+  low drift risk and not enough to justify freezing an unrelated API.
+- **Misleading surface.** An export named `readMergedSettings` on a
+  library whose design says "the library does not read `settings.json`"
+  invites the conclusion that the library touches the disk as part of
+  its core flow. It does not; the export contradicts the contract.
+
+**Do-not-add rule:** a `readMergedSettings` (or any `settings.json`
+reader) must not be added to this library. If a third consumer appears
+and the duplication stings, the home is a separate `pi-settings` package
+or an `ExtensionAPI` method upstreamed to pi — never this library. The
+Sprint 3 reader was removed before v1 shipped; see
+[`revert-settings-reader.md`](./revert-settings-reader.md).
 
 ## 6. Change notification: `pi.events`, not custom hooks
 
@@ -780,14 +812,11 @@ The canonical tests:
 `browser-toggle.ts` collapses from ~450 lines to roughly:
 
 ```ts
-import {
-  defineToolset,
-  readMergedSettings,
-  TOOLSET_EVENTS,
-} from "pi-tool-masking";
+import { defineToolset, TOOLSET_EVENTS } from "pi-tool-masking";
+import { readMergedSettings } from "./core/shared/settings-reader.js";
 
-// Consumer resolves the config-file default once at load time; the
-// library never reads settings.json itself (§5).
+// Consumer resolves the config-file default once at load time, from its
+// own local reader — the library never reads settings.json itself (§5.1).
 const webDefault = readMergedSettings().browserToggle?.defaultEnabled ?? true;
 
 const webToolset = defineToolset(pi, {
@@ -873,8 +902,10 @@ The `requires` invariant (§4.4) makes the composition a one-liner:
 ### pi-lean-host
 
 `core/api-toggle.ts` collapses the same way against `host.api` /
-`api-toggle-state`, resolving its config default as
-`readMergedSettings().apiToggle?.defaultEnabled ?? false`.
+`api-toggle-state`, resolving its config default from its own local
+reader as `readMergedSettings().apiToggle?.defaultEnabled ?? false`
+(host keeps its own `settings-reader.ts`; the library exports none —
+§5.1).
 
 ### pi-lean-search
 
