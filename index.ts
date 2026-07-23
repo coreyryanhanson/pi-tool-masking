@@ -1,6 +1,3 @@
-import fs from "node:fs";
-import path from "node:path";
-import os from "node:os";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
@@ -420,33 +417,4 @@ export function getDefaultResolutionMode(
 	_pi: ExtensionAPI,
 ): DefaultResolutionMode {
 	return getModuleState().defaultResolutionMode;
-}
-
-export function readMergedSettings(): Record<string, unknown> {
-	try {
-		const globalPath = path.join(os.homedir(), ".pi", "agent", "settings.json");
-		const projectPath = path.join(process.cwd(), ".pi", "settings.json");
-
-		let merged: Record<string, unknown> = {};
-
-		// Global settings
-		try {
-			const globalRaw = fs.readFileSync(globalPath, "utf-8");
-			merged = { ...JSON.parse(globalRaw) };
-		} catch {
-			// File missing or malformed — skip
-		}
-
-		// Project settings (override global)
-		try {
-			const projectRaw = fs.readFileSync(projectPath, "utf-8");
-			merged = { ...merged, ...JSON.parse(projectRaw) };
-		} catch {
-			// File missing or malformed — skip
-		}
-
-		return merged;
-	} catch {
-		return {};
-	}
 }

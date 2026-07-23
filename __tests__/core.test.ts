@@ -1,15 +1,11 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
-import os from "node:os";
-import path from "node:path";
-import fs from "node:fs";
+import { describe, it, expect, vi } from "vitest";
 import { MockPI } from "./mock-pi.js";
 import {
 	defineToolset,
 	TOOLSET_EVENTS,
 	setDefaultResolutionMode,
 	getDefaultResolutionMode,
-	readMergedSettings,
 } from "../index.js";
 
 // ---------------------------------------------------------------------------
@@ -1683,79 +1679,6 @@ describe("Restore independence — does not cascade (§7.1)", () => {
 });
 
 // ===================================================================
-// readMergedSettings — merge & error handling (§5)
-// ===================================================================
-
-describe("readMergedSettings — merge & error handling (§5)", () => {
-	let tmpDir: string;
-	let homedirSpy: ReturnType<typeof vi.spyOn>;
-	let cwdSpy: ReturnType<typeof vi.spyOn>;
-
-	beforeAll(() => {
-		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "ptm-s3-"));
-		const agentDir = path.join(tmpDir, ".pi", "agent");
-		fs.mkdirSync(agentDir, { recursive: true });
-		fs.writeFileSync(
-			path.join(agentDir, "settings.json"),
-			JSON.stringify({
-				browserToggle: { defaultEnabled: false },
-				globalOnly: true,
-				shared: "global-val",
-			}),
-		);
-		fs.writeFileSync(
-			path.join(tmpDir, ".pi", "settings.json"),
-			JSON.stringify({
-				browserToggle: { defaultEnabled: true },
-				projectOnly: true,
-				shared: "project-val",
-			}),
-		);
-		homedirSpy = vi.spyOn(os, "homedir").mockReturnValue(tmpDir);
-		cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(tmpDir);
-	});
-
-	afterAll(() => {
-		homedirSpy?.mockRestore();
-		cwdSpy?.mockRestore();
-		fs.rmSync(tmpDir, { recursive: true, force: true });
-	});
-
-	it("merges global and project settings (project wins on conflict)", () => {
-		const result = readMergedSettings();
-		expect(result.browserToggle).toEqual({ defaultEnabled: true });
-		expect(result.globalOnly).toBe(true);
-		expect(result.projectOnly).toBe(true);
-		expect(result.shared).toBe("project-val");
-	});
-
-	it("returns {} on malformed JSON (project file falls back to global)", () => {
-		fs.writeFileSync(path.join(tmpDir, ".pi", "settings.json"), "not-json");
-		const result = readMergedSettings();
-		expect(result.globalOnly).toBe(true);
-	});
-
-	it("returns {} when neither file exists", () => {
-		const badDir = path.join(os.tmpdir(), `ptm-nonexistent-${Date.now()}`);
-		const badHomeSpy = vi.spyOn(os, "homedir").mockReturnValue(badDir);
-		const badCwdSpy = vi.spyOn(process, "cwd").mockReturnValue(badDir);
-		const result = readMergedSettings();
-		expect(result).toEqual({});
-		badHomeSpy.mockRestore();
-		badCwdSpy.mockRestore();
-	});
-
-	it("never throws", () => {
-		expect(() => readMergedSettings()).not.toThrow();
-	});
-
-	it("returns an object (smoke)", () => {
-		const result = readMergedSettings();
-		expect(typeof result).toBe("object");
-	});
-});
-
-// ===================================================================
 // Default-resolution mode — entry vs no-entry (§4.5)
 // ===================================================================
 
@@ -1815,7 +1738,7 @@ describe("Entry-point exports (§5)", () => {
 		expect(typeof defineToolset).toBe("function");
 		expect(typeof setDefaultResolutionMode).toBe("function");
 		expect(typeof getDefaultResolutionMode).toBe("function");
-		expect(typeof readMergedSettings).toBe("function");
+
 		expect(typeof TOOLSET_EVENTS).toBe("object");
 		expect(typeof TOOLSET_EVENTS.changed).toBe("string");
 		expect(typeof TOOLSET_EVENTS.restored).toBe("string");
