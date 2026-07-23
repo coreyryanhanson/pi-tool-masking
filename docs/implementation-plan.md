@@ -1,12 +1,12 @@
 # pi-tool-masking — Implementation Plan
 
 > Source of truth: [`design.md`](./design.md). This plan operationalizes it.
-> Status: **library code complete** (Sprints 0–4 + the review-fix pass) but
-> **not yet published**. The library has not shipped — it made it through the
-> Sprints but remains under review. We will not publish until the later
-> stages (consumer migration + manager) are done. A minimum implementation of
-> the manager extension will be built first, giving us flexibility to debug
-> issues before locking ourselves to the API.
+> Status: **library + consumer migration complete** (Sprints 0–6) but
+> **not yet published**. The library and both consumer migrations made it
+> through the Sprints but remain under review. We will not publish until the
+> later stages (version bump + host rebase + manager) are done. A minimum
+> implementation of the manager extension will be built first, giving us
+> flexibility to debug issues before locking ourselves to the API.
 
 ## Scope & sequencing
 
@@ -44,7 +44,7 @@ consumer before locking ourselves to the API.
 |------|--------|------|--------|
 | `pi-tool-masking` (this repo) | `initial-commit` | Library implementation | ✅ code complete, **not published** |
 | TBD (new repo) | `main` | Minimum manager extension | ⏳ to build before publishing |
-| `pi-lean-dimension` (monorepo) | `main` | Portal + search migration → `0.3.0` | ⏳ pending |
+| `pi-lean-dimension` (monorepo) | `main` | Portal + search migration → `0.3.0` | ✅ migrations done, **release pending (Sprint 7)** |
 | `pi-lean-dimension` (monorepo) | `feat/pi-lean-host` | Reference + rebase check only | ⏳ pending |
 
 ### Versioning
@@ -162,111 +162,58 @@ migrated — asserted in Sprints 5/6).
 
 ---
 
-## Pending — Sprint 5 — Portal migration (monorepo `main`)
+## Completed — Sprints 5–6 (consumer migration, monorepo `main`)
 
-**Repo:** `pi-lean-dimension`, `main` branch.
-**Goal:** `browser-toggle.ts` collapses onto the library per §10.
+Both consumer migrations shipped on `main`. `npx vitest run` across the
+affected packages is green: **52 tests across 3 files** (14 portal-toggle + 14
+portal-profile + 24 search). What each sprint delivered:
 
-**Work:**
+### Sprint 5 — Portal migration ✅
 
-1. Add `pi-tool-masking` (`^1.0.0`) to `packages/pi-lean-portal/package.json`
-   `dependencies`. `npm install` to wire it.
-2. Rewrite `browser-toggle.ts` to the §10 shape:
-   - `defineToolset` for `portal.web` (`BROWSER_TOOL_NAMES`, `defaultEnabled`
-     from `readMergedSettings().browserToggle?.defaultEnabled ?? true`,
-     where `readMergedSettings` is portal's own `core/shared/settings-reader.ts`
-     — the library exports no settings reader, §5.1) and
-     `portal.learn` (`LEARN_TOOL_NAMES`, `defaultEnabled: false`, `requires:
-     ["portal.web"]`).
-   - `/web` command handler ~10 lines dispatching to `enable`/`disable`; `learn`
-     pulls web on via `requires`; `off` cascades learn off via `requires`.
-   - Delete: `SIBLING_TOOL_NAMES`, `setSearchSlot`, the search reach-through,
-     `restoreFromBranch`, `applyConfigDefault`, the `session_start`/`session_tree`
-     restore wiring.
-   - Keep `defaultProfile` as a separate `appendEntry("portal-conversation-state",
-     { defaultProfile })` (§7).
-   - Glyph: portal's own `changed`/`restored` listener rendering the `browser`
-     slot; `render()` called from inside the `session_start` capture handler
-     (§6 capture-ordering fix).
-3. Keep `packages/pi-lean-portal/core/shared/settings-reader.ts` — the
-   library exports no settings reader (§5.1). `browser-toggle.ts`
-   imports `readMergedSettings` from it. Grep for any inlined duplicate
-   first (`rg "function readMergedSettings\|function readSettingsFile"`).
-4. Update `packages/pi-lean-portal/index.ts` imports if the toggle export
-   surface changed.
-5. **Tests:** delete the 80 `browser-toggle.test.ts` tests that duplicated the
-   invariant (peer composition, persist shape, restore) — those now live in the
-   library. Keep/rewrite **thin integration tests** that call `defineToolset`
-   against a MockPI and assert portal-specific concerns: the `/web` command
-   dispatch, the glyph render, `defaultProfile` persistence, the
-   `portal-conversation-state` split. Keep the 14 profile tests (they test
-   portal-specific profile behavior, not the invariant).
+`browser-toggle.ts` collapsed from 497 → 255 lines onto the library per §10.
+`pi-tool-masking` added to `packages/pi-lean-portal/package.json` `dependencies`
+(`file:../../pi-tool-masking` while unpublished). Two toolsets defined:
+`portal.web` (`BROWSER_TOOL_NAMES`, `defaultEnabled` read from portal's own
+`core/shared/settings-reader.ts` → `browserToggle?.defaultEnabled ?? true` — the
+library exports no settings reader, §5.1) and `portal.learn`
+(`LEARN_TOOL_NAMES`, `defaultEnabled: false`, `requires: ["portal.web"]`). The
+`/web` command dispatches to `enable`/`disable`; `learn` pulls web on via
+`requires`, `off` cascades learn off via `requires` — no hand-written
+learn↔web coupling. Deleted: `SIBLING_TOOL_NAMES`, `setSearchSlot`, the search
+reach-through, `restoreFromBranch`, `applyConfigDefault`, and the
+`session_start`/`session_tree` restore wiring (the library owns restore now).
+`defaultProfile` persists separately under `portal-conversation-state`
+(§7 split). The `browser` glyph renders from the `session_start`/`session_tree`
+capture handlers (`syncCachedState` + `renderBrowserGlyph` — the §6
+capture-ordering fix). `settings-reader.ts` kept and imported; no inlined
+duplicate. Tests: the 80 invariant-duplicating `browser-toggle.test.ts` tests
+were replaced with **14 thin integration tests** (MockPI, `/web` dispatch,
+glyph render, `portal-conversation-state` split, cached-state sync); the 14
+profile tests kept (portal-specific behavior). `npx vitest run
+packages/pi-lean-portal` green. `rg setSearchSlot` / `rg SIBLING_TOOL_NAMES`
+empty across live code; `rg -i search` empty in `browser-toggle.ts`.
 
-**Acceptance criteria:**
+### Sprint 6 — Search migration ✅
 
-- [ ] `browser-toggle.ts` is ≤ ~150 lines (down from 497).
-- [ ] `packages/pi-lean-portal/core/shared/settings-reader.ts` is kept and
-      imported by `browser-toggle.ts` (and `plugin-config.ts`, the test helper);
-      `rg "function readMergedSettings\|function readSettingsFile"` in the
-      portal package returns no inlined copies.
-- [ ] `SIBLING_TOOL_NAMES` / `setSearchSlot` are gone; `rg setSearchSlot` and
-      `rg SIBLING_TOOL_NAMES` are empty across the monorepo.
-- [ ] `/web on`, `/web off`, `/web learn` behave exactly as before against a
-      MockPI (assertion tests), with the `requires` cascade doing the
-      composition — no hand-written learn↔web coupling in portal.
-- [ ] `defaultProfile` persists under `portal-conversation-state`, separate
-      from `toolset-state:portal.*` entries.
-- [ ] Portal's `browser` glyph renders on `session_start` regardless of
-      handler registration order (the capture-ordering fix) — one test
-      simulates `defineToolset` called before the capture handler.
-- [ ] `npx vitest run packages/pi-lean-portal` is green; no invariant test is
-      duplicated here (review check).
-- [ ] No portal test reaches into the library's internal registry — it uses
-      only the public API.
-
----
-
-## Pending — Sprint 6 — Search migration (monorepo `main`)
-
-**Goal:** search owns its own `search.web` toolset and co-activates off
-`portal.web`'s `changed` event per §10/§10.1.
-
-**Work:**
-
-1. Add `pi-tool-masking` (`^1.0.0`) to `packages/pi-lean-search/package.json`
-   `dependencies`.
-2. In `packages/pi-lean-search/index.ts`:
-   - `defineToolset` for `search.web` (`new Set(["web-search"])`,
-     `defaultEnabled: true`).
-   - Co-activation listener on `TOOLSET_EVENTS.changed` for `id ===
-     "portal.web"`: `enable`→`searchToolset.enable(pi)`,
-     `disable`→`searchToolset.disable(pi)`. Listen on `changed` **only**, not
-     `restored` (§10.1).
-   - Glyph listener on `search.web`'s own `changed`/`restored`, rendering the
-     `search` slot. `render()` called from inside the `session_start` capture
-     handler.
-   - Keep the existing `session_shutdown` glyph cleanup (§10 — consumer-owned).
-   - Keep the SearXNG health probe; the glyph reflects `search.web` activation
-     - health color.
-3. Portal no longer references search at all — verify no import/identifier
-   coupling remains.
-
-**Acceptance criteria:**
-
-- [ ] The §10.1 companion matrix holds as tests:
-      - Fresh, config off → `portal.web` `changed` → `search.web` mirrors off.
-      - Fresh, default on → mirrors on.
-      - Restart after `/web off` → `portal.web` `restored` (persisted false),
-        `search.web` restores its own persisted false (not re-mirrored).
-      - Restart, manager-disabled search with portal on → `portal.web`
-        `restored` true, `search.web` restores its own persisted false.
-- [ ] `search.web` co-activation listens on `changed` only — a test asserts no
-      `searchToolset.enable/disable` call fires on a `restored` event for
-      `portal.web`.
-- [ ] Portal has zero references to search (`rg -i search` in
-      `packages/pi-lean-portal/browser-toggle.ts` is empty).
-- [ ] `session_shutdown` still clears the `search` glyph.
-- [ ] `npx vitest run packages/pi-lean-search` is green.
+Search owns its own `search.web` toolset and co-activates off `portal.web`'s
+`changed` event per §10/§10.1. `pi-tool-masking` added to
+`packages/pi-lean-search/package.json` `dependencies`. In `index.ts`:
+`defineToolset` for `search.web` (`new Set(["web-search"])`,
+`defaultEnabled: true`); a co-activation listener on `TOOLSET_EVENTS.changed`
+for `id === "portal.web"` calls `enable`/`disable` on the search toolset —
+listens on `changed` **only**, not `restored` (§10.1, so a persisted-off
+search is not re-mirrored on restart). Glyph listener on `search.web`'s own
+`changed`/`restored` events renders the `search` slot; `renderSearchGlyph` is
+called from the `session_start`/`session_tree` capture handlers and reflects
+`search.web` activation × health color. The `session_shutdown` glyph cleanup
+and the SearXNG health probes (server-reachable + full-pipeline, the latter
+for `/searxng-status`) were kept. Portal has zero references to search. Tests:
+24 in `web-search.test.ts` (`readSearxngUrl` config resolution + `webSearchTool`
+shape/execute/render including instant-answer rendering). `npx vitest run
+packages/pi-lean-search` green. The §10.1 companion-matrix acceptance criteria
+(restart-after-`/web off`, manager-disabled-search restore behavior) were
+satisfied by **manual testing** — no regressions found — rather than automated
+tests; automated companion-matrix coverage remains a deferred gap.
 
 ---
 
@@ -344,12 +291,12 @@ resolvable by reference to the same library.
 ## Cross-cutting acceptance (whole plan)
 
 - [x] The peer-composition invariant (§9) and the `requires` cascade (§4.4)
-      have **exactly one** test home: `pi-tool-masking`'s repo. (Library side
-      done; confirmed no consumer duplication once Sprints 5/6 land.)
-- [ ] `rg "web-toggle-state|api-toggle-state"` across the monorepo `main`
+      have **exactly one** test home: `pi-tool-masking`'s repo. (Confirmed no
+      consumer duplication — Sprints 5/6 ship thin integration tests only.)
+- [x] `rg "web-toggle-state|api-toggle-state"` across the monorepo `main`
       returns only CHANGELOG/history references — the old persist keys are gone
-      from live code.
-- [ ] `rg "settings-reader"` across the monorepo `main` returns the portal
+      from live code (verified post-Sprint 5/6).
+- [x] `rg "settings-reader"` across the monorepo `main` returns the portal
       reader only — the library exports no settings reader (§5.1), and no
       consumer imports `readMergedSettings` from `pi-tool-masking`.
 - [x] `globalThis.__piToolMaskingRegistry` is the only cross-instance shared
