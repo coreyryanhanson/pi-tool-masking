@@ -60,7 +60,7 @@ export const TOOLSET_EVENTS = {
 const REGISTRY_KEY = "__piToolMaskingRegistry";
 const RESTORE_EVENT_KEY = "__piToolMaskingLastRestoreEvent";
 
-interface RegistryEntry {
+export interface RegistryEntry {
 	spec: ToolsetSpec;
 	toolset: Toolset;
 }
@@ -417,4 +417,16 @@ export function getDefaultResolutionMode(
 	_pi: ExtensionAPI,
 ): DefaultResolutionMode {
 	return getModuleState().defaultResolutionMode;
+}
+
+/**
+ * Enumerate every registered toolset in the global registry.
+ * Returns a read-only snapshot — callers cannot mutate the live registry
+ * through the returned array. Each entry carries the full spec and the
+ * Toolset handle (enable / disable / isEnabled).
+ *
+ * No `pi` argument needed — enumeration is a pure registry read.
+ */
+export function getRegisteredToolsets(): readonly RegistryEntry[] {
+	return [...getRegistry().values()];
 }

@@ -337,6 +337,18 @@ export function setDefaultResolutionMode(
 ): void;
 
 export function getDefaultResolutionMode(pi: ExtensionAPI): DefaultResolutionMode;
+
+/** Enumerate every registered toolset in the global registry (§6.1).
+ *  Returns a read-only snapshot — callers cannot mutate the live
+ *  registry through the returned array. Each entry carries the full
+ *  spec and the Toolset handle (enable / disable / isEnabled).
+ *  No pi argument needed — enumeration is a pure registry read. */
+export interface RegistryEntry {
+  spec: ToolsetSpec;
+  toolset: Toolset;
+}
+
+export function getRegisteredToolsets(): readonly RegistryEntry[];
 ```
 
 There is **no `registerToggleCommand` export**. The library does not

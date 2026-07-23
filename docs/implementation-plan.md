@@ -78,7 +78,7 @@ consumer before locking ourselves to the API.
 ## Completed — Sprints 0–4 (library)
 
 All four library sprints shipped on the `initial-commit` branch. `npm test` is
-green: **86 tests across 2 files** (`core.test.ts`, `registry-convergence.test.ts`).
+green: **84 tests across 2 files** (`core.test.ts`, `registry-convergence.test.ts`).
 What each sprint delivered:
 
 ### Sprint 0 — Library scaffolding ✅

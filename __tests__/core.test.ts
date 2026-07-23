@@ -6,6 +6,8 @@ import {
 	TOOLSET_EVENTS,
 	setDefaultResolutionMode,
 	getDefaultResolutionMode,
+	getRegisteredToolsets,
+	type RegistryEntry,
 } from "../index.js";
 
 // ---------------------------------------------------------------------------
@@ -543,6 +545,92 @@ describe("Peer composition (§9 canonical test)", () => {
 		expect(mock.getActiveTools()).not.toContain("a-tool");
 		expect(mock.getActiveTools()).not.toContain("b-tool");
 		expect(mock.getActiveTools()).not.toContain("c-tool");
+	});
+});
+
+// ===================================================================
+// getRegisteredToolsets (§5)
+// ===================================================================
+
+describe("getRegisteredToolsets (§5)", () => {
+	it("returns empty array when no toolsets registered", () => {
+		const result = getRegisteredToolsets();
+		expect(result).toEqual([]);
+	});
+
+	it("returns all registered toolsets with correct spec.id and toolset", () => {
+		const { pi } = createEnv();
+		const ts1 = defineToolset(
+			pi,
+			makeSpec({ id: "a.a", persistKey: "k:a.a", names: new Set(["tool-a"]) }),
+		);
+		const ts2 = defineToolset(
+			pi,
+			makeSpec({ id: "b.b", persistKey: "k:b.b", names: new Set(["tool-b"]) }),
+		);
+
+		const result = getRegisteredToolsets();
+		expect(result).toHaveLength(2);
+
+		const ids = result.map((e: RegistryEntry) => e.spec.id).sort();
+		expect(ids).toEqual(["a.a", "b.b"]);
+
+		const t1 = result.find((e: RegistryEntry) => e.spec.id === "a.a")!;
+		expect(t1.toolset).toBe(ts1);
+		expect(t1.toolset.isEnabled(pi)).toBe(false);
+
+		const t2 = result.find((e: RegistryEntry) => e.spec.id === "b.b")!;
+		expect(t2.toolset).toBe(ts2);
+		expect(t2.toolset.isEnabled(pi)).toBe(false);
+	});
+
+	it("returns a fresh array each call (not the live Map)", () => {
+		const { pi } = createEnv();
+		defineToolset(
+			pi,
+			makeSpec({ id: "a", persistKey: "k:a", names: new Set(["tool-a"]) }),
+		);
+
+		const snapshot1 = getRegisteredToolsets();
+		const snapshot2 = getRegisteredToolsets();
+		expect(snapshot1).toEqual(snapshot2);
+		expect(snapshot1).not.toBe(snapshot2);
+
+		// Registering another toolset doesn't affect the old snapshot length
+		defineToolset(
+			pi,
+			makeSpec({ id: "b", persistKey: "k:b", names: new Set(["tool-b"]) }),
+		);
+		expect(snapshot1).toHaveLength(1);
+		expect(getRegisteredToolsets()).toHaveLength(2);
+	});
+
+	it("entries carry working toolset handles", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({ id: "a", persistKey: "k:a", names: new Set(["tool-a"]) }),
+		);
+
+		const entries = getRegisteredToolsets();
+		expect(entries).toHaveLength(1);
+		const entry = entries[0]!;
+		expect(entry.toolset.isEnabled(pi)).toBe(false);
+
+		entry.toolset.enable(pi);
+		expect(entry.toolset.isEnabled(pi)).toBe(true);
+
+		entry.toolset.disable(pi);
+		expect(entry.toolset.isEnabled(pi)).toBe(false);
+	});
+
+	it("returned type is readonly (TypeScript compile-time guarantee)", () => {
+		const result: readonly RegistryEntry[] = getRegisteredToolsets();
+		expect(result).toEqual([]);
+		// Compile-time: result.push would fail TypeScript. Runtime array is
+		// plain (not frozen) — the constraint is enforced by the type system,
+		// not Object.freeze.
 	});
 });
 
