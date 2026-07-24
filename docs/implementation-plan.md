@@ -121,16 +121,20 @@ registry idempotency, enable/disable idempotency.
 one's id. Cycle detection is lazy (first graph resolution, not
 `defineToolset` time) — the walk throws on a stack revisit, naming the cycle
 path (`A → B → C → A`). Forward-references are allowed (a `requires` id not yet
-registered is skipped until it appears). `setDefaultResolutionMode` /
-`getDefaultResolutionMode` store the library-level mode in globalThis state
-(default `"exclusion"`). Tests: dependency cascade (all four §9 directions),
+registered is skipped until it appears). `setDefaultResolutionMode` persists the mode via
+`pi.appendEntry("toolset-resolution-mode", { mode })` and
+`getDefaultResolutionMode` reads the module state (which may have been
+restored from the branch on a fresh process). Default `"exclusion"`. Tests: dependency cascade (all four §9 directions),
 cycle throw with path, forward-reference, mode set/get, no-path-yields-
 `L.enabled && !B.enabled`.
 
 ### Sprint 3 — Restore, events ✅
 
 The `session_start` / `session_tree` restore handler (registered in Sprint 1,
-bodied here): per registered toolset, read `spec.persistKey` from
+bodied here): at the top of `doRestore`, read the persisted resolution
+mode from the branch (`"toolset-resolution-mode"` entry) before the
+per-toolset loop — this sets `defaultResolutionMode` for the entire
+restore; then, per registered toolset, read `spec.persistKey` from
 `ctx.sessionManager.getBranch()`; an entry → apply its `enabled`, emit
 `restored`; no entry → resolve `spec.defaultEnabled` under exclusion mode or
 `false` under inclusion mode, apply, emit `changed`, and **do not call
