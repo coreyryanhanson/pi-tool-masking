@@ -639,27 +639,78 @@ describe("getRegisteredToolsets (§5)", () => {
 // ===================================================================
 
 describe("Default resolution mode (§4.5)", () => {
-	const dummyPI = {} as ExtensionAPI;
+	// setDefaultResolutionMode now persists via pi.appendEntry, so these need
+	// a real MockPI (not a bare {}) — the entry writes are harmless here.
+	const { pi } = createEnv();
 
 	it("defaults to exclusion", () => {
-		expect(getDefaultResolutionMode(dummyPI)).toBe("exclusion");
+		expect(getDefaultResolutionMode(pi)).toBe("exclusion");
 	});
 
 	it("set and get inclusion mode", () => {
-		setDefaultResolutionMode(dummyPI, "inclusion");
-		expect(getDefaultResolutionMode(dummyPI)).toBe("inclusion");
+		setDefaultResolutionMode(pi, "inclusion");
+		expect(getDefaultResolutionMode(pi)).toBe("inclusion");
 	});
 
 	it("set and get exclusion mode", () => {
-		setDefaultResolutionMode(dummyPI, "exclusion");
-		expect(getDefaultResolutionMode(dummyPI)).toBe("exclusion");
+		setDefaultResolutionMode(pi, "exclusion");
+		expect(getDefaultResolutionMode(pi)).toBe("exclusion");
 	});
 
 	it("mode persists in globalThis shared state across calls", () => {
-		setDefaultResolutionMode(dummyPI, "inclusion");
-		expect(getDefaultResolutionMode(dummyPI)).toBe("inclusion");
-		setDefaultResolutionMode(dummyPI, "exclusion");
-		expect(getDefaultResolutionMode(dummyPI)).toBe("exclusion");
+		setDefaultResolutionMode(pi, "inclusion");
+		expect(getDefaultResolutionMode(pi)).toBe("inclusion");
+		setDefaultResolutionMode(pi, "exclusion");
+		expect(getDefaultResolutionMode(pi)).toBe("exclusion");
+	});
+
+	it("setDefaultResolutionMode appends a durable mode entry", () => {
+		const { mock, pi } = createEnv();
+		setDefaultResolutionMode(pi, "inclusion");
+		const entries = mock.getEntries("toolset-resolution-mode");
+		expect(entries).toHaveLength(1);
+		expect(entries[0]?.data).toEqual({ mode: "inclusion" });
+	});
+});
+
+// ===================================================================
+// Resolution mode persistence — survives quit/resume (§4.5, §13.2)
+// ===================================================================
+
+describe("Resolution mode persistence — survives quit/resume (§4.5, §13.2)", () => {
+	it("inclusion mode persisted on process 1 restores on a fresh process; unknown toolset defaults off", () => {
+		// Process 1: focus sets inclusion mode (appends MODE_PERSIST_KEY entry)
+		const { mock: mock1, pi: pi1 } = createEnv();
+		setDefaultResolutionMode(pi1, "inclusion");
+		expect(getDefaultResolutionMode(pi1)).toBe("inclusion");
+		expect(mock1.getEntries("toolset-resolution-mode")).toHaveLength(1);
+
+		// Simulate quit: fresh globalThis — in-memory mode reverts to exclusion
+		cleanRegistry();
+
+		// Process 2: resume — new MockPI sharing globalThis. Its branch is
+		// seeded with the persisted mode entry (as the session manager would
+		// load it from disk on resume).
+		const { mock: mock2, pi: pi2 } = createEnv();
+		mock2.registerTool({ name: "tool-a", description: "" });
+		mock2.appendEntry("toolset-resolution-mode", { mode: "inclusion" });
+		// A toolset registered post-focus with no persisted {enabled} entry.
+		// defaultEnabled: true would turn it ON in exclusion mode — the drift
+		// bug. Inclusion mode must hold it OFF.
+		defineToolset(
+			pi2,
+			makeSpec({ names: new Set(["tool-a"]), defaultEnabled: true }),
+		);
+
+		// Fresh process: in-memory mode is still exclusion until restore runs
+		expect(getDefaultResolutionMode(pi2)).toBe("exclusion");
+
+		mock2.fireLifecycleEvent("session_start");
+
+		// Restore replayed the persisted mode entry BEFORE per-toolset fallback,
+		// so inclusion holds and the unknown toolset restores off.
+		expect(getDefaultResolutionMode(pi2)).toBe("inclusion");
+		expect(mock2.getActiveTools()).not.toContain("tool-a");
 	});
 });
 

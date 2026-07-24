@@ -82,6 +82,7 @@ function getRegistry(): Registry {
 // ---------------------------------------------------------------------------
 
 const MODULE_KEY = "__piToolMaskingModuleState";
+const MODE_PERSIST_KEY = "toolset-resolution-mode";
 
 interface ModuleState {
 	defaultResolutionMode: DefaultResolutionMode;
@@ -140,8 +141,20 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		(globalThis as any)[RESTORE_EVENT_KEY] = event;
 
 		const registry = getRegistry();
-		const mode = getModuleState().defaultResolutionMode;
 		const branch = ctx.sessionManager.getBranch();
+
+		// Re-read durable resolution mode before per-toolset fallback (§4.5).
+		// setDefaultResolutionMode persists this bit; a fresh process defaults
+		// to "exclusion" until the persisted entry is replayed here.
+		const modeEntries = branch.filter(
+			(b: any) => b.customType === MODE_PERSIST_KEY && b.data?.mode,
+		);
+		if (modeEntries.length > 0) {
+			getModuleState().defaultResolutionMode = (
+				modeEntries[modeEntries.length - 1] as any
+			).data.mode;
+		}
+		const mode = getModuleState().defaultResolutionMode;
 
 		// ponytail: restore applies each toolset's entry independently and does
 		// NOT re-run the requires cascade. Safe because §7.1 guarantees persisted
@@ -407,10 +420,11 @@ export function defineToolset(pi: ExtensionAPI, spec: ToolsetSpec): Toolset {
 }
 
 export function setDefaultResolutionMode(
-	_pi: ExtensionAPI,
+	pi: ExtensionAPI,
 	mode: DefaultResolutionMode,
 ): void {
 	getModuleState().defaultResolutionMode = mode;
+	pi.appendEntry(MODE_PERSIST_KEY, { mode });
 }
 
 export function getDefaultResolutionMode(
