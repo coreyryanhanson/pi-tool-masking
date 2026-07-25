@@ -5,7 +5,8 @@
 	"type": "module",
 	"description": "Core library for grouping pi tools into toggleable toolsets with persistent state and cross-extension events.",
 	"keywords": ["tool-masking", "pi-extension"],
-	"license": "MIT",
+	"license": "AGPL-3.0-or-later",
+	"license-file": "LICENSE",
 	"author": "",
 	"repository": {
 		"type": "git",

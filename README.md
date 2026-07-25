@@ -96,7 +96,7 @@ Switch how toolsets with no persisted state resolve on restore. Two modes:
 | Mode | Behavior on restore (no persisted entry) |
 |---|---|
 | `"exclusion"` (default) | Toolsets default **on** if `defaultEnabled` is true, **off** otherwise |
-| `"inclusion"` | All unknown toolsets default **off** — useful for focus模式的"only these tools" workflows |
+| `"inclusion"` | All unknown toolsets default **off** — useful for focus-mode "only these tools" workflows |
 
 ### `getDefaultResolutionMode(pi)`
 
@@ -179,7 +179,7 @@ interface Toolset {
 
 ```ts
 interface ToolsetChangedEvent {
- id: string;        // Toolset id, e.g. "portal.web"
+ id: string;        // Toolset id, e.g. "my-plugin.web"
  enabled: boolean;  // New state
  member?: string;   // Present only when emitMemberEvents is on — the specific tool that changed
 }
@@ -252,7 +252,7 @@ const learnSpec: ToolsetSpec = {
 - **Registration:** `defineToolset` stores the spec and handle in a global registry (shared across module instances, so multiple extensions see the same toolsets).
 - **Persistence:** each toolset writes `{ enabled }` entries under its `persistKey` on the session branch. On `session_start` or `session_tree`, the library re-reads the branch and applies the last persisted state.
 - **Default resolution:** a single `toolset-resolution-mode` entry on the branch controls whether unknown toolsets default on or off. This is set by `setDefaultResolutionMode` and persists across reloads.
-- **Events:** toggles always emit; restore also always emits. No state-change check gating — every toggle fires an event so side-effect owners stay in sync.
+- **Events:** a live toggle emits only when state actually changes (no-op toggles are suppressed); restore always emits, so side-effect owners stay in sync across reloads and tree navigations.
 
 ---
 
@@ -260,12 +260,11 @@ const learnSpec: ToolsetSpec = {
 
 This package is used by:
 
-- **[pi-lean-portal](https://github.com/coreyryanhanson/pi-lean-portal)** — browser automation tools toggled via `/web on|off|learn`
-- **[pi-lean-search](https://github.com/coreyryanhanson/pi-lean-search)** — SearXNG search tool toggled via `/searxng-status`
+- **[pi-lean-dimension](https://github.com/coreyryanhanson/pi-lean-dimension)** — browser automation and SearXNG search tools toggled via `/web on|off|learn` and `/searxng-status`
 - **[pi-tbox](https://github.com/coreyryanhanson/pi-tbox)** — cross-extension tool manager that queries `getRegisteredToolsets()` for its `/tbox toggle` and `/tbox focus` commands
 
 ---
 
 ## License
 
-MIT
+GNU Affero General Public License v3.0 (AGPL-3.0). See [LICENSE](./LICENSE).
