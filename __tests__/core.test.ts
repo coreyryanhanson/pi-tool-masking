@@ -36,7 +36,6 @@ function makeSpec(
 		names: Set<string>;
 		defaultEnabled: boolean;
 		requires: string[];
-		masked: boolean;
 		emitMemberEvents: boolean;
 		label: string;
 		description: string;

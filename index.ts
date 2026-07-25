@@ -20,8 +20,6 @@ export interface ToolsetSpec {
 	persistKey: string;
 	/** Fresh-session fallback when no branch entry exists. */
 	defaultEnabled?: boolean;
-	/** Addressability: when true, members are reachable only via the group. Default false. */
-	masked?: boolean;
 	/** Dependency: ids of toolsets that must be enabled for this one. */
 	requires?: string[];
 	/** When true, a group toggle additionally emits one `changed` event per member tool. Default false. */

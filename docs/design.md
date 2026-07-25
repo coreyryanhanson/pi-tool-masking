@@ -81,19 +81,6 @@ the key to not over-building:
 - **Activation** (on/off) — whether a tool is in the LLM's active tool
   set, driven by `pi.setActiveTools()`. Runtime state, changes on every
   toggle.
-- **Addressability** (masked/unmasked) — whether a tool is reachable *as
-  an individual* or *only through its group*. A structural declaration
-  on the spec, fixed at registration. This is what "masking" means in
-  this library: the group hides its members from individual addressing —
-  in the generated command surface, in the downstream picker (§13), in
-  tagging, in every surface that enumerates "what can I act on."
-
-`pi.setActiveTools` is flat and the platform cannot stop a rogue
-extension from naming a masked group's members directly — that is an
-activation-level action the library cannot police. What `masked`
-guarantees is that **every surface the library exposes and every
-command it generates** treats masked members as reachable only via the
-group. It is an addressability contract, not a platform enforcement.
 
 ### 4.1 Toolset
 
@@ -108,8 +95,7 @@ has:
   no branch entry exists. The **consumer resolves any config-file default
   at the call site** and passes the resulting boolean (see §5); the
   library does not read `settings.json` (§5.1 — no library-side reader)
-- an optional `masked` flag (addressability — see §4.2)
-- an optional `requires` array (dependency — see §4.4)
+- an optional `requires` array (dependency — see §4.3)
 - an optional `emitMemberEvents` flag (see §6)
 
 The library does **not** own status-bar glyphs. A toolset has no `slot` /
@@ -121,28 +107,12 @@ toolset's `changed`/`restored` events and render their own glyph.
 
 There is **no `learn` field**. "Learn mode" is not a grouping primitive;
 it is a two-toolset pattern a consumer composes at the call site (base
-toolset + extended toolset, where "learn" = both on). See §4.3 and §10.
+toolset + extended toolset, where "learn" = both on). See §4.2 and §10.
 
 A toolset tolerates `names` that aren't currently registered (filtered to
 the registered subset at actuation time, matching today's `getRegisteredIn`
 helper). This lets a consumer define a toolset before all its tools are
 loaded, and keeps a toolset non-fatal if a sibling package is absent.
-
-### 4.2 Masked vs unmasked (addressability)
-
-`masked: true` means the group is the addressable unit: members are not
-individually reachable through any surface the library generates or
-exposes (command subcommands, registry enumeration, downstream picker
-derivation). `masked: false` (default) leaves members individually
-addressable. `setActiveTools` is always flat — "inseparable" is enforced
-as an addressability contract at the surface layer, never by routing
-tricks, and never against a caller that bypasses the library. In
-practice only the deferred manager's picker (§13) honors `masked`: it
-is a presentation/addressability contract over the surfaces the library
-*generates*, not a security boundary against direct `setActiveTools`
-calls (see §13.2).
-
-### 4.3 Toolset composition
 
 A toolset that includes another toolset's members (e.g. "portal base +
 learn") is just a second toolset whose `names = base.names ∪
@@ -152,7 +122,7 @@ registry at actuation time) is deferred: it only earns its keep if
 toolset membership changes dynamically after registration, which nothing
 today does.
 
-### 4.4 Toolset dependencies (`requires`)
+### 4.3 Toolset dependencies (`requires`)
 
 A toolset may declare `requires: string[]` — the ids of other toolsets
 that must be enabled for it to be enabled. This is a **generic
@@ -288,9 +258,6 @@ export interface ToolsetSpec {
    *  local reader (portal's `core/shared/settings-reader.ts`); do not
    *  add a shared reader here — see §5.1. */
   defaultEnabled?: boolean;
-  /** Addressability: when true, members are reachable only via the group
-   *  in every surface the library generates or exposes (§4.2). Default false. */
-  masked?: boolean;
   /** Dependency: ids of toolsets that must be enabled for this one to be
    *  enabled. `enable` transitively enables them; `disable` of a required
    *  toolset cascades `disable` to every toolset that `requires` it. This
@@ -314,7 +281,7 @@ export interface ToolsetSpec {
 // optional fields must be OMITTED, not set to `undefined`. When a field's
 // value comes from a possibly-`undefined` variable, use conditional
 // spread rather than assigning `undefined`:
-//   defineToolset(pi, { id, names, persistKey, ...(m !== undefined && { masked: m }) });
+//   defineToolset(pi, { id, names, persistKey, ...(m !== undefined && { requires: m }) });
 
 export interface Toolset {
   enable(pi: ExtensionAPI): void;
@@ -578,7 +545,7 @@ ships on the `feat/pi-lean-host` branch and is not yet on `main`, so the
 released `pi-lean-portal` on `main`.
 
 The registry stores each toolset's `spec` (at minimum `id`, `names`,
-`masked`, `requires`) plus the `Toolset` object, keyed by `spec.id`. The
+`requires`) plus the `Toolset` object, keyed by `spec.id`. The
 manager extension queries it and calls `toolset.enable(pi)` /
 `disable(pi)` with its **own** `pi` — all extensions in a pi session
 share the same underlying runtime, so `setActiveTools` / `appendEntry`
@@ -643,9 +610,9 @@ pass collisions still throw; reload/resume re-entry is still safe) — but
 ship idempotent-by-content first, since it alone covers both reload and
 resume.
 
-Exposing `names` + `masked` in the registry is what lets the downstream
-picker (§13) derive addressable units: a tool is individually
-addressable iff it is not a member of any masked toolset. The library
+Exposing `names` in the registry is what lets the downstream
+picker (§13) derive addressable units: tools are individual
+addressable units. The library
 does not provide a `getToggleUnits()` helper — that derivation is
 trivial and belongs to the manager, not the library (building it here
 is the framework smell §3 warns against).
@@ -1093,17 +1060,14 @@ needs.
 
 ### 13.1 Addressability, tagging, and the picker
 
-The manager's picker renders "all available tools, except masked-group
-members show as their group" — the addressability axis from §4. This is
-**derived, not stored**: the manager enumerates registry toolsets and
+The manager's picker renders "all available tools" — every tool is an
+addressable unit. The picker enumerates registry toolsets and
 computes the addressable-unit list:
 
-- a **masked** toolset → one unit (the group); its members are suppressed
-  from the individual list (they have traded individual addressability
-  for group addressability);
-- an **unmasked** toolset → its members are individual units; the group
-  may appear as a convenience "select all" card, but that is a manager UI
-  choice, not a library concern;
+- a toolset → one unit (the group); members appear as individual
+  units in the picker; the group may appear as a convenience
+  "select all" card, but that is a manager UI choice, not a library
+  concern;
 - a standalone tool (no toolset) → an individual unit.
 
 Tags are user-assigned labels on **addressable units** (tools or groups),
@@ -1111,13 +1075,9 @@ stored in the manager's own user config. The library never knows what a
 tag is. `on`/`off`/`focus` on a tag resolves the tag → its addressable
 units → activates/deactivates each (focus additionally flips the
 library's default-resolution mode to inclusion so the focus set survives
-new-tool drift — see §13.2). Because a masked group's members are not
-addressable units, they cannot be tagged individually — the user tags
-the group, and the operation hits the group as a whole. This is the
-"trade visibility with group abstraction" behavior, and it falls out of
-the two-axis model with no new library machinery: `masked` is the single
-source of truth, and every surface (commands, picker, tagging) respects
-it.
+new-tool drift — see §13.2). Because every tool is addressable, tags
+can target any individual tool or group, and the operation hits the
+target as a whole.
 
 `emitMemberEvents` (§6) is the one library-side affordance the picker may
 opt into: a group toggle can additionally fan out to one `changed` event
@@ -1184,11 +1144,10 @@ later wants builtins to be a taggable/toggleable unit, it can register a
 
 Also still deferred (orthogonal to the manager):
 
-- **`masked` enforcement against direct `setActiveTools` bypass.** The
-  library enforces addressability at every surface it generates or
-  exposes; it cannot police a rogue extension calling
-  `pi.setActiveTools(["masked-member"])` directly (§4). No need to
-  encode deeper until a real threat model requires it.
+- **Direct `setActiveTools` bypass.** A rogue extension can call
+  `pi.setActiveTools([...])` directly with any tool name, bypassing
+  the library's `enable`/`disable` surface. No need to encode
+  deeper until a real threat model requires it.
 
 ## 14. Publishing & gallery visibility
 
