@@ -1,0 +1,39 @@
+{
+	"name": "pi-tool-masking",
+	"version": "1.0.0",
+	"private": false,
+	"type": "module",
+	"description": "Core library for grouping pi tools into toggleable toolsets with persistent state and cross-extension events.",
+	"keywords": ["tool-masking", "pi-extension"],
+	"license": "AGPL-3.0-or-later",
+	"author": "Corey Ryan Hanson",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/coreyryanhanson/pi-tool-masking.git"
+	},
+	"scripts": {
+		"test": "vitest run",
+		"test:watch": "vitest",
+		"version:patch": "npm version patch --no-git-tag-version",
+		"version:minor": "npm version minor --no-git-tag-version",
+		"version:major": "npm version major --no-git-tag-version",
+		"prepublishOnly": "npm test && npx tsc --noEmit",
+		"publish": "npm publish --access public",
+		"publish:dry": "npm publish --access public --dry-run",
+		"release:patch": "node scripts/release.mjs patch",
+		"release:minor": "node scripts/release.mjs minor",
+		"release:major": "node scripts/release.mjs major"
+	},
+	"main": "index.ts",
+	"exports": {
+		".": "./index.ts"
+	},
+	"files": [
+		"index.ts"
+	],
+	"devDependencies": {
+		"@earendil-works/pi-coding-agent": "^0.78.0",
+		"@types/node": "^22.0.0",
+		"vitest": "^4.0.0"
+	}
+}
