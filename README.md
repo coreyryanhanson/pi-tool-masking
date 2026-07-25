@@ -100,7 +100,7 @@ Switch how toolsets with no persisted state resolve on restore. Two modes:
 
 ### `getDefaultResolutionMode()`
 
-Read the current default resolution mode.
+Read the current default resolution mode. Returns `"exclusion"` until a session restore loads the persisted mode.
 
 ### `getRegisteredToolsets()`
 

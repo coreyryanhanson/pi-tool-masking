@@ -318,14 +318,19 @@ describe("defineToolset — collision policy", () => {
 	it("warns and replaces on duplicate id with different spec", () => {
 		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 		const { pi } = createEnv();
-		defineToolset(pi, makeSpec({ id: "dup", persistKey: "k:dup" }));
-		defineToolset(
+		const t1 = defineToolset(pi, makeSpec({ id: "dup", persistKey: "k:dup" }));
+		const t2 = defineToolset(
 			pi,
 			makeSpec({ id: "dup", persistKey: "k:dup", defaultEnabled: false }),
 		);
 		expect(warnSpy).toHaveBeenCalledWith(
 			expect.stringContaining('Toolset "dup" re-registered'),
 		);
+		// Registry holds the new spec, not the old
+		const registered = getRegisteredToolsets();
+		expect(registered).toHaveLength(1);
+		expect(registered[0]!.spec.defaultEnabled).toBe(false);
+		expect(t2).not.toBe(t1);
 		warnSpy.mockRestore();
 	});
 
