@@ -434,13 +434,16 @@ export function setDefaultResolutionMode(
 	pi: ExtensionAPI,
 	mode: DefaultResolutionMode,
 ): void {
+	if (mode !== "exclusion" && mode !== "inclusion") {
+		throw new Error(
+			`[pi-tool-masking] Invalid defaultResolutionMode: "${mode}". Must be "exclusion" or "inclusion".`,
+		);
+	}
 	getModuleState().defaultResolutionMode = mode;
 	pi.appendEntry(MODE_PERSIST_KEY, { mode });
 }
 
-export function getDefaultResolutionMode(
-	_pi: ExtensionAPI,
-): DefaultResolutionMode {
+export function getDefaultResolutionMode(): DefaultResolutionMode {
 	return getModuleState().defaultResolutionMode;
 }
 

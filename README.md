@@ -98,7 +98,7 @@ Switch how toolsets with no persisted state resolve on restore. Two modes:
 | `"exclusion"` (default) | Toolsets default **on** if `defaultEnabled` is true, **off** otherwise |
 | `"inclusion"` | All unknown toolsets default **off** — useful for focus-mode "only these tools" workflows |
 
-### `getDefaultResolutionMode(pi)`
+### `getDefaultResolutionMode()`
 
 Read the current default resolution mode.
 

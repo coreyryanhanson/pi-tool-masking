@@ -761,29 +761,28 @@ describe("getRegisteredToolsets (§5)", () => {
 // ===================================================================
 
 describe("Default resolution mode (§4.5)", () => {
-	// setDefaultResolutionMode now persists via pi.appendEntry, so these need
-	// a real MockPI (not a bare {}) — the entry writes are harmless here.
-	const { pi } = createEnv();
-
 	it("defaults to exclusion", () => {
-		expect(getDefaultResolutionMode(pi)).toBe("exclusion");
+		expect(getDefaultResolutionMode()).toBe("exclusion");
 	});
 
 	it("set and get inclusion mode", () => {
+		const { pi } = createEnv();
 		setDefaultResolutionMode(pi, "inclusion");
-		expect(getDefaultResolutionMode(pi)).toBe("inclusion");
+		expect(getDefaultResolutionMode()).toBe("inclusion");
 	});
 
 	it("set and get exclusion mode", () => {
+		const { pi } = createEnv();
 		setDefaultResolutionMode(pi, "exclusion");
-		expect(getDefaultResolutionMode(pi)).toBe("exclusion");
+		expect(getDefaultResolutionMode()).toBe("exclusion");
 	});
 
 	it("mode persists in globalThis shared state across calls", () => {
+		const { pi } = createEnv();
 		setDefaultResolutionMode(pi, "inclusion");
-		expect(getDefaultResolutionMode(pi)).toBe("inclusion");
+		expect(getDefaultResolutionMode()).toBe("inclusion");
 		setDefaultResolutionMode(pi, "exclusion");
-		expect(getDefaultResolutionMode(pi)).toBe("exclusion");
+		expect(getDefaultResolutionMode()).toBe("exclusion");
 	});
 
 	it("setDefaultResolutionMode appends a durable mode entry", () => {
@@ -804,7 +803,7 @@ describe("Resolution mode persistence — survives quit/resume (§4.5, §13.2)",
 		// Process 1: focus sets inclusion mode (appends MODE_PERSIST_KEY entry)
 		const { mock: mock1, pi: pi1 } = createEnv();
 		setDefaultResolutionMode(pi1, "inclusion");
-		expect(getDefaultResolutionMode(pi1)).toBe("inclusion");
+		expect(getDefaultResolutionMode()).toBe("inclusion");
 		expect(mock1.getEntries("toolset-resolution-mode")).toHaveLength(1);
 
 		// Simulate quit: fresh globalThis — in-memory mode reverts to exclusion
@@ -825,13 +824,13 @@ describe("Resolution mode persistence — survives quit/resume (§4.5, §13.2)",
 		);
 
 		// Fresh process: in-memory mode is still exclusion until restore runs
-		expect(getDefaultResolutionMode(pi2)).toBe("exclusion");
+		expect(getDefaultResolutionMode()).toBe("exclusion");
 
 		mock2.fireLifecycleEvent("session_start");
 
 		// Restore replayed the persisted mode entry BEFORE per-toolset fallback,
 		// so inclusion holds and the unknown toolset restores off.
-		expect(getDefaultResolutionMode(pi2)).toBe("inclusion");
+		expect(getDefaultResolutionMode()).toBe("inclusion");
 		expect(mock2.getActiveTools()).not.toContain("tool-a");
 	});
 });

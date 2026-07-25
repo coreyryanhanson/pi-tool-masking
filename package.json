@@ -19,8 +19,8 @@
 		"version:minor": "npm version minor --no-git-tag-version",
 		"version:major": "npm version major --no-git-tag-version",
 		"prepublishOnly": "npm test",
-		"publish": "npm run prepublishOnly && npm publish --access public",
-		"publish:dry": "npm run prepublishOnly && npm publish --access public --dry-run",
+		"publish": "npm publish --access public",
+		"publish:dry": "npm publish --access public --dry-run",
 		"release:patch": "node scripts/release.mjs patch",
 		"release:minor": "node scripts/release.mjs minor",
 		"release:major": "node scripts/release.mjs major"
