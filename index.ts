@@ -141,14 +141,15 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		(globalThis as any)[RESTORE_EVENT_KEY] = event;
 
 		const registry = getRegistry();
-		const branch = ctx.sessionManager.getBranch();
 
 		// Re-read durable resolution mode before per-toolset fallback (§4.5).
 		// setDefaultResolutionMode persists this bit; a fresh process defaults
-		// to "exclusion" until the persisted entry is replayed here.
-		const modeEntries = branch.filter(
-			(b: any) => b.customType === MODE_PERSIST_KEY && b.data?.mode,
-		);
+		// to "exclusion" until the persisted entry is replayed here. Mode
+		// entries are from a prior session (not written during this restore), so
+		// a single read here is sufficient.
+		const modeEntries = ctx.sessionManager
+			.getBranch()
+			.filter((b: any) => b.customType === MODE_PERSIST_KEY && b.data?.mode);
 		if (modeEntries.length > 0) {
 			getModuleState().defaultResolutionMode = (
 				modeEntries[modeEntries.length - 1] as any
@@ -161,11 +162,23 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		// state is always consistent — the live-toggling cascade (§4.4) makes an
 		// incoherent persisted combo unreachable. Re-adding cascade here would
 		// double-toggle and break restore independence.
+		//
+		// Re-read the branch per toolset (not once before the loop): a companion
+		// mirror (§10.1) fires synchronously inside `_applyRestoreToolset` and may
+		// `appendEntry` for a toolset later in iteration order (e.g. portal.web's
+		// default-false restore makes search.web disable itself). Snapshotting the
+		// branch once would hide that write from the later toolset, so it would
+		// fall back to its packaged default and desync from the companion — the
+		// §6 "search's own restore reads the branch and finds the entry the mirror
+		// just wrote" guarantee.
 		for (const [, entry] of registry) {
 			const { spec } = entry;
 
-			// Find persisted entry for this toolset (last-writer-wins)
-			const persistEntries = branch.filter(
+			// Find persisted entry for this toolset (last-writer-wins).
+			// Fresh read per toolset so companion-mirror writes during this
+			// pass are visible to later toolsets.
+			const branchNow = ctx.sessionManager.getBranch();
+			const persistEntries = branchNow.filter(
 				(b: any) => b.customType === spec.persistKey && b.data != null,
 			);
 

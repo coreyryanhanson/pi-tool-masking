@@ -188,6 +188,129 @@ describe("defineToolset — restore handler registration", () => {
 		expect(restoredCallsAfterSecond.length).toBeGreaterThanOrEqual(2);
 		emitSpy.mockRestore();
 	});
+
+	// §10.1 / §6 — companion mirror during restore must stay consistent.
+	// A companion listening on `changed` for a base toolset fires synchronously
+	// inside the base's restore and `appendEntry`s for itself. The restore loop
+	// must re-read the branch per toolset so the companion's own restore sees
+	// that freshly-written entry instead of falling back to its packaged default.
+	// Regression for the "search dropped after /web on + resume" bug.
+	it("companion mirror write during restore is visible to the companion's own restore", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "base-tool", description: "" });
+		mock.registerTool({ name: "comp-tool", description: "" });
+
+		// Base defaults OFF, companion defaults ON (the browserToggle:false +
+		// search default-on config that exposed the bug).
+		const baseSpec = makeSpec({
+			id: "base",
+			persistKey: "k:base",
+			names: new Set(["base-tool"]),
+			defaultEnabled: false,
+		});
+		const compSpec = makeSpec({
+			id: "comp",
+			persistKey: "k:comp",
+			names: new Set(["comp-tool"]),
+			defaultEnabled: true,
+		});
+		defineToolset(pi, baseSpec);
+		const comp = defineToolset(pi, compSpec);
+
+		// Companion co-activation: mirror base `changed` only (§10.1).
+		pi.events.on(TOOLSET_EVENTS.changed, (data: any) => {
+			if (data.id === "base") {
+				if (data.enabled) comp.enable(pi);
+				else comp.disable(pi);
+			}
+		});
+
+		// Real pi activates every extension tool at startup, THEN restore runs.
+		// Seed the same initial state so the mirror's disable actually has a
+		// tool to remove (and thus persists).
+		mock.setActiveTools(["base-tool", "comp-tool"]);
+
+		// Fresh session, no persisted entries. Restore: base falls back off →
+		// emits changed → mirror disables comp (writes k:comp {enabled:false}).
+		// comp's own restore must then find that entry and honor false, NOT
+		// fall back to its packaged default true.
+		mock.fireLifecycleEvent("session_start");
+
+		expect(mock.getActiveTools()).not.toContain("base-tool");
+		expect(mock.getActiveTools()).not.toContain("comp-tool");
+		const compEntries = mock
+			.getEntries("k:comp")
+			.map((e) => (e.data as any)?.enabled);
+		expect(compEntries).toContain(false);
+	});
+
+	it("companion co-activation round-trips across a resume boundary", () => {
+		// Session 1: base off by default. User toggles base on → mirror enables
+		// comp. Both persist {enabled:true}.
+		const s1 = new MockPI();
+		s1.registerTool({ name: "base-tool", description: "" });
+		s1.registerTool({ name: "comp-tool", description: "" });
+		const pi1 = s1 as unknown as ExtensionAPI;
+		const base = defineToolset(pi1, {
+			id: "base",
+			persistKey: "k:base",
+			names: new Set(["base-tool"]),
+			defaultEnabled: false,
+		});
+		const comp = defineToolset(pi1, {
+			id: "comp",
+			persistKey: "k:comp",
+			names: new Set(["comp-tool"]),
+			defaultEnabled: true,
+		});
+		pi1.events.on(TOOLSET_EVENTS.changed, (data: any) => {
+			if (data.id === "base") {
+				if (data.enabled) comp.enable(pi1);
+				else comp.disable(pi1);
+			}
+		});
+		// Real pi activates every extension tool at startup before restore.
+		s1.setActiveTools(["base-tool", "comp-tool"]);
+		s1.fireLifecycleEvent("session_start"); // base off → mirror disables comp
+		base.enable(pi1); // base on → mirror enables comp
+
+		expect(s1.getActiveTools()).toContain("base-tool");
+		expect(s1.getActiveTools()).toContain("comp-tool");
+
+		// Session 2: resume — new MockPI, branch seeded with session-1 entries.
+		const persisted = s1
+			.getEntries()
+			.filter(
+				(e) =>
+					e.customType === "k:base" ||
+					e.customType === "k:comp" ||
+					e.customType === "toolset-resolution-mode",
+			);
+		const s2 = new MockPI();
+		s2.registerTool({ name: "base-tool", description: "" });
+		s2.registerTool({ name: "comp-tool", description: "" });
+		for (const e of persisted) s2.appendEntry(e.customType, e.data);
+		const pi2 = s2 as unknown as ExtensionAPI;
+		defineToolset(pi2, {
+			id: "base",
+			persistKey: "k:base",
+			names: new Set(["base-tool"]),
+			defaultEnabled: false,
+		});
+		defineToolset(pi2, {
+			id: "comp",
+			persistKey: "k:comp",
+			names: new Set(["comp-tool"]),
+			defaultEnabled: true,
+		});
+
+		s2.fireLifecycleEvent("session_start");
+
+		// Both must restore ON — comp's own {enabled:true} entry wins over its
+		// packaged default and is not clobbered by a stale mirror-written false.
+		expect(s2.getActiveTools()).toContain("base-tool");
+		expect(s2.getActiveTools()).toContain("comp-tool");
+	});
 });
 
 // ===================================================================
