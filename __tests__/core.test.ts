@@ -193,14 +193,12 @@ describe("defineToolset — restore handler registration", () => {
 	// inside the base's restore and `appendEntry`s for itself. The restore loop
 	// must re-read the branch per toolset so the companion's own restore sees
 	// that freshly-written entry instead of falling back to its packaged default.
-	// Regression for the "search dropped after /web on + resume" bug.
 	it("companion mirror write during restore is visible to the companion's own restore", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "base-tool", description: "" });
 		mock.registerTool({ name: "comp-tool", description: "" });
 
-		// Base defaults OFF, companion defaults ON (the browserToggle:false +
-		// search default-on config that exposed the bug).
+		// Base defaults OFF, companion defaults ON — the mismatch that exposed the bug.
 		const baseSpec = makeSpec({
 			id: "base",
 			persistKey: "k:base",
