@@ -7,7 +7,7 @@
 	"keywords": ["tool-masking", "pi-extension"],
 	"license": "AGPL-3.0-or-later",
 	"license-file": "LICENSE",
-	"author": "",
+	"author": "Corey Ryan Hanson",
 	"repository": {
 		"type": "git",
 		"url": "https://github.com/coreyryanhanson/pi-tool-masking.git"

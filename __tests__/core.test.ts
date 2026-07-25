@@ -608,6 +608,32 @@ describe("Toolset.isEnabled", () => {
 });
 
 // ===================================================================
+// Toolset with empty names (§9)
+// ===================================================================
+
+describe("Toolset with empty names (§9)", () => {
+	it("enable does nothing and does not throw", () => {
+		const { mock, pi } = createEnv();
+		const ts = defineToolset(pi, makeSpec({ names: new Set([]) }));
+		expect(() => ts.enable(pi)).not.toThrow();
+		expect(mock.getEntries().length).toBe(0);
+	});
+
+	it("disable does nothing and does not throw", () => {
+		const { mock, pi } = createEnv();
+		const ts = defineToolset(pi, makeSpec({ names: new Set([]) }));
+		expect(() => ts.disable(pi)).not.toThrow();
+		expect(mock.getEntries().length).toBe(0);
+	});
+
+	it("isEnabled returns false", () => {
+		const { pi } = createEnv();
+		const ts = defineToolset(pi, makeSpec({ names: new Set([]) }));
+		expect(ts.isEnabled(pi)).toBe(false);
+	});
+});
+
+// ===================================================================
 // Peer composition (§9 canonical test)
 // ===================================================================
 
@@ -792,6 +818,13 @@ describe("Default resolution mode (§4.5)", () => {
 		expect(entries).toHaveLength(1);
 		expect(entries[0]?.data).toEqual({ mode: "inclusion" });
 	});
+
+	it("throws for invalid mode", () => {
+		const { pi } = createEnv();
+		expect(() => (setDefaultResolutionMode as any)(pi, "invalid")).toThrow(
+			'[pi-tool-masking] Invalid defaultResolutionMode: "invalid". Must be "exclusion" or "inclusion".',
+		);
+	});
 });
 
 // ===================================================================
@@ -971,6 +1004,30 @@ describe("Dependency cascade on enable (§9, §4.4)", () => {
 		const bEntries = mock.getEntries("k:B");
 		expect(bEntries).toHaveLength(1);
 		expect(bEntries[0]?.data).toEqual({ enabled: true });
+	});
+
+	it('duplicate requires ids (["B", "B"]) does not double-enable or throw', () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "b-tool", description: "" });
+		mock.registerTool({ name: "l-tool", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({ id: "B", persistKey: "k:B", names: new Set(["b-tool"]) }),
+		);
+		const tsL = defineToolset(
+			pi,
+			makeSpec({
+				id: "L",
+				persistKey: "k:L",
+				names: new Set(["l-tool"]),
+				requires: ["B", "B"],
+			}),
+		);
+		tsL.enable(pi);
+		expect(mock.getActiveTools()).toContain("b-tool");
+		expect(mock.getActiveTools()).toContain("l-tool");
+		const bEntries = mock.getEntries("k:B");
+		expect(bEntries).toHaveLength(1);
 	});
 });
 
@@ -1893,6 +1950,34 @@ describe("Restore — session_tree (§6)", () => {
 			id: "test.toolset",
 			enabled: false,
 		});
+		emitSpy.mockRestore();
+	});
+
+	it("session_start followed by session_tree both trigger restore (different event objects)", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({ names: new Set(["tool-a"]), defaultEnabled: true }),
+		);
+		mock.setActiveTools([]);
+		const emitSpy = vi.spyOn(mock.events, "emit");
+
+		mock.fireLifecycleEvent("session_start");
+		expect(mock.getActiveTools()).toContain("tool-a");
+		const afterStart = emitSpy.mock.calls.filter(
+			([c]) => c === TOOLSET_EVENTS.changed,
+		).length;
+
+		// Reset and fire session_tree — should re-run restore (fresh event object)
+		mock.setActiveTools([]);
+		mock.fireLifecycleEvent("session_tree");
+		expect(mock.getActiveTools()).toContain("tool-a");
+		const afterTree = emitSpy.mock.calls.filter(
+			([c]) => c === TOOLSET_EVENTS.changed,
+		).length;
+		expect(afterTree).toBe(afterStart + 1);
+
 		emitSpy.mockRestore();
 	});
 });

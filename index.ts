@@ -118,8 +118,10 @@ function deepEqual(a: unknown, b: unknown): boolean {
 		return a.every((v, i) => deepEqual(v, b[i]));
 	}
 	if (Array.isArray(a) !== Array.isArray(b)) return false;
-	const keysA = Reflect.ownKeys(a);
-	const keysB = Reflect.ownKeys(b);
+	const definedKeys = (o: object) =>
+		Reflect.ownKeys(o).filter((k) => (o as any)[k] !== undefined);
+	const keysA = definedKeys(a);
+	const keysB = definedKeys(b);
 	if (keysA.length !== keysB.length) return false;
 	return keysA.every((k) => deepEqual((a as any)[k], (b as any)[k]));
 }
@@ -213,6 +215,8 @@ function _emitToolsetEvents(
 
 	if (spec.emitMemberEvents) {
 		for (const name of spec.names) {
+			// Only emit for names that are actually registered tools (§6)
+			if (!pi.getAllTools().some((t) => t.name === name)) continue;
 			pi.events.emit(eventType, {
 				id: spec.id,
 				enabled,
