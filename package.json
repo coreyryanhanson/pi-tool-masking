@@ -1,10 +1,13 @@
 {
 	"name": "pi-tool-masking",
-	"version": "1.0.0",
+	"version": "1.0.2",
 	"private": false,
 	"type": "module",
 	"description": "Core library for grouping pi tools into toggleable toolsets with persistent state and cross-extension events.",
-	"keywords": ["tool-masking", "pi-extension"],
+	"keywords": [
+		"tool-masking",
+		"pi-extension"
+	],
 	"license": "MIT",
 	"author": "Corey Ryan Hanson",
 	"repository": {
