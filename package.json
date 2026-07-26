@@ -5,7 +5,7 @@
 	"type": "module",
 	"description": "Core library for grouping pi tools into toggleable toolsets with persistent state and cross-extension events.",
 	"keywords": ["tool-masking", "pi-extension"],
-	"license": "AGPL-3.0-or-later",
+	"license": "MIT",
 	"author": "Corey Ryan Hanson",
 	"repository": {
 		"type": "git",
