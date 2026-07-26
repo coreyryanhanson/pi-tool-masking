@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Switched package license to MIT for permissive use including proprietary adoption.
+
 ## 1.0.0 - 2026-07-25
 
 Initial release of `pi-tool-masking`, a core library for grouping pi tools into toggleable toolsets with persistent state and cross-extension events.
