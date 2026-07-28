@@ -426,6 +426,39 @@ export function defineToolset(pi: ExtensionAPI, spec: ToolsetSpec): Toolset {
 		}
 	}
 
+	// Name-overlap guard: no two toolsets may claim the same tool name. Every
+	// downstream failure mode (isEnabled lying, restore order-dependence, enable
+	// no-op, skipped dependents, focus leaks, mis-attribution, double-counts)
+	// requires two toolsets claiming one name; with that unreachable, toolsets
+	// own disjoint name sets. Gather every collision in this registration into
+	// one error so the author sees the full scope in one pass. `getAllTools()` is
+	// deferred to the throw branch so a clean registration never pays for it.
+	const collisions: { name: string; owner: string }[] = [];
+	for (const [id, entry] of registry) {
+		if (id === spec.id) continue;
+		for (const name of spec.names) {
+			if (entry.spec.names.has(name)) collisions.push({ name, owner: id });
+		}
+	}
+	if (collisions.length > 0) {
+		const allTools = pi.getAllTools();
+		const lines = collisions.map(({ name, owner }) => {
+			const tool = allTools.find((t) => t.name === name);
+			const where = tool
+				? ` (registered from ${tool.sourceInfo.path}, source: ${tool.sourceInfo.source})`
+				: "";
+			return `  - tool "${name}" already claimed by toolset "${owner}"${where}`;
+		});
+		throw new Error(
+			`[pi-tool-masking] name overlap: toolset "${spec.id}" claims tools ` +
+				`already owned by another toolset:\n` +
+				lines.join("\n") +
+				"\n" +
+				`Each tool may belong to only one toolset. Naming convention: prefix ` +
+				`toolset ids with a stable namespace (<product-family>.<subset>, e.g. "portal.web").`,
+		);
+	}
+
 	const toolset = new ToolsetImpl(spec);
 	registry.set(spec.id, { spec, toolset });
 

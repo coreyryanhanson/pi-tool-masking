@@ -69,7 +69,14 @@ describe("Registry (§6.1)", () => {
 		const { pi } = createEnv();
 		defineToolset(pi, makeSpec({ id: "a.a", persistKey: "k:a.a" }));
 		const regA = (globalThis as any)[REGISTRY_KEY];
-		defineToolset(pi, makeSpec({ id: "b.b", persistKey: "k:b.b" }));
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "b.b",
+				persistKey: "k:b.b",
+				names: new Set(["tool-c", "tool-d"]),
+			}),
+		);
 		const regB = (globalThis as any)[REGISTRY_KEY];
 		expect(regB).toBe(regA);
 		expect(regB.size).toBe(2);
@@ -135,7 +142,14 @@ describe("defineToolset — restore handler registration", () => {
 	it("dedup by event identity — N handlers, one run per event", () => {
 		const { mock, pi } = createEnv();
 		defineToolset(pi, makeSpec({ id: "a.a", persistKey: "k:a.a" }));
-		defineToolset(pi, makeSpec({ id: "b.b", persistKey: "k:b.b" }));
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "b.b",
+				persistKey: "k:b.b",
+				names: new Set(["tool-c", "tool-d"]),
+			}),
+		);
 		// No registration guard: each defineToolset registers its own handler
 		expect(mock.handlerCount("session_start")).toBe(2);
 		expect(mock.handlerCount("session_tree")).toBe(2);
@@ -369,6 +383,189 @@ describe("defineToolset — collision policy", () => {
 		});
 		const t2 = defineToolset(pi, spec2);
 		expect(t2).toBe(t1);
+	});
+});
+
+// ===================================================================
+// Name-overlap guard
+// ===================================================================
+
+describe("defineToolset — name-overlap guard", () => {
+	it("rejects overlap: two toolsets claiming the same tool name throw", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({
+			name: "x",
+			description: "",
+			sourceInfo: {
+				path: "/home/u/.pi/.../portal/index.ts",
+				source: "portal",
+				scope: "user",
+				origin: "top-level",
+			},
+		});
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "portal.web",
+				persistKey: "toolset-state:portal.web",
+				names: new Set(["x"]),
+			}),
+		);
+		let err: Error | undefined;
+		try {
+			defineToolset(
+				pi,
+				makeSpec({
+					id: "acme.search",
+					persistKey: "toolset-state:acme.search",
+					names: new Set(["x"]),
+				}),
+			);
+		} catch (e) {
+			err = e as Error;
+		}
+		expect(err).toBeInstanceOf(Error);
+		const msg = err!.message;
+		expect(msg).toMatch(/name overlap/);
+		expect(msg).toMatch(/portal\.web/);
+		expect(msg).toMatch(/acme\.search/);
+		expect(msg).toMatch(/portal\/index\.ts/);
+		expect(msg).toMatch(/source: portal/);
+		// The second registration must not have entered the registry.
+		expect(getRegisteredToolsets().map((e) => e.spec.id)).toEqual([
+			"portal.web",
+		]);
+	});
+
+	it("gathers multiple collisions in one registration into one error", () => {
+		const { pi } = createEnv();
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "a",
+				persistKey: "toolset-state:a",
+				names: new Set(["x"]),
+			}),
+		);
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "b",
+				persistKey: "toolset-state:b",
+				names: new Set(["y"]),
+			}),
+		);
+		let msg = "";
+		try {
+			defineToolset(
+				pi,
+				makeSpec({
+					id: "c",
+					persistKey: "toolset-state:c",
+					names: new Set(["x", "y"]),
+				}),
+			);
+		} catch (e) {
+			msg = (e as Error).message;
+		}
+		expect(msg).toMatch(/tool "x" already claimed by toolset "a"/);
+		expect(msg).toMatch(/tool "y" already claimed by toolset "b"/);
+	});
+
+	it("error omits tool-source line for an unregistered (forward-referenced) name", () => {
+		const { pi } = createEnv();
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "a",
+				persistKey: "toolset-state:a",
+				names: new Set(["x"]),
+			}),
+		);
+		// `x` is never registerTool'd, so no sourceInfo is available.
+		let msg = "";
+		try {
+			defineToolset(
+				pi,
+				makeSpec({
+					id: "b",
+					persistKey: "toolset-state:b",
+					names: new Set(["x"]),
+				}),
+			);
+		} catch (e) {
+			msg = (e as Error).message;
+		}
+		expect(msg).toMatch(/tool "x" already claimed by toolset "a"$/m);
+		expect(msg).not.toMatch(/registered from/);
+	});
+
+	it("idempotent re-registration unaffected: unchanged spec does not throw", () => {
+		const { pi } = createEnv();
+		const spec = makeSpec({
+			id: "portal.web",
+			persistKey: "toolset-state:portal.web",
+			names: new Set(["browser-navigate"]),
+		});
+		const t1 = defineToolset(pi, spec);
+		const t2 = defineToolset(pi, spec);
+		expect(t2).toBe(t1);
+	});
+
+	it("replace on changed spec re-runs the guard (self-skip works)", () => {
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const { pi } = createEnv();
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "a",
+				persistKey: "toolset-state:a",
+				names: new Set(["x"]),
+			}),
+		);
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "b",
+				persistKey: "toolset-state:b",
+				names: new Set(["y"]),
+			}),
+		);
+		// Re-define "a" with a changed spec that now also claims `y` (owned by b).
+		expect(() =>
+			defineToolset(
+				pi,
+				makeSpec({
+					id: "a",
+					persistKey: "toolset-state:a",
+					names: new Set(["x", "y"]),
+				}),
+			),
+		).toThrow(/tool "y" already claimed by toolset "b"/);
+		warnSpy.mockRestore();
+	});
+
+	it("forward-reference overlap caught: name not yet a registered tool still collides", () => {
+		const { pi } = createEnv();
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "a",
+				persistKey: "toolset-state:a",
+				names: new Set(["x"]),
+			}),
+		);
+		// `x` is not registerTool'd by either side — purely name-based collision.
+		expect(() =>
+			defineToolset(
+				pi,
+				makeSpec({
+					id: "b",
+					persistKey: "toolset-state:b",
+					names: new Set(["x"]),
+				}),
+			),
+		).toThrow(/name overlap/);
 	});
 });
 
