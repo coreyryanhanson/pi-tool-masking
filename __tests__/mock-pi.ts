@@ -32,12 +32,16 @@ export class MockPI implements Partial<ExtensionAPI> {
 
 	// --- Tool management ---
 
-	registerTool(info: Pick<ToolInfo, "name" | "description">): void {
+	registerTool(
+		info: Pick<ToolInfo, "name" | "description"> & {
+			sourceInfo?: ToolInfo["sourceInfo"];
+		},
+	): void {
 		const tool: ToolInfo = {
 			name: info.name,
 			description: info.description ?? "",
 			parameters: undefined as any,
-			sourceInfo: {
+			sourceInfo: info.sourceInfo ?? {
 				path: "mock.ts",
 				source: "extension",
 				scope: "user",

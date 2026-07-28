@@ -8,7 +8,7 @@ import type {
 // ---------------------------------------------------------------------------
 
 export interface ToolsetSpec {
-	/** Stable id, e.g. "portal.web". Used in persist keys and event payloads. */
+	/** Stable id, e.g. "my-plugin.web". Used in persist keys and event payloads. */
 	id: string;
 	/** Human-readable name for the group. Optional — presenters fall back to id. */
 	label?: string;
@@ -16,7 +16,7 @@ export interface ToolsetSpec {
 	description?: string;
 	/** Tool names this toolset governs. */
 	names: Set<string>;
-	/** Primary persistence key the toolset writes, e.g. "toolset-state:portal.web". */
+	/** Primary persistence key the toolset writes, e.g. "toolset-state:my-plugin.web". */
 	persistKey: string;
 	/** Fresh-session fallback when no branch entry exists. */
 	defaultEnabled?: boolean;
@@ -33,7 +33,7 @@ export interface Toolset {
 }
 
 export interface ToolsetChangedEvent {
-	/** Toolset id (e.g. "portal.web"). Always set. */
+	/** Toolset id (e.g. "my-plugin.web"). Always set. */
 	id: string;
 	enabled: boolean;
 	/** Present only when emitMemberEvents is on and this is a per-member fanout event. */
@@ -165,7 +165,7 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		//
 		// Re-read the branch per toolset (not once before the loop): a companion
 		// mirror (§10.1) fires synchronously inside `_applyRestoreToolset` and may
-		// `appendEntry` for a toolset later in iteration order (e.g. portal.web's
+		// `appendEntry` for a toolset later in iteration order (e.g. my-plugin.web's
 		// default-false restore makes search.web disable itself). Snapshotting the
 		// branch once would hide that write from the later toolset, so it would
 		// fall back to its packaged default and desync from the companion — the
@@ -424,6 +424,39 @@ export function defineToolset(pi: ExtensionAPI, spec: ToolsetSpec): Toolset {
 				`[pi-tool-masking] persistKey collision: "${spec.persistKey}" is already used by toolset "${id}"`,
 			);
 		}
+	}
+
+	// Name-overlap guard: no two toolsets may claim the same tool name. Every
+	// downstream failure mode (isEnabled lying, restore order-dependence, enable
+	// no-op, skipped dependents, focus leaks, mis-attribution, double-counts)
+	// requires two toolsets claiming one name; with that unreachable, toolsets
+	// own disjoint name sets. Gather every collision in this registration into
+	// one error so the author sees the full scope in one pass. `getAllTools()` is
+	// deferred to the throw branch so a clean registration never pays for it.
+	const collisions: { name: string; owner: string }[] = [];
+	for (const [id, entry] of registry) {
+		if (id === spec.id) continue;
+		for (const name of spec.names) {
+			if (entry.spec.names.has(name)) collisions.push({ name, owner: id });
+		}
+	}
+	if (collisions.length > 0) {
+		const allTools = pi.getAllTools();
+		const lines = collisions.map(({ name, owner }) => {
+			const tool = allTools.find((t) => t.name === name);
+			const where = tool
+				? ` (registered from ${tool.sourceInfo.path}, source: ${tool.sourceInfo.source})`
+				: "";
+			return `  - tool "${name}" already claimed by toolset "${owner}"${where}`;
+		});
+		throw new Error(
+			`[pi-tool-masking] name overlap: toolset "${spec.id}" claims tools ` +
+				`already owned by another toolset:\n` +
+				lines.join("\n") +
+				"\n" +
+				`Each tool may belong to only one toolset. Naming convention: prefix ` +
+				`toolset ids with a stable namespace (<product-family>.<subset>, e.g. "my-plugin.web").`,
+		);
 	}
 
 	const toolset = new ToolsetImpl(spec);

@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **`defineToolset` now throws on tool-name overlap:** no two toolsets may
+  claim the same tool name, regardless of source. Previously such overlaps
+  were silently accepted and corrupted the library's one-tool-per-toolset
+  invariant (a tool name belonged to multiple toolsets, so `_applyDisable`
+  removed it regardless of owner, restore was order-dependent, enable became
+  a silent no-op, the disable cascade skipped the other owner's dependents,
+  and downstream consumers like `pi-tbox` saw focus leaks, mis-attribution,
+  and double-counted listings). The guard gathers every collision in a single
+  registration into one error naming both colliding toolset ids, the tool's
+  `sourceInfo.path`/`source` when the tool is registered, and the
+  naming-convention hint. This is **breaking** for any extension pair that
+  currently has overlapping toolsets — they were already silently broken, but
+  will now see a load-time error on upgrade.
+
 ## [1.0.2] - 2026-07-26
 
 ### Changed

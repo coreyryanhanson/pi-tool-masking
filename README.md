@@ -228,8 +228,8 @@ for (const entry of getRegisteredToolsets()) {
 ### Dependent toolsets
 
 ```ts
-// Portal tools are on by default; learn tools depend on portal
-const portalSpec: ToolsetSpec = {
+// Web tools are on by default; learn tools depend on web
+const webSpec: ToolsetSpec = {
  id: "my-plugin.web",
  names: new Set(["web-fetch", "web-snapshot"]),
  persistKey: "toolset-state:my-plugin.web",
@@ -243,6 +243,37 @@ const learnSpec: ToolsetSpec = {
  defaultEnabled: false,
  requires: ["my-plugin.web"], // learn can't be on unless web is on
 };
+```
+
+---
+
+## Toolset naming
+
+`defineToolset` can't tell which extension is calling it — pi's `ExtensionAPI`
+doesn't expose the caller — so error messages can't name the responsible
+extension directly. The toolset id is the only traceability signal, which is
+why a stable, attributable id convention matters.
+
+### Convention (recommended, not enforced)
+
+Prefix toolset ids with a stable namespace: `<product-family>.<subset>`, e.g.
+`my-plugin.web`. The family may span multiple npm packages, and nothing checks
+that the prefix matches a real package — it's for human traceability in
+`/tbox list` and collision errors, not verification.
+
+### Enforcement floor
+
+`defineToolset` enforces one naming invariant: **no two toolsets may claim the
+same tool name.** Overlap is essentially always an authoring mistake and throws
+at load time:
+
+```
+[pi-tool-masking] name overlap: toolset "foo.search" claims tools already
+owned by another toolset:
+  - tool "x" already claimed by toolset "bar.web" (registered from
+    /home/u/.pi/.../bar/index.ts, source: bar)
+Each tool may belong to only one toolset. Naming convention: prefix toolset
+ids with a stable namespace (<product-family>.<subset>, e.g. "foo.web").
 ```
 
 ---
@@ -267,4 +298,4 @@ This package is used by:
 
 ## License
 
-GNU Affero General Public License v3.0 (AGPL-3.0). See [LICENSE](./LICENSE).
+MIT. See [LICENSE](./LICENSE).
