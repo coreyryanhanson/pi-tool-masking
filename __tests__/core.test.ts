@@ -367,16 +367,16 @@ describe("defineToolset — collision policy", () => {
 	it("idempotent re-registration with new object but same values (simulates jiti reload)", () => {
 		const { pi } = createEnv();
 		const spec1 = makeSpec({
-			id: "portal.web",
-			persistKey: "toolset-state:portal.web",
+			id: "my-plugin.web",
+			persistKey: "toolset-state:my-plugin.web",
 			names: new Set(["browser-navigate", "browser-click"]),
 			defaultEnabled: true,
 			requires: [],
 		});
 		const t1 = defineToolset(pi, spec1);
 		const spec2 = makeSpec({
-			id: "portal.web",
-			persistKey: "toolset-state:portal.web",
+			id: "my-plugin.web",
+			persistKey: "toolset-state:my-plugin.web",
 			names: new Set(["browser-navigate", "browser-click"]),
 			defaultEnabled: true,
 			requires: [],
@@ -397,8 +397,8 @@ describe("defineToolset — name-overlap guard", () => {
 			name: "x",
 			description: "",
 			sourceInfo: {
-				path: "/home/u/.pi/.../portal/index.ts",
-				source: "portal",
+				path: "/home/u/.pi/.../my-plugin/index.ts",
+				source: "my-plugin",
 				scope: "user",
 				origin: "top-level",
 			},
@@ -406,8 +406,8 @@ describe("defineToolset — name-overlap guard", () => {
 		defineToolset(
 			pi,
 			makeSpec({
-				id: "portal.web",
-				persistKey: "toolset-state:portal.web",
+				id: "my-plugin.web",
+				persistKey: "toolset-state:my-plugin.web",
 				names: new Set(["x"]),
 			}),
 		);
@@ -427,13 +427,13 @@ describe("defineToolset — name-overlap guard", () => {
 		expect(err).toBeInstanceOf(Error);
 		const msg = err!.message;
 		expect(msg).toMatch(/name overlap/);
-		expect(msg).toMatch(/portal\.web/);
+		expect(msg).toMatch(/my-plugin\.web/);
 		expect(msg).toMatch(/acme\.search/);
-		expect(msg).toMatch(/portal\/index\.ts/);
-		expect(msg).toMatch(/source: portal/);
+		expect(msg).toMatch(/my-plugin\/index\.ts/);
+		expect(msg).toMatch(/source: my-plugin/);
 		// The second registration must not have entered the registry.
 		expect(getRegisteredToolsets().map((e) => e.spec.id)).toEqual([
-			"portal.web",
+			"my-plugin.web",
 		]);
 	});
 
@@ -503,8 +503,8 @@ describe("defineToolset — name-overlap guard", () => {
 	it("idempotent re-registration unaffected: unchanged spec does not throw", () => {
 		const { pi } = createEnv();
 		const spec = makeSpec({
-			id: "portal.web",
-			persistKey: "toolset-state:portal.web",
+			id: "my-plugin.web",
+			persistKey: "toolset-state:my-plugin.web",
 			names: new Set(["browser-navigate"]),
 		});
 		const t1 = defineToolset(pi, spec);

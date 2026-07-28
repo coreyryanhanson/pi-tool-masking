@@ -8,7 +8,7 @@ import type {
 // ---------------------------------------------------------------------------
 
 export interface ToolsetSpec {
-	/** Stable id, e.g. "portal.web". Used in persist keys and event payloads. */
+	/** Stable id, e.g. "my-plugin.web". Used in persist keys and event payloads. */
 	id: string;
 	/** Human-readable name for the group. Optional — presenters fall back to id. */
 	label?: string;
@@ -16,7 +16,7 @@ export interface ToolsetSpec {
 	description?: string;
 	/** Tool names this toolset governs. */
 	names: Set<string>;
-	/** Primary persistence key the toolset writes, e.g. "toolset-state:portal.web". */
+	/** Primary persistence key the toolset writes, e.g. "toolset-state:my-plugin.web". */
 	persistKey: string;
 	/** Fresh-session fallback when no branch entry exists. */
 	defaultEnabled?: boolean;
@@ -33,7 +33,7 @@ export interface Toolset {
 }
 
 export interface ToolsetChangedEvent {
-	/** Toolset id (e.g. "portal.web"). Always set. */
+	/** Toolset id (e.g. "my-plugin.web"). Always set. */
 	id: string;
 	enabled: boolean;
 	/** Present only when emitMemberEvents is on and this is a per-member fanout event. */
@@ -165,7 +165,7 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		//
 		// Re-read the branch per toolset (not once before the loop): a companion
 		// mirror (§10.1) fires synchronously inside `_applyRestoreToolset` and may
-		// `appendEntry` for a toolset later in iteration order (e.g. portal.web's
+		// `appendEntry` for a toolset later in iteration order (e.g. my-plugin.web's
 		// default-false restore makes search.web disable itself). Snapshotting the
 		// branch once would hide that write from the later toolset, so it would
 		// fall back to its packaged default and desync from the companion — the
@@ -455,7 +455,7 @@ export function defineToolset(pi: ExtensionAPI, spec: ToolsetSpec): Toolset {
 				lines.join("\n") +
 				"\n" +
 				`Each tool may belong to only one toolset. Naming convention: prefix ` +
-				`toolset ids with a stable namespace (<product-family>.<subset>, e.g. "portal.web").`,
+				`toolset ids with a stable namespace (<product-family>.<subset>, e.g. "my-plugin.web").`,
 		);
 	}
 

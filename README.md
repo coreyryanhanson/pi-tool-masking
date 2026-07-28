@@ -228,8 +228,8 @@ for (const entry of getRegisteredToolsets()) {
 ### Dependent toolsets
 
 ```ts
-// Portal tools are on by default; learn tools depend on portal
-const portalSpec: ToolsetSpec = {
+// Web tools are on by default; learn tools depend on web
+const webSpec: ToolsetSpec = {
  id: "my-plugin.web",
  names: new Set(["web-fetch", "web-snapshot"]),
  persistKey: "toolset-state:my-plugin.web",
