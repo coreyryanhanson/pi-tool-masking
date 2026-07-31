@@ -187,6 +187,18 @@ patterns; the two-phase design is robust against both `changed`- and
 `restored`-listener companions at ~5 lines' cost (one extra loop + a
 single `setActiveTools`).
 
+**Event-type contract divergence by mode (document in JSDoc):** under
+exclusion/inclusion, the per-toolset restore loop emits `restored` for
+toolsets with a branch entry and `changed` for default-fallback toolsets
+(no branch entry). Under allowlist, phase 2 emits `restored` for **every**
+registered toolset, because the whole pass is a branch replay of the
+authoritative allowlist entry, not a live toggle. This is a deliberate
+mode-dependent divergence in the event contract. No existing consumer is
+affected today (pi-tbox doesn't use allowlist yet), but the JSDoc on
+`getActiveAllowlist` / the restore handler must state it so a future
+consumer expecting `changed` for fallback toolsets during restore is not
+surprised when allowlist mode hands them `restored` instead.
+
 **`requires` cascade:** the allowlist is expected to already include the
 forward `requires` closure of its members (pi-tbox's focus resolves the
 closure before calling `setDefaultResolutionMode`). The library does
@@ -249,6 +261,22 @@ This is the single source of truth for the live allowlist — `pi-tbox`'s
 `actuateNewToolsets` and any other call site read it here, not from a
 pi-tbox-private copy, so the branch mode entry and the live suppression
 cannot drift apart.
+
+**`exactOptionalPropertyTypes` requirement (tsconfig):** the repo's
+`tsconfig.json` enables `exactOptionalPropertyTypes: true`. The new
+`ModuleState.activeAllowlist` field must be declared as
+`activeAllowlist?: string[] | undefined` (with the explicit
+`| undefined`), **not** bare `activeAllowlist?: string[]`. The
+`doRestore` mode-resolution block and `setDefaultResolutionMode` both
+assign `undefined` to it explicitly for non-allowlist modes, which is a
+type error (`TS2412`) against a bare optional property under this flag.
+The existing `defaultResolutionMode: DefaultResolutionMode` field is
+required (not optional) and needs no change. (Verified: optional
+*function parameters* like the new `allowlist?` on
+`setDefaultResolutionMode` and `snapshot?` on `getEffectiveDefault` are
+**not** affected by `exactOptionalPropertyTypes` — only object-type
+properties are — so those bare `?: T` param forms compile fine and stay
+as written.)
 
 ### D6 — Null-tombstone restore for toolset entries
 
@@ -363,10 +391,19 @@ Localized to `ensureRestoreHandler`'s `doRestore`:
    const lastModeEntry = modeEntries[modeEntries.length - 1] as any;
    const branchMode = lastModeEntry?.data?.mode;
    const branchAllowlist = lastModeEntry?.data?.allowlist;
+   // Defensive: a branch entry claiming "allowlist" with no usable array
+   // is corruption (write-time validation prevents it, but branch files
+   // are hand-editable). Treat it as "exclusion" rather than setting
+   // mode=allowlist with activeAllowlist=undefined — that contradiction
+   // (getDefaultResolutionMode() === "allowlist" while
+   // getActiveAllowlist() === undefined) would silently suppress every
+   // toolset, since the allowlist short-circuit reads the array as empty.
    const mode: DefaultResolutionMode =
-       branchMode === "inclusion" || branchMode === "exclusion" || branchMode === "allowlist"
+       branchMode === "inclusion" || branchMode === "exclusion"
            ? branchMode
-           : "exclusion";
+           : branchMode === "allowlist" && Array.isArray(branchAllowlist)
+               ? "allowlist"
+               : "exclusion";
    const ms = getModuleState();
    ms.defaultResolutionMode = mode;
    // Mirror the allowlist into module state so `getActiveAllowlist()`
@@ -375,9 +412,7 @@ Localized to `ensureRestoreHandler`'s `doRestore`:
    // same pattern as `defaultResolutionMode` above. `setDefaultResolutionMode`
    // sets this same field when it appends the entry.
    ms.activeAllowlist =
-       mode === "allowlist" && Array.isArray(branchAllowlist)
-           ? branchAllowlist
-           : undefined;
+       mode === "allowlist" ? (branchAllowlist as string[]) : undefined;
    ```
 
 2. **Allowlist short-circuit** (atomic two-phase, set-level override,
@@ -419,6 +454,12 @@ Localized to `ensureRestoreHandler`'s `doRestore`:
                for (const n of entry.spec.names) desired.add(n);
            }
        }
+       // The `registered` filter is partially redundant: names carried over
+       // from `current` are already active (hence registered), so the filter
+       // only matters for spec names that aren't registered tools. Kept for
+       // parity with `_applyRestoreToolset`'s per-name filtering and as a
+       // belt-and-suspenders guard against a stale registry entry whose
+       // `names` reference a tool that has since been removed.
        pi.setActiveTools([...desired].filter((n) => registered.has(n)));
 
        // Phase 2: notify AFTER state is final. Emit `restored` (this is
@@ -589,9 +630,11 @@ in `beforeEach` (existing pattern). `setSettingsOverrideForTests({})` in
 **Settings tier (toolsetDefaults):** reader (global/project merge,
 per-entry override, malformed → `{}`), writer (preserves other keys,
 round-trip), clearer, `getEffectiveDefault` (tier-2-then-3, mode-agnostic).
-Reuse the branch's existing test ids where the behavior is unchanged;
-drop the mode-tier test ids (AT/AM/CT/DT series that target
-`toolsetResolutionMode`).
+Reuse the branch's existing test ids where the behavior is unchanged.
+(The AT/AM/CT/DT mode-tier test ids from `feat/stored-settings-state` do
+not exist on `main` — this plan branches from `main` — so there is nothing
+to drop; the earlier "drop the mode-tier test ids" wording referred to a
+branch that is no longer the base.)
 
 **Null-tombstone restore:** last toolset entry `null` → falls through to
 settings → mode floor → packaged. Dedup: last entry already cleared → no
@@ -659,29 +702,41 @@ scaffolding into history and gives a clean commit story.
 
 **Order (each commit leaves `npm test` green):**
 
-1. `toolsetDefaults` reader + parse/merge helpers + test seams + reader
-   tests. (Port from the branch.)
-2. `toolsetDefaults` writer + clearer + `MalformedSettingsError` + writer
-   tests. (Port from the branch.)
-3. `doRestore` else-branch settings insertion + null-tombstone toolset
-   filter + `getEffectiveDefault` + tests. (Port the toolset-tier parts
-   from the branch; drop the `readMergedToolsetResolutionMode` fallback.)
-4. `clearToolsetEntry` / `clearAllToolsetEntries` + `applyToolsetEnabled`
-   - tests. (Port toolset tombstone helpers from the branch; write
-   `applyToolsetEnabled` fresh.)
-5. `"allowlist"` mode: `DefaultResolutionMode` type change,
-   `setDefaultResolutionMode` signature, `doRestore` allowlist
-   short-circuit, `getActiveAllowlist` + tests. (New.)
-6. `doRestore` mode resolution: null-tombstone-aware, `branchMode ??
-   "exclusion"`, no settings fallback + tests. (Revise the branch's mode
-   block; drop the settings fallback.)
-7. `CHANGELOG.md` `[Unreleased]` + README API section.
-8. **Fix pre-existing `tsc --noEmit` failure on `main` (N4):**
+1. **Fix pre-existing `tsc --noEmit` failure on `main` (N4) — first, to
+   give a clean typecheck baseline for the feature work:**
    `__tests__/mock-pi.ts` is missing `scopedModels` / `isProjectTrusted`
    from `ExtensionContext`, which blocks `prepublishOnly`
-   (`npm test && npx tsc --noEmit`) and thus the 1.2.0 publish. Add the
+   (`npm test && npx tsc --noEmit`) and thus the 1.2.0 publish, *and*
+   leaves `tsc --noEmit` red on `main` before any feature lands. Add the
    missing stub fields to `MockPI`. Unrelated to this plan's features but
-   required to ship the release.
+   required to ship the release. Ordered first (not last) because this
+   plan adds new TS surface (`ModuleState.activeAllowlist` with the
+   `exactOptionalPropertyTypes` `| undefined` trap, new optional params,
+   10 new exports) — the exact kind of bug that flag catches (TS2412 on
+   bare optional properties) is what steps 2–8 are shipping. A red
+   baseline would mix pre-existing TS2739 with your own errors on every
+   `npm run typecheck`, so you'd either miss a TS2412 or waste time
+   disentangling. AGENTS.md tells you to run typecheck yourself before
+   shipping; a clean baseline makes that actually useful. Smallest,
+   most independent commit — ideal commit 1. (`npm test` / vitest never
+   runs `tsc --noEmit`, so this commit is green on `npm test` too.)
+2. `toolsetDefaults` reader + parse/merge helpers + test seams + reader
+   tests. (Port from the branch.)
+3. `toolsetDefaults` writer + clearer + `MalformedSettingsError` + writer
+   tests. (Port from the branch.)
+4. `doRestore` else-branch settings insertion + null-tombstone toolset
+   filter + `getEffectiveDefault` + tests. (Port the toolset-tier parts
+   from the branch; drop the `readMergedToolsetResolutionMode` fallback.)
+5. `clearToolsetEntry` / `clearAllToolsetEntries` + `applyToolsetEnabled`
+   - tests. (Port toolset tombstone helpers from the branch; write
+   `applyToolsetEnabled` fresh.)
+6. `"allowlist"` mode: `DefaultResolutionMode` type change,
+   `setDefaultResolutionMode` signature, `doRestore` allowlist
+   short-circuit, `getActiveAllowlist` + tests. (New.)
+7. `doRestore` mode resolution: null-tombstone-aware, `branchMode ??
+   "exclusion"`, no settings fallback + tests. (Revise the branch's mode
+   block; drop the settings fallback.)
+8. `CHANGELOG.md` `[Unreleased]` + README API section.
 
 ## Out of scope / deferred
 
