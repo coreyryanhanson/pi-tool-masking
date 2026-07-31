@@ -1,6 +1,6 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
@@ -635,4 +635,198 @@ export function readToolsetDefaults(
 ): ToolsetDefaultsMap {
 	if (_settingsOverride !== null) return { ..._settingsOverride };
 	return parseToolsetDefaults(readSettingsJsonSafe(scope));
+}
+
+// ---------------------------------------------------------------------------
+// Settings.json writer — toolsetDefaults tier
+// ---------------------------------------------------------------------------
+
+let _settingsWriterOverride: {
+	global: ToolsetDefaultsMap;
+	project: ToolsetDefaultsMap;
+} | null = null;
+
+/**
+ * Capture toolset-defaults writes in-memory instead of hitting disk. Pass
+ * `null` to restore the disk-write path. Independent of
+ * `setSettingsOverrideForTests` — both seams must be cleared (`null`) for a
+ * true round-trip that hits disk on both read and write.
+ *
+ * @internal
+ */
+export function setSettingsWriterOverrideForTests(
+	state: {
+		global: ToolsetDefaultsMap;
+		project: ToolsetDefaultsMap;
+	} | null,
+): void {
+	_settingsWriterOverride = state;
+}
+
+/**
+ * Read one scope's settings.json (with the malformed-file guard), run
+ * `mutator` against the parsed object, and write it back iff `mutator`
+ * returns `true`. Returns the same boolean so callers whose result *is*
+ * "did it write" (e.g. `clearToolsetDefaults`) can use it directly.
+ *
+ * `mutator` returns `false` to skip the write (used by clear when the
+ * key is absent — no needless reformat of a hand-edited file). The
+ * malformed-file guard throws before `mutator` runs, so a corrupt file is
+ * never handed to a mutator and never overwritten.
+ *
+ * ponytail: read-modify-write is not atomic — concurrent Pi sessions
+ * writing the same global settings.json can lose writes. An advisory
+ * file lock or write-to-temp+rename would close this; revisit if
+ * cross-session write contention becomes observable.
+ */
+function mutateSettingsJson(
+	scope: "global" | "project",
+	mutator: (existing: Record<string, unknown>) => boolean,
+): boolean {
+	const path = settingsPath(scope);
+
+	let existing: Record<string, unknown>;
+	try {
+		if (existsSync(path)) {
+			const raw = readFileSync(path, "utf-8");
+			const parsed = JSON.parse(raw);
+			if (
+				typeof parsed !== "object" ||
+				parsed === null ||
+				Array.isArray(parsed)
+			) {
+				throw new MalformedSettingsError(
+					`[pi-tool-masking] Refusing to overwrite non-object settings.json at ` +
+						`${path}. The file contains ${
+							Array.isArray(parsed)
+								? "a JSON array"
+								: typeof parsed === "object"
+									? "null"
+									: typeof parsed
+						}. Fix or remove it before writing.`,
+				);
+			}
+			existing = parsed as Record<string, unknown>;
+		} else {
+			existing = {};
+		}
+	} catch (err: unknown) {
+		if (err instanceof MalformedSettingsError) throw err;
+		if (err instanceof SyntaxError) {
+			throw new MalformedSettingsError(
+				`[pi-tool-masking] Refusing to overwrite malformed settings.json at ` +
+					`${path}. Fix or remove it before writing. Parse error: ${err.message}`,
+			);
+		}
+		throw err;
+	}
+
+	const write = mutator(existing);
+
+	if (write) {
+		mkdirSync(dirname(path), { recursive: true });
+		writeFileSync(path, JSON.stringify(existing, null, 2) + "\n");
+	}
+	return write;
+}
+
+/**
+ * Write a batch of toolset default entries to one settings scope.
+ *
+ * `entries` is the on-disk shape `{ [persistKey]: { enabled: boolean } }`
+ * — the same shape `readMergedToolsetDefaults()` returns. Each entry
+ * becomes `toolsetDefaults[persistKey] = { enabled }` in the chosen
+ * scope's settings file, preserving every other top-level key.
+ *
+ * Merge semantics: shallow per-entry within `toolsetDefaults`. Existing
+ * entries for persistKeys NOT in `entries` are preserved; entries in
+ * `entries` overwrite any same-key existing entry. A write where every
+ * entry already matches its on-disk value is a no-op: the file is left
+ * untouched (no reformat, no mtime bump).
+ *
+ * **Malformed-file guard:**
+ *   - File missing → write fresh (nothing to lose).
+ *   - File parses to a non-object (array, string, null) → **throw**
+ *     (data-loss guard — would destroy unparsable user config).
+ *   - `JSON.parse` throws → **throw** (same reason).
+ *
+ * @public
+ */
+export function writeToolsetDefaults(
+	entries: ToolsetDefaultsMap,
+	scope: "global" | "project",
+): void {
+	// Seam path: merge into memory
+	if (_settingsWriterOverride !== null) {
+		for (const [key, val] of Object.entries(entries)) {
+			_settingsWriterOverride[scope][key] = { enabled: val.enabled };
+		}
+		return;
+	}
+
+	mutateSettingsJson(scope, (existing) => {
+		const td: Record<string, unknown> =
+			(existing.toolsetDefaults as Record<string, unknown> | undefined) ?? {};
+		let changed = false;
+		for (const [key, val] of Object.entries(entries)) {
+			if (
+				(td[key] as { enabled?: unknown } | undefined)?.enabled !== val.enabled
+			) {
+				td[key] = { enabled: val.enabled };
+				changed = true;
+			}
+		}
+		if (!changed) return false;
+		existing.toolsetDefaults = td;
+		return true;
+	});
+}
+
+/**
+ * Remove the `toolsetDefaults` wrapper key entirely from one scope's
+ * settings file, preserving every other top-level key. After this, every
+ * toolset in that scope falls back to tier 3 (packaged default, or
+ * `spec.defaultEnabled ?? true`).
+ *
+ * Returns `true` if the key existed and was removed, `false` if it was
+ * already absent (or the file was missing). No per-entry clear path by
+ * design — callers who want that write an `entries` map without the
+ * unwanted keys via `writeToolsetDefaults`.
+ *
+ * **Malformed-file guard:** same as `writeToolsetDefaults` — throws on
+ * non-object or unparsable JSON rather than overwriting user config.
+ *
+ * @public
+ */
+export function clearToolsetDefaults(scope: "global" | "project"): boolean {
+	// Seam path: clear all keys in memory
+	if (_settingsWriterOverride !== null) {
+		const state = _settingsWriterOverride[scope];
+		const keys = Object.keys(state);
+		for (const key of keys) {
+			delete state[key];
+		}
+		return keys.length > 0;
+	}
+
+	return mutateSettingsJson(scope, (existing) => {
+		if (!("toolsetDefaults" in existing)) return false; // no write, no reformat
+		delete existing.toolsetDefaults;
+		return true;
+	});
+}
+
+/**
+ * Error thrown when refusing to overwrite a malformed or non-object
+ * settings.json to prevent data-loss of user pi-core config.
+ *
+ * @public — exported for downstream consumers to distinguish malformed-file
+ * errors from generic I/O errors without string-matching `message`.
+ * Catch with `instanceof MalformedSettingsError`.
+ */
+export class MalformedSettingsError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "MalformedSettingsError";
+	}
 }

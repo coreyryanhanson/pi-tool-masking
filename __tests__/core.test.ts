@@ -1,3 +1,6 @@
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { describe, it, expect, vi } from "vitest";
 import { MockPI } from "./mock-pi.js";
@@ -12,6 +15,10 @@ import {
 	readMergedToolsetDefaults,
 	readToolsetDefaults,
 	setSettingsOverrideForTests,
+	setSettingsWriterOverrideForTests,
+	writeToolsetDefaults,
+	clearToolsetDefaults,
+	MalformedSettingsError,
 	type RegistryEntry,
 } from "../index.js";
 
@@ -2411,5 +2418,443 @@ describe("readMergedToolsetDefaults / readToolsetDefaults", () => {
 		const out = readMergedToolsetDefaults();
 		expect(out).toEqual(seed);
 		expect(out).not.toBe(seed);
+	});
+});
+
+// ===================================================================
+// Settings.json writer — writeToolsetDefaults / clearToolsetDefaults
+// ===================================================================
+
+describe("writeToolsetDefaults & clearToolsetDefaults", () => {
+	// W1–W3, W5 use the writer seam; W4, W6–W8 hit disk
+
+	beforeEach(() => {
+		setSettingsWriterOverrideForTests({ global: {}, project: {} });
+	});
+
+	afterEach(() => {
+		setSettingsWriterOverrideForTests(null);
+	});
+
+	it("W1: writeToolsetDefaults merges entries into scope, preserves existing keys", () => {
+		const state = {
+			global: { "toolset-state:z": { enabled: true } },
+			project: {},
+		};
+		setSettingsWriterOverrideForTests(state);
+		try {
+			writeToolsetDefaults(
+				{
+					"toolset-state:x": { enabled: true },
+					"toolset-state:y": { enabled: false },
+				},
+				"global",
+			);
+			expect(state.global).toEqual({
+				"toolset-state:z": { enabled: true },
+				"toolset-state:x": { enabled: true },
+				"toolset-state:y": { enabled: false },
+			});
+			expect(state.project).toEqual({});
+		} finally {
+			setSettingsWriterOverrideForTests(null);
+		}
+	});
+
+	it("W2: writing to project does not touch global, and vice versa", () => {
+		const state = { global: {}, project: {} };
+		setSettingsWriterOverrideForTests(state);
+		try {
+			writeToolsetDefaults({ "toolset-state:x": { enabled: true } }, "project");
+			expect(state.global).toEqual({});
+			expect(state.project).toEqual({ "toolset-state:x": { enabled: true } });
+
+			writeToolsetDefaults({ "toolset-state:y": { enabled: false } }, "global");
+			expect(state.global).toEqual({ "toolset-state:y": { enabled: false } });
+			expect(state.project).toEqual({ "toolset-state:x": { enabled: true } });
+		} finally {
+			setSettingsWriterOverrideForTests(null);
+		}
+	});
+
+	it("W3: clearToolsetDefaults empties scope and returns correct boolean", () => {
+		const state = {
+			global: {
+				"toolset-state:x": { enabled: true },
+				"toolset-state:y": { enabled: false },
+			},
+			project: {},
+		};
+		setSettingsWriterOverrideForTests(state);
+		try {
+			expect(clearToolsetDefaults("global")).toBe(true);
+			expect(state.global).toEqual({});
+
+			expect(clearToolsetDefaults("global")).toBe(false);
+
+			expect(clearToolsetDefaults("project")).toBe(false);
+		} finally {
+			setSettingsWriterOverrideForTests(null);
+		}
+	});
+
+	it("W5: writer override and reader override are independent", () => {
+		const writerState = {
+			global: { "toolset-state:writer": { enabled: true } },
+			project: {},
+		};
+		setSettingsWriterOverrideForTests(writerState);
+		setSettingsOverrideForTests({ "toolset-state:reader": { enabled: false } });
+		try {
+			// Reader returns the reader override, not writer-captured state
+			const merged = readMergedToolsetDefaults();
+			expect(merged["toolset-state:reader"]).toEqual({ enabled: false });
+			expect(merged["toolset-state:writer"]).toBeUndefined();
+		} finally {
+			setSettingsWriterOverrideForTests(null);
+			setSettingsOverrideForTests({});
+		}
+	});
+
+	// W4 — write→read round-trip on disk
+	describe("W4: disk round-trip (writeToolsetDefaults + readMergedToolsetDefaults)", () => {
+		let tmpDir: string;
+		let agentDir: string;
+		let origCwd: string;
+		let origAgentDir: string | undefined;
+
+		beforeEach(() => {
+			setSettingsWriterOverrideForTests(null);
+			setSettingsOverrideForTests(null);
+
+			tmpDir = mkdtempSync(join(tmpdir(), "pi-tool-masking-w4-"));
+			agentDir = join(tmpDir, "agent");
+			mkdirSync(join(tmpDir, ".pi"), { recursive: true });
+			mkdirSync(agentDir, { recursive: true });
+			origCwd = process.cwd();
+			origAgentDir = process.env.PI_CODING_AGENT_DIR;
+			process.env.PI_CODING_AGENT_DIR = agentDir;
+			process.chdir(tmpDir);
+		});
+
+		afterEach(() => {
+			process.chdir(origCwd);
+			if (origAgentDir !== undefined) {
+				process.env.PI_CODING_AGENT_DIR = origAgentDir;
+			} else {
+				delete process.env.PI_CODING_AGENT_DIR;
+			}
+			setSettingsWriterOverrideForTests(null);
+			setSettingsOverrideForTests({});
+		});
+
+		it("W4a: write→readMergedToolsetDefaults round-trip (project overrides global)", () => {
+			const globalPath = join(agentDir, "settings.json");
+			writeFileSync(
+				globalPath,
+				JSON.stringify({
+					toolsetDefaults: {
+						"toolset-state:shared": { enabled: false },
+					},
+				}) + "\n",
+			);
+
+			writeToolsetDefaults(
+				{ "toolset-state:new": { enabled: true } },
+				"project",
+			);
+			writeToolsetDefaults(
+				{ "toolset-state:shared": { enabled: true } },
+				"project",
+			);
+
+			const merged = readMergedToolsetDefaults();
+			expect(merged["toolset-state:shared"]).toEqual({ enabled: true });
+			expect(merged["toolset-state:new"]).toEqual({ enabled: true });
+			expect(merged["toolset-state:missing"]).toBeUndefined();
+		});
+
+		it("W4b: readToolsetDefaults attributes to the correct scope", () => {
+			// Global has an entry; project has no file yet
+			const globalPath = join(agentDir, "settings.json");
+			writeFileSync(
+				globalPath,
+				JSON.stringify({
+					toolsetDefaults: {
+						"toolset-state:x": { enabled: true },
+					},
+				}) + "\n",
+			);
+
+			// project doesn't exist yet — readToolsetDefaults returns {}
+			expect(readToolsetDefaults("project")).toEqual({});
+
+			// Write only to project
+			writeToolsetDefaults(
+				{ "toolset-state:y": { enabled: false } },
+				"project",
+			);
+
+			// Per-scope readers are independent
+			expect(readToolsetDefaults("global")).toEqual({
+				"toolset-state:x": { enabled: true },
+			});
+			expect(readToolsetDefaults("project")).toEqual({
+				"toolset-state:y": { enabled: false },
+			});
+
+			// Merged returns project-overrides-global
+			expect(readMergedToolsetDefaults()["toolset-state:x"]).toEqual({
+				enabled: true,
+			});
+			expect(readMergedToolsetDefaults()["toolset-state:y"]).toEqual({
+				enabled: false,
+			});
+		});
+	});
+
+	// W6 — malformed-file guard (disk)
+	describe("W6: malformed-file guard (disk)", () => {
+		let tmpDir: string;
+		let origCwd: string;
+
+		beforeEach(() => {
+			// Clear both overrides so reads and writes hit disk
+			setSettingsWriterOverrideForTests(null);
+			setSettingsOverrideForTests(null);
+
+			tmpDir = mkdtempSync(join(tmpdir(), "pi-tool-masking-writer-"));
+			mkdirSync(join(tmpDir, ".pi"), { recursive: true });
+			origCwd = process.cwd();
+			process.chdir(tmpDir);
+		});
+
+		afterEach(() => {
+			process.chdir(origCwd);
+			setSettingsWriterOverrideForTests(null);
+			setSettingsOverrideForTests({});
+		});
+
+		it("W6a: writeToolsetDefaults throws on malformed JSON", () => {
+			const settingsPath = join(tmpDir, ".pi", "settings.json");
+			writeFileSync(settingsPath, "{not valid");
+			const before = readFileSync(settingsPath, "utf-8");
+
+			expect(() =>
+				writeToolsetDefaults(
+					{ "toolset-state:x": { enabled: true } },
+					"project",
+				),
+			).toThrow(/malformed settings.json/);
+
+			// File unchanged
+			expect(readFileSync(settingsPath, "utf-8")).toBe(before);
+		});
+
+		it("W6a2: writeToolsetDefaults throws MalformedSettingsError on non-object (array)", () => {
+			const settingsPath = join(tmpDir, ".pi", "settings.json");
+			writeFileSync(settingsPath, "[]");
+			const before = readFileSync(settingsPath, "utf-8");
+
+			expect(() =>
+				writeToolsetDefaults(
+					{ "toolset-state:x": { enabled: true } },
+					"project",
+				),
+			).toThrow(MalformedSettingsError);
+
+			expect(readFileSync(settingsPath, "utf-8")).toBe(before);
+		});
+
+		it("W6a3: writeToolsetDefaults throws on non-object (null)", () => {
+			const settingsPath = join(tmpDir, ".pi", "settings.json");
+			writeFileSync(settingsPath, "null");
+			const before = readFileSync(settingsPath, "utf-8");
+
+			expect(() =>
+				writeToolsetDefaults(
+					{ "toolset-state:x": { enabled: true } },
+					"project",
+				),
+			).toThrow(/non-object settings.json/);
+
+			expect(readFileSync(settingsPath, "utf-8")).toBe(before);
+		});
+
+		it("W6b: clearToolsetDefaults throws on malformed JSON", () => {
+			const settingsPath = join(tmpDir, ".pi", "settings.json");
+			writeFileSync(settingsPath, "{not valid");
+			const before = readFileSync(settingsPath, "utf-8");
+
+			expect(() => clearToolsetDefaults("project")).toThrow(
+				/malformed settings.json/,
+			);
+
+			expect(readFileSync(settingsPath, "utf-8")).toBe(before);
+		});
+
+		it("W6b2: clearToolsetDefaults throws on non-object (array)", () => {
+			const settingsPath = join(tmpDir, ".pi", "settings.json");
+			writeFileSync(settingsPath, "[]");
+			const before = readFileSync(settingsPath, "utf-8");
+
+			expect(() => clearToolsetDefaults("project")).toThrow(
+				/non-object settings.json/,
+			);
+
+			expect(readFileSync(settingsPath, "utf-8")).toBe(before);
+		});
+
+		it("W6b3: clearToolsetDefaults returns false for missing file", () => {
+			// No .pi/settings.json written — file doesn't exist
+			expect(clearToolsetDefaults("project")).toBe(false);
+		});
+	});
+
+	// W7 — top-level-key preservation (disk)
+	describe("W7: top-level-key preservation (disk)", () => {
+		let tmpDir: string;
+		let origCwd: string;
+
+		beforeEach(() => {
+			setSettingsWriterOverrideForTests(null);
+			setSettingsOverrideForTests(null);
+
+			tmpDir = mkdtempSync(join(tmpdir(), "pi-tool-masking-writer-"));
+			mkdirSync(join(tmpDir, ".pi"), { recursive: true });
+			origCwd = process.cwd();
+			process.chdir(tmpDir);
+
+			// Seed a settings file with non-toolsetDefaults keys
+			const settingsPath = join(tmpDir, ".pi", "settings.json");
+			writeFileSync(
+				settingsPath,
+				JSON.stringify(
+					{
+						provider: "anthropic",
+						theme: "x",
+						toolsetDefaults: {
+							"toolset-state:old": { enabled: false },
+						},
+					},
+					null,
+					2,
+				) + "\n",
+			);
+		});
+
+		afterEach(() => {
+			process.chdir(origCwd);
+			setSettingsWriterOverrideForTests(null);
+			setSettingsOverrideForTests({});
+		});
+
+		it("W7: write preserves provider, theme, existing td entries; adds new entry", () => {
+			const settingsPath = join(tmpDir, ".pi", "settings.json");
+
+			writeToolsetDefaults(
+				{ "toolset-state:new": { enabled: true } },
+				"project",
+			);
+
+			const raw = JSON.parse(readFileSync(settingsPath, "utf-8"));
+			expect(raw.provider).toBe("anthropic");
+			expect(raw.theme).toBe("x");
+			expect(raw.toolsetDefaults["toolset-state:old"]).toEqual({
+				enabled: false,
+			});
+			expect(raw.toolsetDefaults["toolset-state:new"]).toEqual({
+				enabled: true,
+			});
+		});
+
+		it("W7b: clearToolsetDefaults removes the wrapper key, preserves other keys", () => {
+			const settingsPath = join(tmpDir, ".pi", "settings.json");
+
+			const result = clearToolsetDefaults("project");
+			expect(result).toBe(true);
+
+			const raw = JSON.parse(readFileSync(settingsPath, "utf-8"));
+			expect(raw.provider).toBe("anthropic");
+			expect(raw.theme).toBe("x");
+			expect(raw.toolsetDefaults).toBeUndefined();
+		});
+
+		it("W7c: clearToolsetDefaults returns false when no toolsetDefaults key", () => {
+			// Remove the key first
+			clearToolsetDefaults("project");
+			expect(clearToolsetDefaults("project")).toBe(false);
+
+			// Other keys still intact
+			const raw = JSON.parse(
+				readFileSync(join(tmpDir, ".pi", "settings.json"), "utf-8"),
+			);
+			expect(raw.provider).toBe("anthropic");
+		});
+	});
+
+	// W8 — no-op writes skip disk reformat (don't rewrite a hand-edited file
+	// when the values are already what's being written). Observable: the
+	// writer serializes with JSON.stringify(_, null, 2), so a skip preserves
+	// our compact seed bytes while a real write would reformat to indented.
+	describe("W8: no-op writes skip disk reformat", () => {
+		let tmpDir: string;
+		let origCwd: string;
+
+		beforeEach(() => {
+			setSettingsWriterOverrideForTests(null);
+			setSettingsOverrideForTests(null);
+
+			tmpDir = mkdtempSync(join(tmpdir(), "pi-tool-masking-writer-"));
+			mkdirSync(join(tmpDir, ".pi"), { recursive: true });
+			origCwd = process.cwd();
+			process.chdir(tmpDir);
+		});
+
+		afterEach(() => {
+			process.chdir(origCwd);
+			setSettingsWriterOverrideForTests(null);
+			setSettingsOverrideForTests({});
+		});
+
+		it("W8a: writeToolsetDefaults with unchanged values does not rewrite", () => {
+			const settingsPath = join(tmpDir, ".pi", "settings.json");
+			// Compact seed (writer would emit 2-space indented + trailing \n)
+			const seed = '{"toolsetDefaults":{"toolset-state:x":{"enabled":true}}}';
+			writeFileSync(settingsPath, seed);
+
+			writeToolsetDefaults({ "toolset-state:x": { enabled: true } }, "project");
+
+			expect(readFileSync(settingsPath, "utf-8")).toBe(seed);
+		});
+
+		it("W8b: writeToolsetDefaults with {} entries does not rewrite", () => {
+			const settingsPath = join(tmpDir, ".pi", "settings.json");
+			const seed = '{"toolsetDefaults":{"toolset-state:x":{"enabled":true}}}';
+			writeFileSync(settingsPath, seed);
+
+			writeToolsetDefaults({}, "project");
+
+			expect(readFileSync(settingsPath, "utf-8")).toBe(seed);
+		});
+
+		it("W8d: a real change still rewrites (sanity for W8a observable)", () => {
+			const settingsPath = join(tmpDir, ".pi", "settings.json");
+			const seed = '{"toolsetDefaults":{"toolset-state:x":{"enabled":true}}}';
+			writeFileSync(settingsPath, seed);
+
+			writeToolsetDefaults(
+				{ "toolset-state:x": { enabled: false } },
+				"project",
+			);
+
+			// A real change must reformat — proves the compact-seed observable
+			// actually detects writes (else W8a would pass for the wrong reason)
+			expect(readFileSync(settingsPath, "utf-8")).not.toBe(seed);
+			const raw = JSON.parse(readFileSync(settingsPath, "utf-8"));
+			expect(raw.toolsetDefaults["toolset-state:x"]).toEqual({
+				enabled: false,
+			});
+		});
 	});
 });
