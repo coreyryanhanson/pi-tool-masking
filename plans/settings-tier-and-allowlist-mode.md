@@ -154,6 +154,26 @@ registered after focus was entered is not in the array → off. No
 enumeration of the complement, ever; the array is finite, the handler
 computes the rest.
 
+**Atomic two-phase restore (robust against unknown future consumers):**
+the allowlist short-circuit is split into a **decide/apply phase** and a
+**notify phase**. Phase 1 computes the full desired active-tools set from
+the allowlist and applies it with a single `pi.setActiveTools(...)` call
+— no per-toolset emit during the loop. Phase 2 then emits `restored` for
+each toolset *after* state is final. This is the robust fix for the
+companion-mirror interaction (reviewer note N1): a companion mirroring on
+`TOOLSET_EVENTS.changed` (the standard pattern, see `core.test.ts:210`)
+never fires during allowlist restore, so it cannot `appendEntry` mid-loop
+and desync the final state. A companion on `restored` fires only *after*
+the authoritative state is already set, so its `enable()`/`disable()` is
+a live post-restore toggle — the consumer's business, not an
+interleaving during restore. The library's contract stays mode-independent:
+*"restore establishes the authoritative state atomically; what consumers
+do in response to `restored` is their business."* This matters because
+other plugins may incorporate this library with their own companion
+patterns; the two-phase design is robust against both `changed`- and
+`restored`-listener companions at ~5 lines' cost (one extra loop + a
+single `setActiveTools`).
+
 **`requires` cascade:** the allowlist is expected to already include the
 forward `requires` closure of its members (pi-tbox's focus resolves the
 closure before calling `setDefaultResolutionMode`). The library does
@@ -176,20 +196,24 @@ export function setDefaultResolutionMode(
   array of toolset ids. Validates: throws if absent/empty. Does **not**
   validate that ids are registered (forward references are legal — a
   toolset may register after the mode is set; that's the point).
+- **Update the validation error message** (reviewer note N5): the current
+  `"Must be \"exclusion\" or \"inclusion\""` must become
+  `"Must be \"exclusion\", \"inclusion\", or \"allowlist\""` so the
+  new mode is discoverable from the thrown error.
 - `mode === "exclusion" | "inclusion"` → `allowlist` ignored (and
   rejected if non-null? no — ignored, to keep the signature simple and
   the existing two-arg call sites unchanged).
 - Persists `{ mode, allowlist }` in the mode entry. Existing
   exclusion/inclusion entries persist `{ mode }` only (unchanged shape).
 
-### D5 — `getActiveAllowlist()` reads the array from the branch
+### D5 — `getActiveAllowlist(pi)` reads the array from the branch
 
 ```ts
-export function getActiveAllowlist(): string[] | undefined;
+export function getActiveAllowlist(pi: ExtensionAPI): string[] | undefined;
 ```
 
-Reads the last `MODE_PERSIST_KEY` branch entry. If its mode is
-`"allowlist"`, returns the `allowlist` array (or `[]` if the field is
+Reads the last `MODE_PERSIST_KEY` branch entry via `pi.sessionManager.getBranch()`.
+If its mode is `"allowlist"`, returns the `allowlist` array (or `[]` if the field is
 absent/malformed — defensive). Otherwise returns `undefined`. This is
 the single source of truth for the active allowlist — `pi-tbox`'s
 `actuateNewToolsets` and any other call site read it here, not from a
@@ -305,21 +329,49 @@ Localized to `ensureRestoreHandler`'s `doRestore`:
    getModuleState().defaultResolutionMode = mode;
    ```
 
-2. **Allowlist short-circuit** (set-level override, before the per-toolset loop):
+2. **Allowlist short-circuit** (atomic two-phase, set-level override,
+   before the per-toolset loop):
 
    ```ts
    if (mode === "allowlist") {
        const allow = new Set<string>(Array.isArray(activeAllowlist) ? activeAllowlist : []);
+
+       // Phase 1: compute desired active-tools set, apply in ONE call.
+       // No per-toolset emit during the loop — companions on `changed`
+       // (the standard mirror pattern) cannot fire mid-restore and
+       // appendEntry against an in-progress state.
+       const desired = new Set<string>();
        for (const [, entry] of registry) {
-           _applyRestoreToolset(entry.spec, pi, allow.has(entry.spec.id), true);
+           if (allow.has(entry.spec.id)) {
+               for (const n of entry.spec.names) desired.add(n);
+           }
+       }
+       const registered = new Set(pi.getAllTools().map((t) => t.name));
+       pi.setActiveTools([...desired].filter((n) => registered.has(n)));
+
+       // Phase 2: notify AFTER state is final. Emit `restored` (this is
+       // a branch replay, not a live toggle). A companion on `restored`
+       // fires against the already-authoritative state, so its toggle is
+       // a live post-restore action on the consumer's side of the
+       // boundary — not an interleaving during restore.
+       for (const [, entry] of registry) {
+           _emitToolsetEvents(
+               entry.spec,
+               pi,
+               TOOLSET_EVENTS.restored,
+               allow.has(entry.spec.id),
+           );
        }
        return;
    }
    ```
 
    Per-toolset branch entries and settings pins are bypassed. The
-   `isPersistedEntry=true` flag emits `restored` (this is a branch
-   replay, not a live toggle).
+   `isPersistedEntry=true` equivalent (`restored`) is emitted in phase 2.
+   This two-phase split is the robust fix for reviewer note N1: it removes
+   the per-toolset emit-during-loop that a companion mirror could react
+   to with a synchronous `appendEntry`, desyncing the final state. See
+   D3's "Atomic two-phase restore" note for the contract and rationale.
 
 3. **Per-toolset else-branch** (settings tier insertion, null-tombstone-aware):
    drop `b.data != null` from the `persistEntries` filter; in the
@@ -362,7 +414,7 @@ Localized to `ensureRestoreHandler`'s `doRestore`:
 | `clearToolsetEntry(pi, persistKey)` | Tombstone one toolset branch entry (dedup'd). |
 | `clearAllToolsetEntries(pi)` | Tombstone all registered toolset branch entries. |
 | `applyToolsetEnabled(pi, spec, enabled)` | Apply state without persisting, emit `changed`. Wrapper over `_applyRestoreToolset(..., false)`. |
-| `getActiveAllowlist()` | Read the allowlist array from the last mode entry; `undefined` if mode isn't `allowlist`. |
+| `getActiveAllowlist(pi)` | Read the allowlist array from the last mode entry via `pi.sessionManager.getBranch()`; `undefined` if mode isn't `allowlist`. |
 | `MalformedSettingsError` | Error class thrown by mutators on a corrupt settings file. |
 
 ### Changed exports (1)
@@ -440,6 +492,20 @@ the fundamental flaw; dropping it is the point.
   (small, last-wins, same cost profile as any toggle). The ceiling is
   noted; upgrade path is a pi-core "compact toolset entries" op, out of
   scope. `ponytail:` comment on `clearToolsetEntry` names the ceiling.
+- **Settings file path coupling (N2).** The reader/writer hardcode
+  `~/.pi/agent/settings.json` (global) and `.pi/settings.json` (project)
+  via `os.homedir()` + `path.join`. If pi-core moves its settings paths or
+  format, the library breaks with no configuration knob. Accepted ceiling;
+  `ponytail:` comment on `readMergedToolsetDefaults` names the coupling
+  and the upgrade path (a pi-core settings-path registry, if one ever
+  appears). Rationale for reading files directly (load-order race safety)
+  is in D1.
+- **Concurrent file access in `writeToolsetDefaults` (N3).** The writer is
+  read-modify-write (read existing file, merge `toolsetDefaults`, write
+  back preserving every other key). Two writers racing could lose a key.
+  Acceptable for rarely-written settings files; `ponytail:` comment on
+  `writeToolsetDefaults` names the ceiling (per-file lock or atomic
+  write-rename if settings ever become contended).
 
 ## Test scope
 
@@ -461,20 +527,32 @@ append. Companion-mirror visibility across a tombstone in the same pass.
 **Allowlist mode:**
 
 - `setDefaultResolutionMode(pi, "allowlist", ids)` persists the array;
-  `getActiveAllowlist()` returns it.
+  `getActiveAllowlist(pi)` returns it.
 - Restore under allowlist: allowlist members on, others off, **across
   all registered toolsets** — including a toolset with a stale
   `{enabled:true}` branch entry (bypassed) and one with a settings pin
   `{enabled:true}` (bypassed). The set-level override is authoritative.
 - Future-install: register a toolset *after* setting allowlist mode,
   trigger `actuateNewToolsets` path (or simulate the consultation via
-  `getActiveAllowlist()`) → not in array → off.
+  `getActiveAllowlist(pi)`) → not in array → off.
 - Supersession: a later `setDefaultResolutionMode(pi, "exclusion")`
   entry → allowlist no longer active, per-toolset tiering resumes.
 - Validation: `"allowlist"` without array → throws; empty array →
   throws; unregistered ids → allowed (no throw).
-- `getActiveAllowlist()` returns `undefined` under exclusion/inclusion
+- `getActiveAllowlist(pi)` returns `undefined` under exclusion/inclusion
   and under a null-tombstoned mode entry.
+- **Companion-mirror safety during allowlist restore (N1):** register a
+  base + companion where the companion mirrors `base` on
+  `TOOLSET_EVENTS.changed` (the pattern from `core.test.ts:210`). Set
+  allowlist mode with `base` in the array, `comp` NOT in the array. Fire
+  `session_start`. Assert: (a) `base` is on, `comp` is off; (b) the
+  companion's `changed` handler did NOT fire during restore (no
+  mid-loop `appendEntry` for `comp`) — i.e. `comp`'s branch has no
+  `{enabled:true}` entry written by the mirror. The two-phase restore
+  establishes the authoritative state before any notification, so a
+  `changed`-mirror cannot desync it. (A companion on `restored` that
+  re-enables `comp` is a live post-restore toggle — out of the
+  library's scope, consumer's business.)
 
 **Tombstone helpers:** `clearToolsetEntry` / `clearAllToolsetEntries` —
 append `null` when last entry is non-null, no-op when already cleared.
@@ -512,6 +590,12 @@ scaffolding into history and gives a clean commit story.
    "exclusion"`, no settings fallback + tests. (Revise the branch's mode
    block; drop the settings fallback.)
 7. `CHANGELOG.md` `[Unreleased]` + README API section.
+8. **Fix pre-existing `tsc --noEmit` failure on `main` (N4):**
+   `__tests__/mock-pi.ts` is missing `scopedModels` / `isProjectTrusted`
+   from `ExtensionContext`, which blocks `prepublishOnly`
+   (`npm test && npx tsc --noEmit`) and thus the 1.2.0 publish. Add the
+   missing stub fields to `MockPI`. Unrelated to this plan's features but
+   required to ship the release.
 
 ## Out of scope / deferred
 
