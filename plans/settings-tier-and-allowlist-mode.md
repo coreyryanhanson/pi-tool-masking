@@ -319,18 +319,71 @@ explicitly rejected.
 ### D7 — Tombstone helpers (toolset entries only)
 
 ```ts
-export function clearToolsetEntry(pi: ExtensionAPI, persistKey: string): void;
-export function clearAllToolsetEntries(pi: ExtensionAPI): void;
+import type { SessionEntry } from "@earendil-works/pi-coding-agent";
+
+export function clearToolsetEntry(
+  pi: ExtensionAPI,
+  persistKey: string,
+  branch: readonly SessionEntry[],
+): void;
+export function clearAllToolsetEntries(
+  pi: ExtensionAPI,
+  branch: readonly SessionEntry[],
+): void;
 ```
 
 Owns the tombstone-write convention: append `null` only if the key has
 a prior entry **and** its last entry is not already cleared. A toolset
 that was never toggled has no branch entry — appending `null` would
 create a redundant tombstone for a key with no prior state, so skip
-it. Dedup'd — consecutive restores don't stack
-tombstones, and never-toggled toolsets get no tombstone at all. The
+it. Dedup'd — consecutive restores (with no intervening toggle) write
+zero tombstones, and never-toggled toolsets get no tombstone at all. The
 library owns branch-read semantics, so it owns the tombstone-write
 convention.
+
+**Why the `branch` arg (D7 branch-access gap, see
+[`d7-branch-access-gap.md`](./d7-branch-access-gap.md)):** the dedup
+contract requires reading the branch, but `ExtensionAPI` (the `pi`
+arg) exposes `appendEntry` and **not** `sessionManager`; that property
+is on `ExtensionContext` / `ExtensionCommandContext` only (verified
+against pi-core `dist/core/extensions/types.d.ts`). The original
+`clearToolsetEntry(pi, persistKey)` shape — which read
+`(pi as any).sessionManager.getBranch()` — compiled only because the
+test mock bolted a `sessionManager` getter onto the `pi` instance; in
+production it throws `TypeError: Cannot read properties of undefined
+(reading 'getBranch')`. (D5 already established this same fact to
+justify a parameterless `getActiveAllowlist()`; D7 as originally
+written contradicted it. This revision resolves the contradiction.)
+
+The fix is the **branch-snapshot variant of option A** from the gap
+doc: pass the branch the caller already has as a third arg, rather
+than a second pi-like object or a `ctx` dependency. `pi` writes
+(`appendEntry`), `branch` reads — a clean read/write split, and the
+read-only `readonly SessionEntry[]` is the narrowest possible branch
+surface (no `ctx`, no `sessionManager` method handle). The call site
+holds the snapshot already: a command handler passes
+`ctx.sessionManager.getBranch()`; the test suite passes
+`mockPi.createContext().sessionManager.getBranch()`. `SessionEntry` is
+exported from pi-core, so the import compiles with no new dependency.
+
+Rejected alternatives (see the gap doc for full analysis):
+
+- **B — drop dedup, always append `null`.** One line, matches the
+  original signature, and behaviorally harmless (D6 treats a `null`
+  last entry the same as no entry). Rejected because `clearAllToolsetEntries`
+  under B writes a tombstone for *every* registered toolset on every
+  restore — including never-toggled ones — and stacks on repeat
+  restores, discarding the exact no-redundant-tombstone property D7
+  was designed for. The branch-snapshot signature costs nothing extra
+  here (step 5 isn't implemented yet — no test rework), so there's no
+  reason to shrink the contract.
+- **C — module-state mirror of per-toolset last-entries.** Keeps the
+  `pi`-only signature but drifts for entries written by other
+  consumers (companion mirrors, direct `appendEntry` callers — pi-tbox
+  itself writes `{enabled:true}` in `src/focus.ts`). The whole point of
+  re-reading the branch per toolset in `doRestore` was to see other
+  writers; a stale mirror reintroduces the desync the plan works hard
+  to avoid.
 
 **No `clearModeEntry` / `applyResolutionMode`.** The branch's mode
 tombstone helpers are dropped. Mode is never tombstoned — it is always
@@ -562,8 +615,8 @@ Localized to `ensureRestoreHandler`'s `doRestore`:
 | `writeToolsetDefaults(entries, scope)` | Settings writer (for `save`). Preserves every non-`toolsetDefaults` key. |
 | `clearToolsetDefaults(scope)` | Settings clearer (for `clear`). Returns `true` if the block existed. |
 | `getEffectiveDefault(spec, snapshot?)` | Tier-2 (settings) then tier-3 (packaged) resolver. Ignores mode — caller checks allowlist mode separately. Reads `snapshot[spec.persistKey]?.enabled` from the same `readMergedToolsetDefaults()` shape, then falls back to `spec.defaultEnabled ?? true`. |
-| `clearToolsetEntry(pi, persistKey)` | Tombstone one toolset branch entry (dedup'd). |
-| `clearAllToolsetEntries(pi)` | Tombstone all registered toolset branch entries. |
+| `clearToolsetEntry(pi, persistKey, branch)` | Tombstone one toolset branch entry (dedup'd). `branch` is the caller's `ctx.sessionManager.getBranch()` snapshot — see D7 / the [branch-access gap](./d7-branch-access-gap.md). |
+| `clearAllToolsetEntries(pi, branch)` | Tombstone all registered toolset branch entries. Same `branch` snapshot arg. |
 | `applyToolsetEnabled(pi, spec, enabled)` | Apply state without persisting, emit `changed`. Wrapper over `_applyRestoreToolset(..., false)`. |
 | `getActiveAllowlist()` | Read the live allowlist array from module state (mirrored from the last mode branch entry by `doRestore` and `setDefaultResolutionMode`); `undefined` if mode isn't `allowlist`. Parameterless — matches `getDefaultResolutionMode()`. |
 | `MalformedSettingsError` | Error class thrown by mutators on a corrupt settings file. |
@@ -639,10 +692,17 @@ the fundamental flaw; dropping it is the point.
 - **Allowlist restore doesn't re-run the `requires` cascade.** Caller
   must pass the forward closure. Documented in the JSDoc. Same invariant
   as today's per-toolset restore.
-- **Tombstone accumulation.** Repeated `restore`s stack null tombstones
-  (small, last-wins, same cost profile as any toggle). The ceiling is
-  noted; upgrade path is a pi-core "compact toolset entries" op, out of
-  scope. `ponytail:` comment on `clearToolsetEntry` names the ceiling.
+- **Tombstone accumulation (precise ceiling).** Under the D7 dedup
+  contract, a repeat `restore` with *no intervening toggle* writes zero
+  tombstones (the last entry is already cleared → no-op). A toggle
+  between restores creates a new non-null last entry, which the next
+  restore tombstones — so the real growth rate is **one tombstone per
+toggle cycle**, not one per restore. Never-toggled toolsets get no
+  tombstone at all. The ceiling is still real (a long session with many
+  toggle/restore cycles stacks entries); upgrade path is a pi-core
+  "compact toolset entries" op, out of scope. `ponytail:` comment on
+  `clearToolsetEntry` names both the dedup and the per-toggle-cycle
+  growth.
 - **Settings file path coupling (N2).** The reader/writer hardcode
   `~/.pi/agent/settings.json` (global) and `.pi/settings.json` (project)
   via `os.homedir()` + `path.join`. If pi-core moves its settings paths or
@@ -733,7 +793,12 @@ append. Companion-mirror visibility across a tombstone in the same pass.
 append `null` when last entry is non-null, no-op when already cleared,
 no-op when the key has no prior entry (no redundant tombstone for a
 never-toggled toolset, per D7). `clearAllToolsetEntries` covers
-exactly the registered toolsets.
+exactly the registered toolsets. Both take a `branch: readonly SessionEntry[]`
+third arg — the caller passes `mockPi.createContext().sessionManager.getBranch()`
+(see D7 and the [branch-access gap](./d7-branch-access-gap.md)). No
+`pi.sessionManager` access anywhere: the real `ExtensionAPI` has no
+`sessionManager`, so tests must not rely on the mock's pi-instance
+getter for these helpers — pass the snapshot from `createContext()`.
 
 **`applyToolsetEnabled`:** applies state, emits `changed`, does **not**
 `appendEntry`. Verify the branch is unchanged after the call.
