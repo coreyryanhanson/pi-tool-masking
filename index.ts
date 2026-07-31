@@ -174,28 +174,48 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		// fall back to its packaged default and desync from the companion — the
 		// §6 "search's own restore reads the branch and finds the entry the mirror
 		// just wrote" guarantee.
+		//
+		// Read settings.json toolset defaults once per restore pass.
+		// settings.json is stable mid-restore (unlike the branch, which
+		// companion mirroring can mutate), so a single read suffices.
+		const settingsDefaults = readMergedToolsetDefaults();
 		for (const [, entry] of registry) {
 			const { spec } = entry;
 
 			// Find persisted entry for this toolset (last-writer-wins).
 			// Fresh read per toolset so companion-mirror writes during this
-			// pass are visible to later toolsets.
+			// pass are visible to later toolsets. The `b.data != null` filter
+			// is dropped: a null (tombstoned) last entry means "cleared →
+			// fall through to settings → mode floor → packaged" and must beat
+			// a stale prior entry instead of being invisible.
 			const branchNow = ctx.sessionManager.getBranch();
 			const persistEntries = branchNow.filter(
-				(b: any) => b.customType === spec.persistKey && b.data != null,
+				(b: any) => b.customType === spec.persistKey,
 			);
-
-			if (persistEntries.length > 0) {
-				const lastEntry = persistEntries[persistEntries.length - 1];
-				const enabled = (lastEntry as any).data?.enabled;
-				if (typeof enabled === "boolean") {
-					_applyRestoreToolset(spec, pi, enabled, true);
-				}
+			const lastEntry = persistEntries[persistEntries.length - 1];
+			const enabled = (lastEntry as any)?.data?.enabled;
+			if (typeof enabled === "boolean") {
+				_applyRestoreToolset(spec, pi, enabled, true);
 			} else {
-				// No entry — resolve default based on mode (§4.5)
+				// No usable branch entry — fall through to settings tier (2),
+				// then mode floor, then packaged `defaultEnabled` (3). A pinned
+				// settings entry is explicit user intent and participates in
+				// BOTH modes — mirroring how the chat-branch tier (also user
+				// intent) is honored in inclusion via the if-branch. Only
+				// unpinned toolsets consult mode for the floor (exclusion →
+				// `defaultEnabled ?? true`, inclusion → false).
+				// `readMergedToolsetDefaults()` returns the on-disk shape
+				//   Record<persistKey, { enabled: boolean }>
+				// so the pin is the wrapped object; unwrap with `?.enabled`.
+				const settingsEnabled = settingsDefaults[spec.persistKey]?.enabled;
 				const fallback = spec.defaultEnabled ?? true;
-				const enabled = mode === "inclusion" ? false : fallback;
-				_applyRestoreToolset(spec, pi, enabled, false);
+				const resolved =
+					typeof settingsEnabled === "boolean"
+						? settingsEnabled
+						: mode === "inclusion"
+							? false
+							: fallback;
+				_applyRestoreToolset(spec, pi, resolved, false);
 			}
 		}
 	};
@@ -635,6 +655,38 @@ export function readToolsetDefaults(
 ): ToolsetDefaultsMap {
 	if (_settingsOverride !== null) return { ..._settingsOverride };
 	return parseToolsetDefaults(readSettingsJsonSafe(scope));
+}
+
+/**
+ * Resolve a toolset's effective fresh-session default: settings tier (2)
+ * then packaged `spec.defaultEnabled` (3). **Ignores resolution mode** —
+ * callers that need mode-aware behavior must consult
+ * `getDefaultResolutionMode()` themselves and act accordingly.
+ *
+ * Pass an explicit `snapshot` (the merged settings map from
+ * `readMergedToolsetDefaults()`) when calling from a loop over multiple
+ * toolsets — read the snapshot once before the loop and pass it in to
+ * avoid re-reading disk per toolset. When `snapshot` is omitted the
+ * function performs its own one-off `readMergedToolsetDefaults()` call.
+ *
+ * `snapshot` shares the on-disk shape
+ * `Record<persistKey, { enabled: boolean }>`; the pin is unwrapped via
+ * `?.enabled`. A missing or malformed entry falls through to
+ * `spec.defaultEnabled ?? true`.
+ *
+ * @public — exported for pi-tbox's focusOff / actuateNewToolsets call
+ * sites, which need the settings-aware default without re-implementing
+ * the reader.
+ */
+export function getEffectiveDefault(
+	spec: ToolsetSpec,
+	snapshot?: ToolsetDefaultsMap,
+): boolean {
+	const map = snapshot ?? readMergedToolsetDefaults();
+	const settingsEnabled = map[spec.persistKey]?.enabled;
+	return typeof settingsEnabled === "boolean"
+		? settingsEnabled
+		: (spec.defaultEnabled ?? true);
 }
 
 // ---------------------------------------------------------------------------

@@ -14,6 +14,7 @@ import {
 	mergeToolsetDefaults,
 	readMergedToolsetDefaults,
 	readToolsetDefaults,
+	getEffectiveDefault,
 	setSettingsOverrideForTests,
 	setSettingsWriterOverrideForTests,
 	writeToolsetDefaults,
@@ -2856,5 +2857,234 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 				enabled: false,
 			});
 		});
+	});
+});
+
+// ===================================================================
+// Restore — settings.json defaults tier (§2, D1)
+// ===================================================================
+
+describe("Restore — settings.json defaults tier (§2)", () => {
+	it("S1: settings default on fresh session — settings false beats spec.defaultEnabled true", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		setSettingsOverrideForTests({
+			"toolset-state:test.toolset": { enabled: false },
+		});
+		defineToolset(
+			pi,
+			makeSpec({ names: new Set(["tool-a"]), defaultEnabled: true }),
+		);
+		mock.fireLifecycleEvent("session_start");
+		expect(mock.getActiveTools()).not.toContain("tool-a");
+	});
+
+	it("S2: chat-branch entry beats settings default (tier 1 > tier 2)", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		mock.appendEntry("toolset-state:test.toolset", { enabled: true });
+		setSettingsOverrideForTests({
+			"toolset-state:test.toolset": { enabled: false },
+		});
+		defineToolset(
+			pi,
+			makeSpec({ names: new Set(["tool-a"]), defaultEnabled: false }),
+		);
+		mock.fireLifecycleEvent("session_start");
+		expect(mock.getActiveTools()).toContain("tool-a");
+	});
+
+	it("S3: settings absent → packaged default (tier 3 unchanged)", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		setSettingsOverrideForTests({});
+		defineToolset(
+			pi,
+			makeSpec({ names: new Set(["tool-a"]), defaultEnabled: false }),
+		);
+		mock.fireLifecycleEvent("session_start");
+		expect(mock.getActiveTools()).not.toContain("tool-a");
+	});
+
+	it("S4: settings honored in inclusion mode — pinned true restores on", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		setSettingsOverrideForTests({
+			"toolset-state:test.toolset": { enabled: true },
+		});
+		defineToolset(
+			pi,
+			makeSpec({ names: new Set(["tool-a"]), defaultEnabled: true }),
+		);
+		setDefaultResolutionMode(pi, "inclusion");
+		mock.fireLifecycleEvent("session_start");
+		expect(mock.getActiveTools()).toContain("tool-a");
+	});
+
+	it("S5: settings pinned false in inclusion stays off", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		setSettingsOverrideForTests({
+			"toolset-state:test.toolset": { enabled: false },
+		});
+		defineToolset(
+			pi,
+			makeSpec({ names: new Set(["tool-a"]), defaultEnabled: true }),
+		);
+		setDefaultResolutionMode(pi, "inclusion");
+		mock.fireLifecycleEvent("session_start");
+		expect(mock.getActiveTools()).not.toContain("tool-a");
+	});
+
+	it("S6: unpinned in inclusion falls to false regardless of defaultEnabled", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		setSettingsOverrideForTests({});
+		defineToolset(
+			pi,
+			makeSpec({ names: new Set(["tool-a"]), defaultEnabled: true }),
+		);
+		setDefaultResolutionMode(pi, "inclusion");
+		mock.fireLifecycleEvent("session_start");
+		expect(mock.getActiveTools()).not.toContain("tool-a");
+	});
+
+	it("S7: null-tombstoned branch entry falls through to settings pin", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		setSettingsOverrideForTests({
+			"toolset-state:test.toolset": { enabled: false },
+		});
+		defineToolset(
+			pi,
+			makeSpec({ names: new Set(["tool-a"]), defaultEnabled: true }),
+		);
+		// real entry (true), then null tombstone → settings pin (false) wins
+		mock.appendEntry("toolset-state:test.toolset", { enabled: true });
+		mock.appendEntry("toolset-state:test.toolset", null);
+		mock.fireLifecycleEvent("session_start");
+		expect(mock.getActiveTools()).not.toContain("tool-a");
+	});
+});
+
+// ===================================================================
+// getEffectiveDefault (§2, D1)
+// ===================================================================
+
+describe("getEffectiveDefault (§2)", () => {
+	it("G1: snapshot overrides spec.defaultEnabled", () => {
+		const spec = makeSpec({ defaultEnabled: true });
+		const snapshot = { "toolset-state:test.toolset": { enabled: false } };
+		expect(getEffectiveDefault(spec, snapshot)).toBe(false);
+	});
+
+	it("G2: falls back to spec.defaultEnabled ?? true", () => {
+		const spec = makeSpec({ defaultEnabled: false });
+		expect(getEffectiveDefault(spec, {})).toBe(false);
+
+		const specNoDefault = makeSpec(); // defaultEnabled undefined
+		expect(getEffectiveDefault(specNoDefault, {})).toBe(true);
+	});
+
+	it("G3: reads disk when no snapshot passed", () => {
+		setSettingsOverrideForTests({
+			"toolset-state:test.toolset": { enabled: false },
+		});
+		try {
+			const spec = makeSpec({ defaultEnabled: true });
+			expect(getEffectiveDefault(spec)).toBe(false);
+		} finally {
+			setSettingsOverrideForTests({});
+		}
+	});
+
+});
+
+// ===================================================================
+// Null-tombstone — toolset restore (A.1, D6)
+// ===================================================================
+
+describe("Null-tombstone — toolset restore (A.1)", () => {
+	it("AT1: null tombstone after real entry falls through to settings/packaged", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({ names: new Set(["tool-a"]), defaultEnabled: false }),
+		);
+
+		// Branch: real entry then null tombstone
+		mock.appendEntry("toolset-state:test.toolset", { enabled: true });
+		mock.appendEntry("toolset-state:test.toolset", null);
+
+		mock.fireLifecycleEvent("session_start");
+
+		// Falls through to packaged default (false), not the stale true entry
+		expect(mock.getActiveTools()).not.toContain("tool-a");
+	});
+
+	it("AT2: real entry without tombstone restores true (regression guard)", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({ names: new Set(["tool-a"]), defaultEnabled: false }),
+		);
+
+		mock.appendEntry("toolset-state:test.toolset", { enabled: true });
+
+		mock.fireLifecycleEvent("session_start");
+
+		expect(mock.getActiveTools()).toContain("tool-a");
+	});
+
+	it("AT3: only a null tombstone (no prior real entry) falls through", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({ names: new Set(["tool-a"]), defaultEnabled: true }),
+		);
+
+		mock.appendEntry("toolset-state:test.toolset", null);
+
+		mock.fireLifecycleEvent("session_start");
+
+		// No real entry → packaged default (true)
+		expect(mock.getActiveTools()).toContain("tool-a");
+	});
+
+	it("AT4: live toggle after tombstone supersedes it (last-writer-wins)", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({ names: new Set(["tool-a"]), defaultEnabled: false }),
+		);
+
+		// Tombstone, then live toggle (enabled)
+		mock.appendEntry("toolset-state:test.toolset", null);
+		mock.appendEntry("toolset-state:test.toolset", { enabled: true });
+
+		mock.fireLifecycleEvent("session_start");
+
+		expect(mock.getActiveTools()).toContain("tool-a");
+	});
+
+	it("AT5: malformed last entry (no enabled field) falls through", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({ names: new Set(["tool-a"]), defaultEnabled: false }),
+		);
+
+		// Malformed entry: has data but no `enabled` field
+		mock.appendEntry("toolset-state:test.toolset", { foo: "bar" });
+
+		mock.fireLifecycleEvent("session_start");
+
+		// Falls through to packaged default (false), not silently unrestored
+		expect(mock.getActiveTools()).not.toContain("tool-a");
 	});
 });
