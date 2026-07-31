@@ -815,31 +815,34 @@ scaffolding into history and gives a clean commit story.
 
 **Order (each commit leaves `npm test` green):**
 
-1. **Fix pre-existing `tsc --noEmit` failure on `main` (N4) — first, to
-   give a clean typecheck baseline for the feature work:**
-   `__tests__/mock-pi.ts` is missing `scopedModels` / `isProjectTrusted`
-   from `ExtensionContext`, which blocks `prepublishOnly`
-   (`npm test && npx tsc --noEmit`) and thus the 1.2.0 publish, *and*
-   leaves `tsc --noEmit` red on `main` before any feature lands. Add the
-   missing stub fields to `MockPI`. Unrelated to this plan's features but
-   required to ship the release. Ordered first (not last) because this
-   plan adds new TS surface (`ModuleState.activeAllowlist` with the
-   `exactOptionalPropertyTypes` `| undefined` trap, new optional params,
-   10 new exports) — the exact kind of bug that flag catches (TS2412 on
-   bare optional properties) is what steps 2–8 are shipping. A red
-   baseline would mix pre-existing TS2739 with your own errors on every
-   `npx tsc --noEmit`, so you'd either miss a TS2412 or waste time
-   disentangling. AGENTS.md tells you to run typecheck yourself before
-   shipping; a clean baseline makes that actually useful. Smallest,
-   most independent commit — ideal commit 1. (`npm test` / vitest never
-   runs `tsc --noEmit`, so this commit is green on `npm test` too.)
-2. `toolsetDefaults` reader + parse/merge helpers + test seams + reader
-   tests. (Port from the branch.)
-3. `toolsetDefaults` writer + clearer + `MalformedSettingsError` + writer
-   tests. (Port from the branch.)
-4. `doRestore` else-branch settings insertion + null-tombstone toolset
-   filter + `getEffectiveDefault` + tests. (Port the toolset-tier parts
-   from the branch; drop the `readMergedToolsetResolutionMode` fallback.)
+1. ✅ **Done** — Fix pre-existing `tsc --noEmit` failure on `main` (N4):
+   added the missing `scopedModels` / `isProjectTrusted` stub fields to
+   `MockPI` to give a clean typecheck baseline for the feature work.
+2. ✅ **Done** — `toolsetDefaults` reader + parse/merge helpers + test
+   seams + reader tests. `readMergedToolsetDefaults` / `readToolsetDefaults`
+   / `parseToolsetDefaults` / `mergeToolsetDefaults` return the on-disk
+   shape `Record<persistKey, { enabled: boolean }>` (not flattened).
+   Reader never throws; malformed files contribute `{}` to the merge.
+3. ✅ **Done** — `toolsetDefaults` writer + clearer +
+   `MalformedSettingsError` + writer tests. `writeToolsetDefaults` /
+   `clearToolsetDefaults` preserve every non-`toolsetDefaults` key;
+   mutators throw `MalformedSettingsError` on a corrupt file (never
+   overwrite), so a corrupt file is never silently destroyed.
+4. ✅ **Done** — `doRestore` else-branch settings insertion +
+   null-tombstone toolset filter + `getEffectiveDefault` + tests. The
+   else-branch now consults `readMergedToolsetDefaults()` (read once per
+   pass, stable mid-restore) before the mode floor, and a pinned
+   settings entry is honored in **both** exclusion and inclusion modes
+   (mirroring how the chat-branch tier is honored — both are user intent,
+   only unpinned toolsets consult mode for the floor). Dropped the
+   `b.data != null` filter on the per-toolset `persistEntries` lookup
+   (D6): a tombstoned last entry now falls through to settings → mode
+   floor → packaged and beats a stale prior entry. Added
+   `getEffectiveDefault(spec, snapshot?)` — tier-2 then tier-3 resolver,
+   mode-agnostic by design (callers check mode themselves), accepts a
+   snapshot to avoid re-reading disk per toolset in a loop. 16 new
+   tests (S1–S7 settings-tier restore, G1–G4 `getEffectiveDefault`,
+   AT1–AT5 null-tombstone toolset restore).
 5. `clearToolsetEntry` / `clearAllToolsetEntries` + `applyToolsetEnabled`
    - tests. (Port toolset tombstone helpers from the branch; write
    `applyToolsetEnabled` fresh.)
