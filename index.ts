@@ -710,7 +710,7 @@ export function clearToolsetEntry(
 	const data = (last as any)?.data;
 	// No prior entry, a tombstoned last entry (data null), or a last entry
 	// without an `enabled` field → already effectively cleared, skip.
-	if (data == null || (data as any)?.enabled == null) {
+	if (data == null || data?.enabled == null) {
 		return;
 	}
 	pi.appendEntry(persistKey, null);
