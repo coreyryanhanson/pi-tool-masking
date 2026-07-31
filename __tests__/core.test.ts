@@ -3430,6 +3430,58 @@ describe("Null-tombstone — toolset restore (A.1)", () => {
 		// Falls through to packaged default (false), not silently unrestored
 		expect(mock.getActiveTools()).not.toContain("tool-a");
 	});
+
+	it("AT6: companion-mirror write across a tombstone in the same pass is visible", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "base-tool", description: "" });
+		mock.registerTool({ name: "comp-tool", description: "" });
+
+		// Base defaults OFF with a tombstoned stale {enabled:true} entry; comp
+		// defaults ON. The tombstone makes base fall through to its packaged
+		// default (off) — emitting `changed` (fallback path, not `restored`) —
+		// and the mirror's synchronous disable of comp must be visible to
+		// comp's own restore later in the same pass (branch re-read per
+		// toolset, same mechanism as the §10.1 test but across a tombstone).
+		const baseSpec = makeSpec({
+			id: "base",
+			persistKey: "k:base",
+			names: new Set(["base-tool"]),
+			defaultEnabled: false,
+		});
+		const compSpec = makeSpec({
+			id: "comp",
+			persistKey: "k:comp",
+			names: new Set(["comp-tool"]),
+			defaultEnabled: true,
+		});
+		defineToolset(pi, baseSpec);
+		const comp = defineToolset(pi, compSpec);
+
+		pi.events.on(TOOLSET_EVENTS.changed, (data: any) => {
+			if (data.id === "base") {
+				if (data.enabled) comp.enable(pi);
+				else comp.disable(pi);
+			}
+		});
+
+		// Real entry then null tombstone — the tombstone must beat the stale
+		// {enabled:true} and fall through, not restore true.
+		mock.appendEntry("k:base", { enabled: true });
+		mock.appendEntry("k:base", null);
+
+		mock.setActiveTools(["base-tool", "comp-tool"]);
+		mock.fireLifecycleEvent("session_start");
+
+		// Base off (tombstone fell through to packaged default), comp off —
+		// comp's own restore saw the mirror-written {enabled:false}, not its
+		// packaged default true.
+		expect(mock.getActiveTools()).not.toContain("base-tool");
+		expect(mock.getActiveTools()).not.toContain("comp-tool");
+		const compEntries = mock
+			.getEntries("k:comp")
+			.map((e) => (e.data as any)?.enabled);
+		expect(compEntries).toContain(false);
+	});
 });
 
 // ===================================================================

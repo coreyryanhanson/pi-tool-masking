@@ -618,8 +618,12 @@ export function setDefaultResolutionMode(
 	// Mirror into module state so `getActiveAllowlist()` stays consistent with
 	// the branch without a `sessionManager` dependency. Existing exclusion /
 	// inclusion entries persist `{ mode }` only (unchanged shape);
-	// `.activeAllowlist` is undefined for non-allowlist modes.
-	ms.activeAllowlist = mode === "allowlist" ? allowlist : undefined;
+	// `.activeAllowlist` is undefined for non-allowlist modes. Copy the
+	// caller's array — the branch snapshots on append, but module state holds
+	// the live reference; a caller mutating the array post-call would
+	// otherwise drift the mirror from the branch.
+	ms.activeAllowlist =
+		mode === "allowlist" && allowlist ? [...allowlist] : undefined;
 	pi.appendEntry(
 		MODE_PERSIST_KEY,
 		mode === "allowlist" ? { mode, allowlist } : { mode },
@@ -657,7 +661,10 @@ export function getDefaultResolutionMode(): DefaultResolutionMode {
  * closure.
  */
 export function getActiveAllowlist(): string[] | undefined {
-	return getModuleState().activeAllowlist;
+	// Copy on read: module state is the internal mirror; handing out the live
+	// reference would let a consumer mutate it and corrupt the mirror.
+	const allowlist = getModuleState().activeAllowlist;
+	return allowlist ? [...allowlist] : undefined;
 }
 
 /**
@@ -1043,8 +1050,15 @@ export function writeToolsetDefaults(
 	}
 
 	mutateSettingsJson(scope, (existing) => {
+		// Non-object `toolsetDefaults` (array/string/null) recovers to `{}` —
+		// same recovery as the reader (`parseToolsetDefaults`). A bare array
+		// would swallow string-keyed writes (JSON.stringify drops them) and a
+		// string would throw a confusing TypeError on `td[key] = ...`.
+		const raw = existing.toolsetDefaults;
 		const td: Record<string, unknown> =
-			(existing.toolsetDefaults as Record<string, unknown> | undefined) ?? {};
+			raw && typeof raw === "object" && !Array.isArray(raw)
+				? (raw as Record<string, unknown>)
+				: {};
 		let changed = false;
 		for (const [key, val] of Object.entries(entries)) {
 			if (
