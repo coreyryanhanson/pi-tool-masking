@@ -9,6 +9,7 @@ import {
 	TOOLSET_EVENTS,
 	setDefaultResolutionMode,
 	getDefaultResolutionMode,
+	getActiveAllowlist,
 	getRegisteredToolsets,
 	parseToolsetDefaults,
 	mergeToolsetDefaults,
@@ -1043,7 +1044,7 @@ describe("Default resolution mode (§4.5)", () => {
 	it("throws for invalid mode", () => {
 		const { pi } = createEnv();
 		expect(() => (setDefaultResolutionMode as any)(pi, "invalid")).toThrow(
-			'[pi-tool-masking] Invalid defaultResolutionMode: "invalid". Must be "exclusion" or "inclusion".',
+			'[pi-tool-masking] Invalid defaultResolutionMode: "invalid". Must be "exclusion", "inclusion", or "allowlist".',
 		);
 	});
 });
@@ -1086,6 +1087,212 @@ describe("Resolution mode persistence — survives quit/resume (§4.5, §13.2)",
 		// so inclusion holds and the unknown toolset restores off.
 		expect(getDefaultResolutionMode()).toBe("inclusion");
 		expect(mock2.getActiveTools()).not.toContain("tool-a");
+	});
+});
+
+// ===================================================================
+// Allowlist resolution mode — idea G (§ D3)
+// ===================================================================
+
+describe("Allowlist resolution mode (D3)", () => {
+	it("AL1: setDefaultResolutionMode persists the array; getActiveAllowlist reads it", () => {
+		const { mock, pi } = createEnv();
+		setDefaultResolutionMode(pi, "allowlist", [
+			"my-plugin.web",
+			"my-plugin.learn",
+		]);
+
+		expect(getDefaultResolutionMode()).toBe("allowlist");
+		expect(getActiveAllowlist()).toEqual(["my-plugin.web", "my-plugin.learn"]);
+		const entries = mock.getEntries("toolset-resolution-mode");
+		expect(entries).toHaveLength(1);
+		expect(entries[0]?.data).toEqual({
+			mode: "allowlist",
+			allowlist: ["my-plugin.web", "my-plugin.learn"],
+		});
+	});
+
+	it("AL2: restore under allowlist — members on, others off; stale branch entry and settings pin bypassed", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		mock.registerTool({ name: "tool-b", description: "" });
+		mock.registerTool({ name: "tool-c", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({ id: "a", persistKey: "k:a", names: new Set(["tool-a"]) }),
+		);
+		defineToolset(
+			pi,
+			makeSpec({ id: "b", persistKey: "k:b", names: new Set(["tool-b"]) }),
+		);
+		defineToolset(
+			pi,
+			makeSpec({ id: "c", persistKey: "k:c", names: new Set(["tool-c"]) }),
+		);
+
+		// Stale branch entry (bypassed) and settings pin (bypassed) must both lose
+		// to the set-level allowlist override.
+		mock.appendEntry("k:b", { enabled: true });
+		setSettingsOverrideForTests({ "k:c": { enabled: true } });
+
+		setDefaultResolutionMode(pi, "allowlist", ["a"]);
+		// Real pi activates every extension tool at startup, THEN restore runs.
+		mock.setActiveTools(["tool-a", "tool-b", "tool-c"]);
+
+		mock.fireLifecycleEvent("session_start");
+
+		expect(mock.getActiveTools()).toEqual(["tool-a"]);
+	});
+
+	it("AL3 (B1): non-toolset tools preserved during allowlist restore", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		mock.registerTool({ name: "orphan-tool", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({ id: "a", persistKey: "k:a", names: new Set(["tool-a"]) }),
+		);
+
+		setDefaultResolutionMode(pi, "allowlist", ["a"]);
+		mock.setActiveTools(["tool-a", "orphan-tool"]);
+
+		mock.fireLifecycleEvent("session_start");
+
+		// orphan-tool is not owned by any registered toolset — the library does
+		// not govern it and must leave it active (`setActiveTools` is a full
+		// replacement, so the short-circuit computes a delta from current).
+		expect(mock.getActiveTools()).toEqual(["tool-a", "orphan-tool"]);
+	});
+
+	it("AL4: future-install suppression — toolset registered after allowlist is off", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		mock.registerTool({ name: "tool-b", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({ id: "a", persistKey: "k:a", names: new Set(["tool-a"]) }),
+		);
+
+		setDefaultResolutionMode(pi, "allowlist", ["a"]);
+		mock.fireLifecycleEvent("session_start");
+		expect(mock.getActiveTools()).toEqual(["tool-a"]);
+
+		// Toolset installed AFTER focus was entered (pi-tbox's actuateNewToolsets
+		// path consults getActiveAllowlist() — the library has no actuation
+		// surface, so the consultation is simulated here).
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "b",
+				persistKey: "k:b",
+				names: new Set(["tool-b"]),
+				defaultEnabled: true,
+			}),
+		);
+		expect(getActiveAllowlist()).toEqual(["a"]); // b not in the array → off
+
+		// Simulate actuation turning the new toolset on, then the next restore
+		// suppresses it.
+		mock.setActiveTools(["tool-a", "tool-b"]);
+		mock.fireLifecycleEvent("session_start");
+
+		expect(mock.getActiveTools()).toEqual(["tool-a"]);
+	});
+
+	it("AL5: later exclusion entry supersedes the allowlist; per-toolset tiering resumes", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		mock.registerTool({ name: "tool-b", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "a",
+				persistKey: "k:a",
+				names: new Set(["tool-a"]),
+				defaultEnabled: true,
+			}),
+		);
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "b",
+				persistKey: "k:b",
+				names: new Set(["tool-b"]),
+				defaultEnabled: true,
+			}),
+		);
+
+		setDefaultResolutionMode(pi, "allowlist", ["a"]);
+		mock.setActiveTools(["tool-a", "tool-b"]);
+		mock.fireLifecycleEvent("session_start");
+		expect(mock.getActiveTools()).toEqual(["tool-a"]);
+
+		// Focus lifted: exclusion supersedes the array; tiering resumes.
+		setDefaultResolutionMode(pi, "exclusion");
+		expect(getActiveAllowlist()).toBeUndefined();
+
+		mock.setActiveTools(["tool-a", "tool-b"]);
+		mock.fireLifecycleEvent("session_start");
+
+		// No branch entry, no settings pin → exclusion floor (`defaultEnabled ?? true`).
+		expect(mock.getActiveTools()).toEqual(["tool-a", "tool-b"]);
+	});
+
+	it("AL6: validation — missing/empty allowlist throws; unregistered ids allowed", () => {
+		const { pi } = createEnv();
+		expect(() => setDefaultResolutionMode(pi, "allowlist")).toThrow(
+			'[pi-tool-masking] defaultResolutionMode "allowlist" requires a non-empty allowlist array of toolset ids.',
+		);
+		expect(() => setDefaultResolutionMode(pi, "allowlist", [])).toThrow(
+			'[pi-tool-masking] defaultResolutionMode "allowlist" requires a non-empty allowlist array of toolset ids.',
+		);
+		// Forward references are legal — registration may come later.
+		expect(() =>
+			setDefaultResolutionMode(pi, "allowlist", ["not-registered"]),
+		).not.toThrow();
+		expect(getActiveAllowlist()).toEqual(["not-registered"]);
+	});
+
+	it("AL7: changed-mirror companion never fires during allowlist restore (two-phase)", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "base-tool", description: "" });
+		mock.registerTool({ name: "comp-tool", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "base",
+				persistKey: "k:base",
+				names: new Set(["base-tool"]),
+			}),
+		);
+		const comp = defineToolset(
+			pi,
+			makeSpec({
+				id: "comp",
+				persistKey: "k:comp",
+				names: new Set(["comp-tool"]),
+			}),
+		);
+
+		// §10.1 companion mirror on `changed` (the standard pattern).
+		pi.events.on(TOOLSET_EVENTS.changed, (data: any) => {
+			if (data.id === "base") {
+				if (data.enabled) comp.enable(pi);
+				else comp.disable(pi);
+			}
+		});
+
+		setDefaultResolutionMode(pi, "allowlist", ["base"]);
+		mock.setActiveTools(["base-tool", "comp-tool"]);
+
+		mock.fireLifecycleEvent("session_start");
+
+		// Authoritative state: base on, comp off.
+		expect(mock.getActiveTools()).toEqual(["base-tool"]);
+		// The mirror fires only on `changed`; allowlist restore emits `restored`
+		// in phase 2, so the mirror never appendEntry'd an `{enabled:true}` for
+		// comp mid-restore.
+		expect(mock.getEntries("k:comp")).toHaveLength(0);
 	});
 });
 
@@ -3142,11 +3349,19 @@ describe("Tombstone helpers (D7)", () => {
 		mock.registerTool({ name: "tool-b", description: "" });
 		defineToolset(
 			pi,
-			makeSpec({ id: "a", persistKey: "toolset-state:a", names: new Set(["tool-a"]) }),
+			makeSpec({
+				id: "a",
+				persistKey: "toolset-state:a",
+				names: new Set(["tool-a"]),
+			}),
 		);
 		defineToolset(
 			pi,
-			makeSpec({ id: "b", persistKey: "toolset-state:b", names: new Set(["tool-b"]) }),
+			makeSpec({
+				id: "b",
+				persistKey: "toolset-state:b",
+				names: new Set(["tool-b"]),
+			}),
 		);
 		mock.appendEntry("toolset-state:a", { enabled: true });
 		// toolset b never toggled → no branch entry

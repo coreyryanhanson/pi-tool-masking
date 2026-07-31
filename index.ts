@@ -44,7 +44,7 @@ export interface ToolsetChangedEvent {
 	member?: string;
 }
 
-export type DefaultResolutionMode = "exclusion" | "inclusion";
+export type DefaultResolutionMode = "exclusion" | "inclusion" | "allowlist";
 
 // ---------------------------------------------------------------------------
 // §6 Change notification — event names
@@ -88,6 +88,10 @@ const MODE_PERSIST_KEY = "toolset-resolution-mode";
 
 interface ModuleState {
 	defaultResolutionMode: DefaultResolutionMode;
+	// explicit `| undefined`: exactOptionalPropertyTypes forbids assigning
+	// `undefined` to a bare optional property (TS2412), and both doRestore and
+	// setDefaultResolutionMode assign undefined for non-allowlist modes.
+	activeAllowlist?: string[] | undefined;
 }
 
 function getModuleState(): ModuleState {
@@ -154,12 +158,89 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		const modeEntries = ctx.sessionManager
 			.getBranch()
 			.filter((b: any) => b.customType === MODE_PERSIST_KEY && b.data?.mode);
+		const lastModeEntry = modeEntries[modeEntries.length - 1] as any;
+		const ms = getModuleState();
 		if (modeEntries.length > 0) {
-			getModuleState().defaultResolutionMode = (
-				modeEntries[modeEntries.length - 1] as any
-			).data.mode;
+			ms.defaultResolutionMode = lastModeEntry.data.mode;
 		}
-		const mode = getModuleState().defaultResolutionMode;
+		const mode = ms.defaultResolutionMode;
+		// Mirror the allowlist from the last mode entry into module state so the
+		// parameterless `getActiveAllowlist()` can read it — branch is the source
+		// of truth, module state is the live mirror (same pattern as
+		// `defaultResolutionMode`). `setDefaultResolutionMode` writes this same
+		// field when it appends the mode entry. Non-allowlist modes → undefined.
+		const branchAllowlist = lastModeEntry?.data?.allowlist;
+		ms.activeAllowlist =
+			mode === "allowlist" && Array.isArray(branchAllowlist)
+				? branchAllowlist
+				: undefined;
+
+		// Allowlist short-circuit (idea G): the allowlist is a finite array of
+		// toolset ids stored in the branch mode entry; the suppression (the
+		// complement) is COMPUTED here over all registered toolsets, not stored.
+		// While the last mode entry is "allowlist", this set-level override is
+		// authoritative: per-toolset branch entries and settings pins are
+		// bypassed, and toolsets registered after the mode entry are off.
+		// Atomic two-phase restore: phase 1 computes the desired active-tools
+		// set and applies it in ONE `setActiveTools` call (no per-toolset emit
+		// during the loop — a companion mirror on `changed` cannot fire
+		// mid-restore and `appendEntry` against an in-progress state); phase 2
+		// emits `restored` for every registered toolset AFTER state is final.
+		if (mode === "allowlist") {
+			const allow = new Set<string>(
+				Array.isArray(branchAllowlist) ? branchAllowlist : [],
+			);
+			const registered = new Set(pi.getAllTools().map((t) => t.name));
+
+			// Phase 1: desired set = current − (suppressed toolset members) +
+			// (allowlist members). The suppress set is the complement of the
+			// allowlist among registered toolset tools only; everything else in
+			// the current set (tools not owned by any registered toolset) is kept
+			// as-is — `setActiveTools` is a full replacement, so we must not
+			// rebuild the set from only allowlist members. This mirrors the
+			// per-toolset restore (`_applyRestoreToolset` only adds/removes
+			// `spec.names`), applied set-wide.
+			const current = new Set(pi.getActiveTools());
+			const suppress = new Set<string>();
+			for (const [, entry] of registry) {
+				if (!allow.has(entry.spec.id)) {
+					for (const n of entry.spec.names) suppress.add(n);
+				}
+			}
+			const desired = new Set<string>();
+			for (const n of current) {
+				if (!suppress.has(n)) desired.add(n);
+			}
+			for (const [, entry] of registry) {
+				if (allow.has(entry.spec.id)) {
+					for (const n of entry.spec.names) desired.add(n);
+				}
+			}
+			// The `registered` filter is partially redundant: names carried over
+			// from `current` are already active (hence registered); it only
+			// matters for spec names that aren't registered tools. Kept for
+			// parity with `_applyRestoreToolset`'s per-name filtering.
+			pi.setActiveTools([...desired].filter((n) => registered.has(n)));
+
+			// Phase 2: notify AFTER state is final. `restored` for every
+			// registered toolset — the whole pass is a branch replay of the
+			// authoritative allowlist entry, not a live toggle (see the JSDoc on
+			// `getActiveAllowlist` for the event-type divergence by mode).
+			for (const [, entry] of registry) {
+				_emitToolsetEvents(
+					entry.spec,
+					pi,
+					TOOLSET_EVENTS.restored,
+					allow.has(entry.spec.id),
+				);
+			}
+			return;
+		}
+
+		// Read settings.json toolset defaults once per restore pass.
+		// settings.json is stable mid-restore (unlike the branch, which
+		// companion mirroring can mutate), so a single read suffices.
+		const settingsDefaults = readMergedToolsetDefaults();
 
 		// ponytail: restore applies each toolset's entry independently and does
 		// NOT re-run the requires cascade. Safe because §7.1 guarantees persisted
@@ -175,11 +256,6 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		// fall back to its packaged default and desync from the companion — the
 		// §6 "search's own restore reads the branch and finds the entry the mirror
 		// just wrote" guarantee.
-		//
-		// Read settings.json toolset defaults once per restore pass.
-		// settings.json is stable mid-restore (unlike the branch, which
-		// companion mirroring can mutate), so a single read suffices.
-		const settingsDefaults = readMergedToolsetDefaults();
 		for (const [, entry] of registry) {
 			const { spec } = entry;
 
@@ -494,18 +570,69 @@ export function defineToolset(pi: ExtensionAPI, spec: ToolsetSpec): Toolset {
 export function setDefaultResolutionMode(
 	pi: ExtensionAPI,
 	mode: DefaultResolutionMode,
+	allowlist?: string[],
 ): void {
-	if (mode !== "exclusion" && mode !== "inclusion") {
+	if (mode !== "exclusion" && mode !== "inclusion" && mode !== "allowlist") {
 		throw new Error(
-			`[pi-tool-masking] Invalid defaultResolutionMode: "${mode}". Must be "exclusion" or "inclusion".`,
+			`[pi-tool-masking] Invalid defaultResolutionMode: "${mode}". Must be "exclusion", "inclusion", or "allowlist".`,
 		);
 	}
-	getModuleState().defaultResolutionMode = mode;
-	pi.appendEntry(MODE_PERSIST_KEY, { mode });
+	// Write-time validation (asymmetric with restore): an allowlist mode with
+	// no/empty array is a likely mistake (deleting the last member and
+	// forgetting to switch modes); restore instead recovers a corrupt
+	// missing/non-array allowlist to `[]` (fail closed). Write-time validates
+	// intent; restore-time picks the safe recovery. Forward references are
+	// legal — ids need not be registered yet.
+	if (mode === "allowlist" && (!allowlist || allowlist.length === 0)) {
+		throw new Error(
+			`[pi-tool-masking] defaultResolutionMode "allowlist" requires a non-empty allowlist array of toolset ids.`,
+		);
+	}
+	const ms = getModuleState();
+	ms.defaultResolutionMode = mode;
+	// Mirror into module state so `getActiveAllowlist()` stays consistent with
+	// the branch without a `sessionManager` dependency. Existing exclusion /
+	// inclusion entries persist `{ mode }` only (unchanged shape);
+	// `.activeAllowlist` is undefined for non-allowlist modes.
+	ms.activeAllowlist = mode === "allowlist" ? allowlist : undefined;
+	pi.appendEntry(
+		MODE_PERSIST_KEY,
+		mode === "allowlist" ? { mode, allowlist } : { mode },
+	);
 }
 
 export function getDefaultResolutionMode(): DefaultResolutionMode {
 	return getModuleState().defaultResolutionMode;
+}
+
+/**
+ * Read the live allowlist array from module state (mirrored from the last
+ * mode branch entry by `doRestore`'s mode-resolution block and by
+ * `setDefaultResolutionMode` when it appends the entry). Returns the
+ * `allowlist` array when the active mode is `"allowlist"`, otherwise
+ * `undefined`.
+ *
+ * Parameterless (like `getDefaultResolutionMode`) — the consumer call site
+ * receives `pi: ExtensionAPI`, which does not expose `sessionManager`, so a
+ * `pi`-arg signature would not compile there. The branch remains the source
+ * of truth; module state is the live mirror.
+ *
+ * **Event-type divergence by mode (restore contract):** under
+ * exclusion/inclusion, the per-toolset restore loop emits `restored` for
+ * toolsets with a branch entry and `changed` for default-fallback toolsets
+ * (no branch entry). Under allowlist, restore emits `restored` for **every**
+ * registered toolset — the whole pass is a branch replay of the
+ * authoritative allowlist entry, not a live toggle. A consumer expecting
+ * `changed` for fallback toolsets during restore gets `restored` instead
+ * while allowlist is active.
+ *
+ * **`requires` cascade:** not re-run during allowlist restore (same
+ * independence invariant as per-toolset restore). A caller that passes an
+ * allowlist missing a dependency gets that dep off — pass the forward
+ * closure.
+ */
+export function getActiveAllowlist(): string[] | undefined {
+	return getModuleState().activeAllowlist;
 }
 
 /**
