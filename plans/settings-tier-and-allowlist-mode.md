@@ -83,6 +83,13 @@ One reserved top-level key in `settings.json`:
 - Wrapper key `toolsetDefaults` (reserved). Inner key = the toolset's
   full `persistKey`. Value `{ enabled: boolean }` — same shape as the
   chat-branch entry data. One schema, two layers.
+- **Reader return type is the on-disk shape, not flattened.**
+  `readMergedToolsetDefaults()` returns `Record<persistKey, { enabled: boolean }>`
+  — faithful to the schema above, no hidden transformation. Call sites
+  that need the boolean unwrap with `?.enabled` (see the `doRestore`
+  else-branch and `getEffectiveDefault`). This keeps the reader's output
+  identical to the file shape and avoids a "returns flattened booleans"
+  footnote that would diverge from the on-disk schema.
 - Project overrides global **per entry** (shallow merge
   `{...global.toolsetDefaults, ...project.toolsetDefaults}`). No deep
   merge of `{enabled}` objects.
@@ -525,7 +532,12 @@ Localized to `ensureRestoreHandler`'s `doRestore`:
    if (typeof enabled === "boolean") {
        _applyRestoreToolset(spec, pi, enabled, true);
    } else {
-       const settingsEnabled = settingsDefaults[spec.persistKey];
+       // `readMergedToolsetDefaults()` returns the on-disk shape
+       //   Record<persistKey, { enabled: boolean }>
+       // so the pin is the wrapped object; unwrap with `?.enabled`.
+       // A missing entry, a tombstoned entry, or a malformed wrapper all
+       // yield `undefined` and fall through to the mode floor.
+       const settingsEnabled = settingsDefaults[spec.persistKey]?.enabled;
        const fallback = spec.defaultEnabled ?? true;
        const resolved =
            typeof settingsEnabled === "boolean"
@@ -545,11 +557,11 @@ Localized to `ensureRestoreHandler`'s `doRestore`:
 
 | Export | Purpose |
 |---|---|
-| `readMergedToolsetDefaults()` | Merged settings reader (global + project, shallow per-entry merge). |
+| `readMergedToolsetDefaults()` | Merged settings reader (global + project, shallow per-entry merge). Returns `Record<persistKey, { enabled: boolean }>` — the on-disk shape, not flattened; call sites unwrap via `?.enabled`. |
 | `readToolsetDefaults(scope)` | Per-scope reader (for `show` attribution). |
 | `writeToolsetDefaults(entries, scope)` | Settings writer (for `save`). Preserves every non-`toolsetDefaults` key. |
 | `clearToolsetDefaults(scope)` | Settings clearer (for `clear`). Returns `true` if the block existed. |
-| `getEffectiveDefault(spec, snapshot?)` | Tier-2 (settings) then tier-3 (packaged) resolver. Ignores mode — caller checks allowlist mode separately. |
+| `getEffectiveDefault(spec, snapshot?)` | Tier-2 (settings) then tier-3 (packaged) resolver. Ignores mode — caller checks allowlist mode separately. Reads `snapshot[spec.persistKey]?.enabled` from the same `readMergedToolsetDefaults()` shape, then falls back to `spec.defaultEnabled ?? true`. |
 | `clearToolsetEntry(pi, persistKey)` | Tombstone one toolset branch entry (dedup'd). |
 | `clearAllToolsetEntries(pi)` | Tombstone all registered toolset branch entries. |
 | `applyToolsetEnabled(pi, spec, enabled)` | Apply state without persisting, emit `changed`. Wrapper over `_applyRestoreToolset(..., false)`. |
@@ -751,7 +763,7 @@ scaffolding into history and gives a clean commit story.
    10 new exports) — the exact kind of bug that flag catches (TS2412 on
    bare optional properties) is what steps 2–8 are shipping. A red
    baseline would mix pre-existing TS2739 with your own errors on every
-   `npm run typecheck`, so you'd either miss a TS2412 or waste time
+   `npx tsc --noEmit`, so you'd either miss a TS2412 or waste time
    disentangling. AGENTS.md tells you to run typecheck yourself before
    shipping; a clean baseline makes that actually useful. Smallest,
    most independent commit — ideal commit 1. (`npm test` / vitest never
