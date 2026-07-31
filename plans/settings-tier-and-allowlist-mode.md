@@ -221,6 +221,15 @@ export function setDefaultResolutionMode(
   array of toolset ids. Validates: throws if absent/empty. Does **not**
   validate that ids are registered (forward references are legal — a
   toolset may register after the mode is set; that's the point).
+  **Asymmetry with restore (intentional):** write-time rejects `[]` (an
+  empty array is a likely mistake — deleting the last member and
+  forgetting to switch modes — and "everything off" is a degenerate
+  focus state better expressed by turning the relevant toolsets off or
+  switching to inclusion mode). But `doRestore` recovers a corrupt
+  missing/non-array allowlist to `[]` (fail closed), not to `exclusion`
+  (fail open). Write-time validates intent; restore-time picks the safe
+  recovery. See the `doRestore` mode-resolution comment for the full
+  rationale.
 - **Update the validation error message:** the current
   `"Must be \"exclusion\" or \"inclusion\""` must become
   `"Must be \"exclusion\", \"inclusion\", or \"allowlist\""` so the
@@ -391,17 +400,33 @@ Localized to `ensureRestoreHandler`'s `doRestore`:
    const lastModeEntry = modeEntries[modeEntries.length - 1] as any;
    const branchMode = lastModeEntry?.data?.mode;
    const branchAllowlist = lastModeEntry?.data?.allowlist;
-   // Defensive: a branch entry claiming "allowlist" with no usable array
-   // is corruption (write-time validation prevents it, but branch files
-   // are hand-editable). Treat it as "exclusion" rather than setting
-   // mode=allowlist with activeAllowlist=undefined — that contradiction
-   // (getDefaultResolutionMode() === "allowlist" while
-   // getActiveAllowlist() === undefined) would silently suppress every
-   // toolset, since the allowlist short-circuit reads the array as empty.
+   // Fail closed: a branch entry claiming "allowlist" with no usable
+   // array is corruption (write-time validation prevents it, but branch
+   // files are hand-editable). Recover to an EMPTY allowlist, not to
+   // "exclusion". Two reasons:
+   //   (1) Respect the branch's mode claim. mode="allowlist" is a state
+   //       someone chose; silently rewriting it to "exclusion" (which
+   //       means "everything on" under default fallback) is a mode
+   //       change nobody made and fails OPEN — the wrong default for a
+   //       masking library. Empty allowlist = "nothing is on", the
+   //       safe recovery.
+   //   (2) Keep mode + array consistent. mode=allowlist with
+   //       activeAllowlist=undefined is contradictory
+   //       (getDefaultResolutionMode() === "allowlist" while
+   //       getActiveAllowlist() === undefined). mode=allowlist with
+   //       activeAllowlist=[] is consistent and means "no member is
+   //       allowed on" — the same semantic as a populated allowlist
+   //       whose members are all unregistered.
+   // This mirrors the asymmetry with D4: D4 rejects an empty array at
+   // WRITE time (an empty array is a likely mistake — e.g. deleting the
+   // last member and forgetting to switch modes), but restore recovers
+   // a missing/non-array to [] rather than failing open. Write-time
+   // validates intent; restore-time picks the safe recovery.
+   const allowArr = Array.isArray(branchAllowlist) ? branchAllowlist : [];
    const mode: DefaultResolutionMode =
        branchMode === "inclusion" || branchMode === "exclusion"
            ? branchMode
-           : branchMode === "allowlist" && Array.isArray(branchAllowlist)
+           : branchMode === "allowlist"
                ? "allowlist"
                : "exclusion";
    const ms = getModuleState();
@@ -412,7 +437,7 @@ Localized to `ensureRestoreHandler`'s `doRestore`:
    // same pattern as `defaultResolutionMode` above. `setDefaultResolutionMode`
    // sets this same field when it appends the entry.
    ms.activeAllowlist =
-       mode === "allowlist" ? (branchAllowlist as string[]) : undefined;
+       mode === "allowlist" ? allowArr : undefined;
    ```
 
 2. **Allowlist short-circuit** (atomic two-phase, set-level override,
@@ -662,6 +687,17 @@ append. Companion-mirror visibility across a tombstone in the same pass.
   entry → allowlist no longer active, per-toolset tiering resumes.
 - Validation: `"allowlist"` without array → throws; empty array →
   throws; unregistered ids → allowed (no throw).
+- **Restore fail-closed recovery:** seed a branch mode entry with
+  `data.mode === "allowlist"` but `data.allowlist` missing (or not an
+  array). Fire `session_start`. Assert: `getDefaultResolutionMode()`
+  returns `"allowlist"` (mode claim respected, not silently rewritten
+  to `"exclusion"`); `getActiveAllowlist()` returns `[]` (consistent,
+  not `undefined`); every registered toolset is **off** (fail closed,
+  not fail open). This is the asymmetric counterpart to the write-time
+  `[]` rejection: write rejects an empty array as a likely mistake,
+  restore recovers a corrupt/missing array to `[]` as the safe
+  recovery. Verify the non-allowlist-malformed case (e.g. `mode:`
+  absent or tombstoned) still falls through to `"exclusion"`.
 - **Error-message update:** the existing "throws for
   invalid mode" test at `core.test.ts:1022-1026` asserts the old exact
   string `"Must be \"exclusion\" or \"inclusion\""`. Update it to
