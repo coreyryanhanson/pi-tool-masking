@@ -149,10 +149,23 @@ tiering resumes.
 
 **Future-install suppression:** `actuateNewToolsets` (a `pi-tbox` call
 site, downstream sprint) consults `getActiveAllowlist()` — a new library
-export that reads the array from the last mode entry. A toolset
+export that reads the array from module state (populated by `doRestore`'s
+mode-resolution block from the last mode branch entry, and by
+`setDefaultResolutionMode` when it writes the entry). A toolset
 registered after focus was entered is not in the array → off. No
 enumeration of the complement, ever; the array is finite, the handler
 computes the rest.
+
+`getActiveAllowlist()` is parameterless and reads from module state — the
+same pattern as `getDefaultResolutionMode()`. This is required because the
+consumer call site (`pi-tbox/src/registry.ts:actuateNewToolsets`) receives
+`pi: ExtensionAPI`, and `ExtensionAPI` does **not** expose
+`sessionManager` (that's on `ExtensionContext` only). A `pi`-arg signature
+would not compile at the call site. Module state is the consistent home:
+`doRestore` already reads the branch and sets `defaultResolutionMode`
+there, so it sets the allowlist in the same block; `setDefaultResolutionMode`
+sets both when it appends the mode entry. The branch is the source of
+truth, module state is the live mirror — exactly as mode already works.
 
 **Atomic two-phase restore (robust against unknown future consumers):**
 the allowlist short-circuit is split into a **decide/apply phase** and a
@@ -160,7 +173,7 @@ the allowlist short-circuit is split into a **decide/apply phase** and a
 the allowlist and applies it with a single `pi.setActiveTools(...)` call
 — no per-toolset emit during the loop. Phase 2 then emits `restored` for
 each toolset *after* state is final. This is the robust fix for the
-companion-mirror interaction (reviewer note N1): a companion mirroring on
+companion-mirror interaction: a companion mirroring on
 `TOOLSET_EVENTS.changed` (the standard pattern, see `core.test.ts:210`)
 never fires during allowlist restore, so it cannot `appendEntry` mid-loop
 and desync the final state. A companion on `restored` fires only *after*
@@ -196,26 +209,43 @@ export function setDefaultResolutionMode(
   array of toolset ids. Validates: throws if absent/empty. Does **not**
   validate that ids are registered (forward references are legal — a
   toolset may register after the mode is set; that's the point).
-- **Update the validation error message** (reviewer note N5): the current
+- **Update the validation error message:** the current
   `"Must be \"exclusion\" or \"inclusion\""` must become
   `"Must be \"exclusion\", \"inclusion\", or \"allowlist\""` so the
   new mode is discoverable from the thrown error.
 - `mode === "exclusion" | "inclusion"` → `allowlist` ignored (and
   rejected if non-null? no — ignored, to keep the signature simple and
   the existing two-arg call sites unchanged).
-- Persists `{ mode, allowlist }` in the mode entry. Existing
-  exclusion/inclusion entries persist `{ mode }` only (unchanged shape).
+- Persists `{ mode, allowlist }` in the mode entry, and mirrors both into
+  module state (`getModuleState().defaultResolutionMode` and
+  `.activeAllowlist`) so `getDefaultResolutionMode()` and
+  `getActiveAllowlist()` remain consistent with the branch without a
+  `sessionManager` dependency. Existing exclusion/inclusion entries
+  persist `{ mode }` only (unchanged shape); `.activeAllowlist` is set
+  to `undefined` for non-allowlist modes.
 
-### D5 — `getActiveAllowlist(pi)` reads the array from the branch
+### D5 — `getActiveAllowlist()` reads the array from module state
 
 ```ts
-export function getActiveAllowlist(pi: ExtensionAPI): string[] | undefined;
+export function getActiveAllowlist(): string[] | undefined;
 ```
 
-Reads the last `MODE_PERSIST_KEY` branch entry via `pi.sessionManager.getBranch()`.
-If its mode is `"allowlist"`, returns the `allowlist` array (or `[]` if the field is
-absent/malformed — defensive). Otherwise returns `undefined`. This is
-the single source of truth for the active allowlist — `pi-tbox`'s
+Parameterless, reads from `getModuleState().activeAllowlist` — same pattern
+as `getDefaultResolutionMode()`. Returns the `allowlist` array when the
+active mode is `"allowlist"`, otherwise `undefined`. The module state is
+populated in two places, both of which already touch mode state: (a)
+`doRestore`'s mode-resolution block reads the last `MODE_PERSIST_KEY` branch
+entry via `ctx.sessionManager.getBranch()` and sets both
+`defaultResolutionMode` and `activeAllowlist`; (b) `setDefaultResolutionMode`
+sets both when it appends the mode entry. The branch remains the source of
+truth; module state is the live mirror.
+
+**Why not `pi: ExtensionAPI`:** the consumer call site receives
+`pi: ExtensionAPI`, which does not expose `sessionManager` (that property is
+on `ExtensionContext` only — verified against pi-core `types.d.ts`). A
+`pi`-arg signature would not compile at the call site. Module state avoids
+the dependency and matches the existing `getDefaultResolutionMode()` shape.
+This is the single source of truth for the live allowlist — `pi-tbox`'s
 `actuateNewToolsets` and any other call site read it here, not from a
 pi-tbox-private copy, so the branch mode entry and the live suppression
 cannot drift apart.
@@ -235,6 +265,13 @@ fall through to `"exclusion"` if absent/tombstoned. **No settings
 fallback for mode** (there is no mode settings tier). Mode resolution is
 `branchMode ?? "exclusion"`.
 
+This null-tombstone awareness is **purely defensive**: D7 ships no
+`clearModeEntry`, so no public API tombstones the mode entry — the
+tombstoned-mode path is unreachable today. The guard costs one
+optional-chain check (`data?.mode`) and keeps mode resolution robust if
+a future API adds mode tombstoning. Dropped only if that API is
+explicitly rejected.
+
 ### D7 — Tombstone helpers (toolset entries only)
 
 ```ts
@@ -242,10 +279,14 @@ export function clearToolsetEntry(pi: ExtensionAPI, persistKey: string): void;
 export function clearAllToolsetEntries(pi: ExtensionAPI): void;
 ```
 
-Owns the tombstone-write convention: append `null` only if the last
-entry for that key is not already cleared. Dedup'd — consecutive
-restores don't stack tombstones. The library owns branch-read semantics,
-so it owns the tombstone-write convention.
+Owns the tombstone-write convention: append `null` only if the key has
+a prior entry **and** its last entry is not already cleared. A toolset
+that was never toggled has no branch entry — appending `null` would
+create a redundant tombstone for a key with no prior state, so skip
+it. Dedup'd — consecutive restores don't stack
+tombstones, and never-toggled toolsets get no tombstone at all. The
+library owns branch-read semantics, so it owns the tombstone-write
+convention.
 
 **No `clearModeEntry` / `applyResolutionMode`.** The branch's mode
 tombstone helpers are dropped. Mode is never tombstoned — it is always
@@ -321,12 +362,22 @@ Localized to `ensureRestoreHandler`'s `doRestore`:
        .filter((b: any) => b.customType === MODE_PERSIST_KEY);
    const lastModeEntry = modeEntries[modeEntries.length - 1] as any;
    const branchMode = lastModeEntry?.data?.mode;
-   const activeAllowlist = lastModeEntry?.data?.allowlist;
+   const branchAllowlist = lastModeEntry?.data?.allowlist;
    const mode: DefaultResolutionMode =
        branchMode === "inclusion" || branchMode === "exclusion" || branchMode === "allowlist"
            ? branchMode
            : "exclusion";
-   getModuleState().defaultResolutionMode = mode;
+   const ms = getModuleState();
+   ms.defaultResolutionMode = mode;
+   // Mirror the allowlist into module state so `getActiveAllowlist()`
+   // (parameterless, no `pi`/`sessionManager` access) can read it. The
+   // branch is the source of truth; module state is the live mirror —
+   // same pattern as `defaultResolutionMode` above. `setDefaultResolutionMode`
+   // sets this same field when it appends the entry.
+   ms.activeAllowlist =
+       mode === "allowlist" && Array.isArray(branchAllowlist)
+           ? branchAllowlist
+           : undefined;
    ```
 
 2. **Allowlist short-circuit** (atomic two-phase, set-level override,
@@ -334,19 +385,40 @@ Localized to `ensureRestoreHandler`'s `doRestore`:
 
    ```ts
    if (mode === "allowlist") {
-       const allow = new Set<string>(Array.isArray(activeAllowlist) ? activeAllowlist : []);
+       const allow = new Set<string>(Array.isArray(branchAllowlist) ? branchAllowlist : []);
+       const registered = new Set(pi.getAllTools().map((t) => t.name));
 
-       // Phase 1: compute desired active-tools set, apply in ONE call.
-       // No per-toolset emit during the loop — companions on `changed`
-       // (the standard mirror pattern) cannot fire mid-restore and
-       // appendEntry against an in-progress state.
+       // Phase 1: compute the desired active-tools set as a DELTA from
+       // the current set, and apply it in ONE `setActiveTools` call.
+       // The library only governs tools that belong to registered
+       // toolsets; anything outside that set is not its concern and is
+       // left untouched. `setActiveTools` is a full replacement, so we
+       // must preserve tools not owned by any registered toolset rather
+       // than rebuild the set from only allowlist members. The suppress
+       // set is the complement of the allowlist *among registered
+       // toolset tools only*; everything else in the current set is
+       // kept as-is. This mirrors the existing per-toolset restore
+       // (`_applyRestoreToolset` only adds/removes `spec.names`),
+       // applied set-wide. No per-toolset emit during this loop —
+       // companions on `changed` (the standard mirror pattern) cannot
+       // fire mid-restore and `appendEntry` against an in-progress
+       // state.
+       const current = new Set(pi.getActiveTools());
+       const suppress = new Set<string>();
+       for (const [, entry] of registry) {
+           if (!allow.has(entry.spec.id)) {
+               for (const n of entry.spec.names) suppress.add(n);
+           }
+       }
        const desired = new Set<string>();
+       for (const n of current) {
+           if (!suppress.has(n)) desired.add(n); // keep non-toolset tools
+       }
        for (const [, entry] of registry) {
            if (allow.has(entry.spec.id)) {
                for (const n of entry.spec.names) desired.add(n);
            }
        }
-       const registered = new Set(pi.getAllTools().map((t) => t.name));
        pi.setActiveTools([...desired].filter((n) => registered.has(n)));
 
        // Phase 2: notify AFTER state is final. Emit `restored` (this is
@@ -368,7 +440,8 @@ Localized to `ensureRestoreHandler`'s `doRestore`:
 
    Per-toolset branch entries and settings pins are bypassed. The
    `isPersistedEntry=true` equivalent (`restored`) is emitted in phase 2.
-   This two-phase split is the robust fix for reviewer note N1: it removes
+   This two-phase split is the robust fix for the companion-mirror
+   interaction: it removes
    the per-toolset emit-during-loop that a companion mirror could react
    to with a synchronous `appendEntry`, desyncing the final state. See
    D3's "Atomic two-phase restore" note for the contract and rationale.
@@ -414,7 +487,7 @@ Localized to `ensureRestoreHandler`'s `doRestore`:
 | `clearToolsetEntry(pi, persistKey)` | Tombstone one toolset branch entry (dedup'd). |
 | `clearAllToolsetEntries(pi)` | Tombstone all registered toolset branch entries. |
 | `applyToolsetEnabled(pi, spec, enabled)` | Apply state without persisting, emit `changed`. Wrapper over `_applyRestoreToolset(..., false)`. |
-| `getActiveAllowlist(pi)` | Read the allowlist array from the last mode entry via `pi.sessionManager.getBranch()`; `undefined` if mode isn't `allowlist`. |
+| `getActiveAllowlist()` | Read the live allowlist array from module state (mirrored from the last mode branch entry by `doRestore` and `setDefaultResolutionMode`); `undefined` if mode isn't `allowlist`. Parameterless — matches `getDefaultResolutionMode()`. |
 | `MalformedSettingsError` | Error class thrown by mutators on a corrupt settings file. |
 
 ### Changed exports (1)
@@ -527,21 +600,32 @@ append. Companion-mirror visibility across a tombstone in the same pass.
 **Allowlist mode:**
 
 - `setDefaultResolutionMode(pi, "allowlist", ids)` persists the array;
-  `getActiveAllowlist(pi)` returns it.
+  `getActiveAllowlist()` returns it.
 - Restore under allowlist: allowlist members on, others off, **across
   all registered toolsets** — including a toolset with a stale
   `{enabled:true}` branch entry (bypassed) and one with a settings pin
   `{enabled:true}` (bypassed). The set-level override is authoritative.
+- **Non-toolset tools preserved (B1 regression guard):** seed
+  `pi.getActiveTools()` with a name not owned by any registered
+  toolset. After allowlist restore, assert that name is **still
+  active** — `setActiveTools` is a full replacement, so the
+  short-circuit must compute a delta from current and leave tools it
+  does not govern untouched, not rebuild the set from only allowlist
+  members. The library manages registered-toolset tools only.
 - Future-install: register a toolset *after* setting allowlist mode,
   trigger `actuateNewToolsets` path (or simulate the consultation via
-  `getActiveAllowlist(pi)`) → not in array → off.
+  `getActiveAllowlist()`) → not in array → off.
 - Supersession: a later `setDefaultResolutionMode(pi, "exclusion")`
   entry → allowlist no longer active, per-toolset tiering resumes.
 - Validation: `"allowlist"` without array → throws; empty array →
   throws; unregistered ids → allowed (no throw).
-- `getActiveAllowlist(pi)` returns `undefined` under exclusion/inclusion
+- **Error-message update:** the existing "throws for
+  invalid mode" test at `core.test.ts:1022-1026` asserts the old exact
+  string `"Must be \"exclusion\" or \"inclusion\""`. Update it to
+  expect the new message including `"allowlist"` (per D4).
+- `getActiveAllowlist()` returns `undefined` under exclusion/inclusion
   and under a null-tombstoned mode entry.
-- **Companion-mirror safety during allowlist restore (N1):** register a
+- **Companion-mirror safety during allowlist restore:** register a
   base + companion where the companion mirrors `base` on
   `TOOLSET_EVENTS.changed` (the pattern from `core.test.ts:210`). Set
   allowlist mode with `base` in the array, `comp` NOT in the array. Fire
@@ -555,8 +639,10 @@ append. Companion-mirror visibility across a tombstone in the same pass.
   library's scope, consumer's business.)
 
 **Tombstone helpers:** `clearToolsetEntry` / `clearAllToolsetEntries` —
-append `null` when last entry is non-null, no-op when already cleared.
-`clearAllToolsetEntries` covers exactly the registered toolsets.
+append `null` when last entry is non-null, no-op when already cleared,
+no-op when the key has no prior entry (no redundant tombstone for a
+never-toggled toolset, per D7). `clearAllToolsetEntries` covers
+exactly the registered toolsets.
 
 **`applyToolsetEnabled`:** applies state, emits `changed`, does **not**
 `appendEntry`. Verify the branch is unchanged after the call.
