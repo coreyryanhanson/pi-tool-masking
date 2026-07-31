@@ -154,26 +154,52 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		// setDefaultResolutionMode persists this bit; a fresh process defaults
 		// to "exclusion" until the persisted entry is replayed here. Mode
 		// entries are from a prior session (not written during this restore), so
-		// a single read here is sufficient.
+		// a single read here is sufficient. Null-tombstone-aware: read the LAST
+		// mode entry regardless of `data` (a `null` tombstone is the most recent
+		// mode fact and must beat a stale prior entry, falling through to
+		// "exclusion"); there is no settings fallback for mode — no mode
+		// settings tier exists, so mode resolution is `branchMode ?? "exclusion"`.
 		const modeEntries = ctx.sessionManager
 			.getBranch()
-			.filter((b: any) => b.customType === MODE_PERSIST_KEY && b.data?.mode);
+			.filter((b: any) => b.customType === MODE_PERSIST_KEY);
 		const lastModeEntry = modeEntries[modeEntries.length - 1] as any;
+		const branchMode = lastModeEntry?.data?.mode;
+		const branchAllowlist = lastModeEntry?.data?.allowlist;
+		// Fail closed: a branch entry claiming "allowlist" with no usable array
+		// is corruption (write-time validation prevents it, but branch files are
+		// hand-editable). Recover to an EMPTY allowlist, not to "exclusion":
+		//   (1) Respect the branch's mode claim. mode="allowlist" is a state
+		//       someone chose; silently rewriting it to "exclusion" (which
+		//       means "everything on" under default fallback) is a mode change
+		//       nobody made and fails OPEN — the wrong default for a masking
+		//       library. Empty allowlist = "nothing is on", the safe recovery.
+		//   (2) Keep mode + array consistent. mode=allowlist with
+		//       activeAllowlist=undefined is contradictory
+		//       (getDefaultResolutionMode() === "allowlist" while
+		//       getActiveAllowlist() === undefined). mode=allowlist with
+		//       activeAllowlist=[] is consistent and means "no member is allowed
+		//       on" — the same semantic as a populated allowlist whose members
+		//       are all unregistered.
+		// Asymmetric with `setDefaultResolutionMode`: write-time rejects an
+		// empty array as a likely mistake (e.g. deleting the last member and
+		// forgetting to switch modes); restore-time recovers a missing/non-array
+		// to [] as the safe recovery. Write-time validates intent; restore-time
+		// picks the safe recovery.
+		const allowArr = Array.isArray(branchAllowlist) ? branchAllowlist : [];
+		const mode: DefaultResolutionMode =
+			branchMode === "inclusion" || branchMode === "exclusion"
+				? branchMode
+				: branchMode === "allowlist"
+					? "allowlist"
+					: "exclusion";
 		const ms = getModuleState();
-		if (modeEntries.length > 0) {
-			ms.defaultResolutionMode = lastModeEntry.data.mode;
-		}
-		const mode = ms.defaultResolutionMode;
-		// Mirror the allowlist from the last mode entry into module state so the
-		// parameterless `getActiveAllowlist()` can read it — branch is the source
-		// of truth, module state is the live mirror (same pattern as
+		ms.defaultResolutionMode = mode;
+		// Mirror the allowlist into module state so the parameterless
+		// `getActiveAllowlist()` can read it — branch is the source of truth,
+		// module state is the live mirror (same pattern as
 		// `defaultResolutionMode`). `setDefaultResolutionMode` writes this same
 		// field when it appends the mode entry. Non-allowlist modes → undefined.
-		const branchAllowlist = lastModeEntry?.data?.allowlist;
-		ms.activeAllowlist =
-			mode === "allowlist" && Array.isArray(branchAllowlist)
-				? branchAllowlist
-				: undefined;
+		ms.activeAllowlist = mode === "allowlist" ? allowArr : undefined;
 
 		// Allowlist short-circuit (idea G): the allowlist is a finite array of
 		// toolset ids stored in the branch mode entry; the suppression (the
@@ -187,9 +213,8 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		// mid-restore and `appendEntry` against an in-progress state); phase 2
 		// emits `restored` for every registered toolset AFTER state is final.
 		if (mode === "allowlist") {
-			const allow = new Set<string>(
-				Array.isArray(branchAllowlist) ? branchAllowlist : [],
-			);
+			// `allowArr` computed above — fail-closed `[]` recovery already applied.
+			const allow = new Set<string>(allowArr);
 			const registered = new Set(pi.getAllTools().map((t) => t.name));
 
 			// Phase 1: desired set = current − (suppressed toolset members) +

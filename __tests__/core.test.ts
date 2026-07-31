@@ -1294,6 +1294,140 @@ describe("Allowlist resolution mode (D3)", () => {
 		// comp mid-restore.
 		expect(mock.getEntries("k:comp")).toHaveLength(0);
 	});
+
+	it("AL8: restore fail-closed — mode entry claims allowlist with no array → empty allowlist, everything off", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "a",
+				persistKey: "k:a",
+				names: new Set(["tool-a"]),
+				defaultEnabled: true,
+			}),
+		);
+
+		// Hand-edited branch corruption: mode claims "allowlist", array missing
+		// (write-time validation would prevent this, but branch files are
+		// hand-editable).
+		mock.appendEntry("toolset-resolution-mode", { mode: "allowlist" });
+		mock.setActiveTools(["tool-a"]);
+
+		mock.fireLifecycleEvent("session_start");
+
+		// Mode claim respected — not silently rewritten to "exclusion"...
+		expect(getDefaultResolutionMode()).toBe("allowlist");
+		// ...recovered to an empty array (consistent, not undefined)...
+		expect(getActiveAllowlist()).toEqual([]);
+		// ...and the recovery fails CLOSED: nothing is on. (Recovering to
+		// "exclusion" instead would fail open — `defaultEnabled: true` would
+		// have turned tool-a on.)
+		expect(mock.getActiveTools()).toEqual([]);
+	});
+
+	it("AL9: restore fail-closed — allowlist present but not an array → empty allowlist, everything off", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "a",
+				persistKey: "k:a",
+				names: new Set(["tool-a"]),
+				defaultEnabled: true,
+			}),
+		);
+
+		mock.appendEntry("toolset-resolution-mode", {
+			mode: "allowlist",
+			allowlist: "tool-a", // not an array
+		});
+		mock.setActiveTools(["tool-a"]);
+
+		mock.fireLifecycleEvent("session_start");
+
+		expect(getDefaultResolutionMode()).toBe("allowlist");
+		expect(getActiveAllowlist()).toEqual([]);
+		expect(mock.getActiveTools()).toEqual([]);
+	});
+
+	it("AL10: null-tombstoned mode entry supersedes a prior allowlist → exclusion, allowlist undefined", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "a",
+				persistKey: "k:a",
+				names: new Set(["tool-a"]),
+				defaultEnabled: true,
+			}),
+		);
+
+		// Focus was active (allowlist), then a mode tombstone — the tombstone is
+		// the LAST mode entry and must beat the stale prior allowlist (D6
+		// null-tombstone awareness; unreachable today since no API tombstones
+		// the mode entry, kept as a defensive guard).
+		mock.appendEntry("toolset-resolution-mode", {
+			mode: "allowlist",
+			allowlist: ["a"],
+		});
+		mock.appendEntry("toolset-resolution-mode", null);
+		mock.setActiveTools(["tool-a"]);
+
+		mock.fireLifecycleEvent("session_start");
+
+		// Fall through to "exclusion" — no mode resurrection from the stale entry.
+		expect(getDefaultResolutionMode()).toBe("exclusion");
+		expect(getActiveAllowlist()).toBeUndefined();
+		// Per-toolset tiering resumes: no entry, no pin → exclusion floor
+		// (`defaultEnabled ?? true`).
+		expect(mock.getActiveTools()).toEqual(["tool-a"]);
+	});
+
+	it("AL11: mode absent / unknown value in the last entry falls through to exclusion; allowlist undefined", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "a",
+				persistKey: "k:a",
+				names: new Set(["tool-a"]),
+				defaultEnabled: true,
+			}),
+		);
+
+		mock.appendEntry("toolset-resolution-mode", {}); // no `mode` field
+		mock.setActiveTools(["tool-a"]);
+
+		mock.fireLifecycleEvent("session_start");
+
+		expect(getDefaultResolutionMode()).toBe("exclusion");
+		expect(getActiveAllowlist()).toBeUndefined();
+		expect(mock.getActiveTools()).toEqual(["tool-a"]);
+	});
+
+	it("AL12: getActiveAllowlist() is undefined under inclusion", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		// A toolset must exist — defineToolset registers the restore handler.
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "a",
+				persistKey: "k:a",
+				names: new Set(["tool-a"]),
+			}),
+		);
+		mock.appendEntry("toolset-resolution-mode", { mode: "inclusion" });
+
+		mock.fireLifecycleEvent("session_start");
+
+		expect(getDefaultResolutionMode()).toBe("inclusion");
+		expect(getActiveAllowlist()).toBeUndefined();
+	});
 });
 
 // ===================================================================
