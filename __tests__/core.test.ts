@@ -20,6 +20,9 @@ import {
 	writeToolsetDefaults,
 	clearToolsetDefaults,
 	MalformedSettingsError,
+	clearToolsetEntry,
+	clearAllToolsetEntries,
+	applyToolsetEnabled,
 	type RegistryEntry,
 } from "../index.js";
 
@@ -2997,7 +3000,6 @@ describe("getEffectiveDefault (§2)", () => {
 			setSettingsOverrideForTests({});
 		}
 	});
-
 });
 
 // ===================================================================
@@ -3086,5 +3088,168 @@ describe("Null-tombstone — toolset restore (A.1)", () => {
 
 		// Falls through to packaged default (false), not silently unrestored
 		expect(mock.getActiveTools()).not.toContain("tool-a");
+	});
+});
+
+// ===================================================================
+// Tombstone helpers (D7)
+// ===================================================================
+
+describe("Tombstone helpers (D7)", () => {
+	const branchOf = (mock: MockPI) =>
+		mock.createContext().sessionManager.getBranch();
+
+	it("BT1: clearToolsetEntry appends null when last entry is non-null", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
+		mock.appendEntry("toolset-state:test.toolset", { enabled: true });
+
+		clearToolsetEntry(pi, "toolset-state:test.toolset", branchOf(mock));
+
+		const entries = mock.getEntries("toolset-state:test.toolset");
+		expect(entries).toHaveLength(2);
+		expect(entries[1]!.data).toBeNull();
+	});
+
+	it("BT2: clearToolsetEntry no-ops when last entry already cleared", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
+		mock.appendEntry("toolset-state:test.toolset", { enabled: true });
+		mock.appendEntry("toolset-state:test.toolset", null);
+
+		clearToolsetEntry(pi, "toolset-state:test.toolset", branchOf(mock));
+
+		// No second tombstone stacked
+		expect(mock.getEntries("toolset-state:test.toolset")).toHaveLength(2);
+	});
+
+	it("BT3: clearToolsetEntry no-ops when key has no prior entry", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
+
+		clearToolsetEntry(pi, "toolset-state:test.toolset", branchOf(mock));
+
+		// No redundant tombstone for a never-toggled toolset
+		expect(mock.getEntries("toolset-state:test.toolset")).toHaveLength(0);
+	});
+
+	it("BT4: clearAllToolsetEntries tombstones only toolsets with prior entries", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		mock.registerTool({ name: "tool-b", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({ id: "a", persistKey: "toolset-state:a", names: new Set(["tool-a"]) }),
+		);
+		defineToolset(
+			pi,
+			makeSpec({ id: "b", persistKey: "toolset-state:b", names: new Set(["tool-b"]) }),
+		);
+		mock.appendEntry("toolset-state:a", { enabled: true });
+		// toolset b never toggled → no branch entry
+
+		clearAllToolsetEntries(pi, branchOf(mock));
+
+		const a = mock.getEntries("toolset-state:a");
+		expect(a).toHaveLength(2);
+		expect(a[1]!.data).toBeNull();
+		expect(mock.getEntries("toolset-state:b")).toHaveLength(0);
+	});
+
+	it("BT5: consecutive clearAllToolsetEntries write zero new tombstones", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
+		mock.appendEntry("toolset-state:test.toolset", { enabled: true });
+
+		clearAllToolsetEntries(pi, branchOf(mock));
+		clearAllToolsetEntries(pi, branchOf(mock));
+
+		// First call appends the tombstone; second sees it and skips
+		expect(mock.getEntries("toolset-state:test.toolset")).toHaveLength(2);
+	});
+
+	it("BT6: tombstone then restore falls through to settings pin (D6+D7)", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({ names: new Set(["tool-a"]), defaultEnabled: true }),
+		);
+		setSettingsOverrideForTests({
+			"toolset-state:test.toolset": { enabled: false },
+		});
+		mock.appendEntry("toolset-state:test.toolset", { enabled: true });
+
+		clearToolsetEntry(pi, "toolset-state:test.toolset", branchOf(mock));
+		mock.fireLifecycleEvent("session_start");
+
+		// Tombstone makes the stale {enabled:true} invisible; settings pin wins
+		expect(mock.getActiveTools()).not.toContain("tool-a");
+	});
+});
+
+// ===================================================================
+// applyToolsetEnabled (D8)
+// ===================================================================
+
+describe("applyToolsetEnabled (D8)", () => {
+	it("E1: applies state and emits changed, no appendEntry", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		const spec = makeSpec({ names: new Set(["tool-a"]) });
+		defineToolset(pi, spec);
+
+		const changed: { id: string; enabled: boolean }[] = [];
+		const restored: { id: string; enabled: boolean }[] = [];
+		mock.events.on(TOOLSET_EVENTS.changed, (data: any) => changed.push(data));
+		mock.events.on(TOOLSET_EVENTS.restored, (data: any) => restored.push(data));
+
+		applyToolsetEnabled(pi, spec, true);
+
+		expect(mock.getActiveTools()).toContain("tool-a");
+		expect(changed).toEqual([{ id: "test.toolset", enabled: true }]);
+		expect(restored).toHaveLength(0);
+		expect(mock.getEntries("toolset-state:test.toolset")).toHaveLength(0);
+	});
+
+	it("E2: applyToolsetEnabled(false) deactivates without persisting", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		mock.setActiveTools(["tool-a"]);
+		const spec = makeSpec({ names: new Set(["tool-a"]) });
+		defineToolset(pi, spec);
+
+		const changed: { id: string; enabled: boolean }[] = [];
+		mock.events.on(TOOLSET_EVENTS.changed, (data: any) => changed.push(data));
+
+		applyToolsetEnabled(pi, spec, false);
+
+		expect(mock.getActiveTools()).not.toContain("tool-a");
+		expect(changed).toEqual([{ id: "test.toolset", enabled: false }]);
+		expect(mock.getEntries("toolset-state:test.toolset")).toHaveLength(0);
+	});
+
+	it("E3: emits member fanout when emitMemberEvents is set", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		const spec = makeSpec({
+			names: new Set(["tool-a"]),
+			emitMemberEvents: true,
+		});
+		defineToolset(pi, spec);
+
+		const changed: any[] = [];
+		mock.events.on(TOOLSET_EVENTS.changed, (data: any) => changed.push(data));
+
+		applyToolsetEnabled(pi, spec, true);
+
+		expect(changed).toEqual([
+			{ id: "test.toolset", enabled: true },
+			{ id: "test.toolset", enabled: true, member: "tool-a" },
+		]);
 	});
 });

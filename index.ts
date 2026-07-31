@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
+	SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 
 // ---------------------------------------------------------------------------
@@ -517,6 +518,79 @@ export function getDefaultResolutionMode(): DefaultResolutionMode {
  */
 export function getRegisteredToolsets(): readonly RegistryEntry[] {
 	return [...getRegistry().values()];
+}
+
+// ---------------------------------------------------------------------------
+// Tombstone helpers (D7) + apply-without-persist (D8)
+// ---------------------------------------------------------------------------
+
+/**
+ * Tombstone a toolset's chat-branch entry: append `null` for `persistKey`
+ * so `doRestore` falls through to the settings tier (D6). Owns the
+ * tombstone-write convention.
+ *
+ * Dedup: appends `null` only if the key has a prior entry whose last entry
+ * is not already cleared. A toolset that was never toggled has no branch
+ * entry — no tombstone is written. Consecutive restores with no intervening
+ * toggle write zero tombstones.
+ *
+ * `branch` is the caller's branch snapshot
+ * (`ctx.sessionManager.getBranch()`): `ExtensionAPI` exposes `appendEntry`
+ * but not `sessionManager`, so the dedup read comes from the caller. See
+ * plans/d7-branch-access-gap.md.
+ *
+ * ponytail: dedup caps growth at one tombstone per toggle/restore cycle,
+ * but many cycles in one session still stack entries. Upgrade path: a
+ * pi-core "compact toolset entries" op, out of scope.
+ */
+export function clearToolsetEntry(
+	pi: ExtensionAPI,
+	persistKey: string,
+	branch: readonly SessionEntry[],
+): void {
+	let last: SessionEntry | undefined;
+	for (let i = branch.length - 1; i >= 0; i--) {
+		if ((branch[i] as any).customType === persistKey) {
+			last = branch[i];
+			break;
+		}
+	}
+	const data = (last as any)?.data;
+	// No prior entry, a tombstoned last entry (data null), or a last entry
+	// without an `enabled` field → already effectively cleared, skip.
+	if (data == null || (data as any)?.enabled == null) {
+		return;
+	}
+	pi.appendEntry(persistKey, null);
+}
+
+/**
+ * Tombstone every registered toolset's chat-branch entry (dedup'd per
+ * toolset — never-toggled toolsets get no tombstone). Covers exactly the
+ * toolsets in the global registry. `branch` is the caller's
+ * `ctx.sessionManager.getBranch()` snapshot (see `clearToolsetEntry`).
+ */
+export function clearAllToolsetEntries(
+	pi: ExtensionAPI,
+	branch: readonly SessionEntry[],
+): void {
+	for (const [, entry] of getRegistry()) {
+		clearToolsetEntry(pi, entry.spec.persistKey, branch);
+	}
+}
+
+/**
+ * Apply a toolset's enabled state via `setActiveTools` and emit
+ * `TOOLSET_EVENTS.changed` — **without** writing a branch entry. The
+ * live-apply half of a settings restore: pull the toolset to its
+ * settings/packaged default without persisting a chat-branch pin.
+ */
+export function applyToolsetEnabled(
+	pi: ExtensionAPI,
+	spec: ToolsetSpec,
+	enabled: boolean,
+): void {
+	_applyRestoreToolset(spec, pi, enabled, false);
 }
 
 // ---------------------------------------------------------------------------
