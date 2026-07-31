@@ -7,6 +7,11 @@ import {
 	setDefaultResolutionMode,
 	getDefaultResolutionMode,
 	getRegisteredToolsets,
+	parseToolsetDefaults,
+	mergeToolsetDefaults,
+	readMergedToolsetDefaults,
+	readToolsetDefaults,
+	setSettingsOverrideForTests,
 	type RegistryEntry,
 } from "../index.js";
 
@@ -51,6 +56,11 @@ function makeSpec(
 
 beforeEach(() => {
 	cleanRegistry();
+	setSettingsOverrideForTests({});
+});
+
+afterEach(() => {
+	setSettingsOverrideForTests(null);
 });
 
 // ===================================================================
@@ -2287,5 +2297,119 @@ describe("Entry-point exports (§5)", () => {
 		expect(typeof TOOLSET_EVENTS).toBe("object");
 		expect(typeof TOOLSET_EVENTS.changed).toBe("string");
 		expect(typeof TOOLSET_EVENTS.restored).toBe("string");
+	});
+});
+
+// ===================================================================
+// Settings.json reader — parseToolsetDefaults
+// ===================================================================
+
+describe("parseToolsetDefaults", () => {
+	it("absent toolsetDefaults returns {}", () => {
+		expect(parseToolsetDefaults({})).toEqual({});
+	});
+
+	it("non-object toolsetDefaults (string) returns {}", () => {
+		expect(parseToolsetDefaults({ toolsetDefaults: "" })).toEqual({});
+	});
+
+	it("non-object toolsetDefaults (array) returns {}", () => {
+		expect(parseToolsetDefaults({ toolsetDefaults: [] })).toEqual({});
+	});
+
+	it("drops entry with string enabled value", () => {
+		expect(
+			parseToolsetDefaults({ toolsetDefaults: { "k:x": { enabled: "true" } } }),
+		).toEqual({});
+	});
+
+	it("drops entry with number enabled value", () => {
+		expect(
+			parseToolsetDefaults({ toolsetDefaults: { "k:x": { enabled: 1 } } }),
+		).toEqual({});
+	});
+
+	it("keeps valid entry with extra fields (extra ignored)", () => {
+		const input = {
+			toolsetDefaults: {
+				"k:extra": { enabled: true, extra: 1 },
+			},
+		};
+		expect(parseToolsetDefaults(input)).toEqual({
+			"k:extra": { enabled: true },
+		});
+	});
+
+	it("returns the on-disk shape, not flattened booleans", () => {
+		const input = {
+			toolsetDefaults: {
+				"k:a": { enabled: true },
+				"k:b": { enabled: false },
+			},
+		};
+		expect(parseToolsetDefaults(input)).toEqual({
+			"k:a": { enabled: true },
+			"k:b": { enabled: false },
+		});
+	});
+});
+
+// ===================================================================
+// Settings.json reader — mergeToolsetDefaults
+// ===================================================================
+
+describe("mergeToolsetDefaults", () => {
+	it("shallow per-key merge: project wins on collision", () => {
+		const global_ = {
+			"k:a": { enabled: true },
+			"k:b": { enabled: false },
+		};
+		const project = { "k:b": { enabled: true } };
+		expect(mergeToolsetDefaults(global_, project)).toEqual({
+			"k:a": { enabled: true },
+			"k:b": { enabled: true },
+		});
+	});
+
+	it("empty project does not clobber global", () => {
+		expect(mergeToolsetDefaults({ "k:a": { enabled: true } }, {})).toEqual({
+			"k:a": { enabled: true },
+		});
+	});
+
+	it("empty global is populated by project", () => {
+		expect(mergeToolsetDefaults({}, { "k:a": { enabled: true } })).toEqual({
+			"k:a": { enabled: true },
+		});
+	});
+});
+
+// ===================================================================
+// Settings.json reader — readMergedToolsetDefaults / readToolsetDefaults
+// ===================================================================
+
+describe("readMergedToolsetDefaults / readToolsetDefaults", () => {
+	it("returns the override verbatim when set", () => {
+		setSettingsOverrideForTests({ "k:a": { enabled: false } });
+		expect(readMergedToolsetDefaults()).toEqual({ "k:a": { enabled: false } });
+		expect(readToolsetDefaults("global")).toEqual({
+			"k:a": { enabled: false },
+		});
+		expect(readToolsetDefaults("project")).toEqual({
+			"k:a": { enabled: false },
+		});
+	});
+
+	it("returns {} when override is empty", () => {
+		setSettingsOverrideForTests({});
+		expect(readMergedToolsetDefaults()).toEqual({});
+	});
+
+	it("returns a copy, not the override object itself", () => {
+		const seed = { "k:a": { enabled: true } };
+		setSettingsOverrideForTests(seed);
+		const out = readMergedToolsetDefaults();
+		expect(out).toEqual(seed);
+		expect(out).not.toBe(seed);
 	});
 });

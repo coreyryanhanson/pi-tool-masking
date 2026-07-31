@@ -1,3 +1,6 @@
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
@@ -494,4 +497,142 @@ export function getDefaultResolutionMode(): DefaultResolutionMode {
  */
 export function getRegisteredToolsets(): readonly RegistryEntry[] {
 	return [...getRegistry().values()];
+}
+
+// ---------------------------------------------------------------------------
+// Settings.json reader — toolsetDefaults tier
+// ---------------------------------------------------------------------------
+
+/** On-disk settings shape: `toolsetDefaults[persistKey] = { enabled }`. */
+type ToolsetDefaultsMap = Record<string, { enabled: boolean }>;
+
+function settingsPath(scope: "global" | "project"): string {
+	const agentDir =
+		process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
+	return scope === "global"
+		? join(agentDir, "settings.json")
+		: join(process.cwd(), ".pi", "settings.json");
+}
+
+/**
+ * Read one scope's settings.json as a parsed object, or `{}` on any
+ * read/parse failure (never-throw policy — a malformed file contributes
+ * `{}` to the merge; only mutators throw `MalformedSettingsError`).
+ */
+function readSettingsJsonSafe(scope: "global" | "project"): unknown {
+	const path = settingsPath(scope);
+	try {
+		if (!existsSync(path)) return {};
+		return JSON.parse(readFileSync(path, "utf-8"));
+	} catch {
+		return {};
+	}
+}
+
+let _settingsOverride: ToolsetDefaultsMap | null = null;
+
+/**
+ * Inject a snapshot of toolset defaults for tests. Pass `null` to restore
+ * the disk-read path. Production code never calls this.
+ *
+ * @internal
+ */
+export function setSettingsOverrideForTests(
+	defaults: ToolsetDefaultsMap | null,
+): void {
+	_settingsOverride = defaults;
+}
+
+/**
+ * Extract toolset defaults from a settings.json object.
+ *
+ * Reads `json.toolsetDefaults` — a map of
+ * `{ [persistKey]: { enabled: boolean } }`. Entries whose value isn't a
+ * `{ enabled }` shape are dropped silently. Returns the on-disk shape
+ * verbatim (no flattening — call sites unwrap via `?.enabled`).
+ *
+ * @internal
+ */
+export function parseToolsetDefaults(json: unknown): ToolsetDefaultsMap {
+	if (!json || typeof json !== "object" || Array.isArray(json)) return {};
+	const td = (json as Record<string, unknown>)["toolsetDefaults"];
+	if (!td || typeof td !== "object" || Array.isArray(td)) return {};
+	const result: ToolsetDefaultsMap = {};
+	for (const [key, val] of Object.entries(td as Record<string, unknown>)) {
+		// ponytail: only `enabled` is read; extra fields (`label`, etc.) ignored.
+		// Add a schema validator if downstreams depend on more fields.
+		const valObj = val as Record<string, unknown>;
+		if (valObj && typeof valObj["enabled"] === "boolean") {
+			result[key] = { enabled: valObj["enabled"] as boolean };
+		}
+	}
+	return result;
+}
+
+/**
+ * Shallow-merge global and project toolset defaults.
+ *
+ * Project wins on key collision: `{ ...global_, ...project }`. Per-entry
+ * only — no deep merge of the `{ enabled }` values.
+ *
+ * @internal
+ */
+export function mergeToolsetDefaults(
+	global_: ToolsetDefaultsMap,
+	project: ToolsetDefaultsMap,
+): ToolsetDefaultsMap {
+	return { ...global_, ...project };
+}
+
+/**
+ * Read and merge toolset defaults from settings.json (global + project).
+ *
+ * Reads `json.toolsetDefaults` from:
+ *   `<agentDir>/settings.json`  (global)
+ *   `<cwd>/.pi/settings.json`   (project)
+ *
+ * Where `agentDir = PI_CODING_AGENT_DIR ?? ~/.pi/agent`.
+ * Missing/unreadable/malformed files contribute `{}`. Never throws.
+ *
+ * Returns the on-disk shape `Record<persistKey, { enabled: boolean }>`
+ * (not flattened) — call sites unwrap with `?.enabled`. Project overrides
+ * global per entry.
+ *
+ * When `setSettingsOverrideForTests` has set an override, returns that
+ * override verbatim instead of reading disk.
+ *
+ * @public — exported for pi-tbox's snapshot-in usage (read once per loop
+ * and pass to `getEffectiveDefault`).
+ *
+ * ponytail: hardcodes the two pi-core settings paths (global
+ * `~/.pi/agent/settings.json`, project `<cwd>/.pi/settings.json`) with no
+ * configuration knob — if pi-core moves its settings paths or format this
+ * breaks. Upgrade path: a pi-core settings-path registry, if one ever appears.
+ */
+export function readMergedToolsetDefaults(): ToolsetDefaultsMap {
+	if (_settingsOverride !== null) return { ..._settingsOverride };
+	return mergeToolsetDefaults(
+		parseToolsetDefaults(readSettingsJsonSafe("global")),
+		parseToolsetDefaults(readSettingsJsonSafe("project")),
+	);
+}
+
+/**
+ * Read toolset defaults from one settings.json scope (global or project).
+ *
+ * Returns the raw `toolsetDefaults` block parsed from that scope's file,
+ * without merging. Missing/unreadable/malformed files return `{}`.
+ *
+ * When `setSettingsOverrideForTests` has set an override, returns that
+ * override for both scopes (test mode approximation — attribution tests
+ * must use the writer seam + disk round-trip).
+ *
+ * @public — exported for pi-tbox's /tbox defaults show command, which
+ * needs per-scope attribution.
+ */
+export function readToolsetDefaults(
+	scope: "global" | "project",
+): ToolsetDefaultsMap {
+	if (_settingsOverride !== null) return { ..._settingsOverride };
+	return parseToolsetDefaults(readSettingsJsonSafe(scope));
 }
