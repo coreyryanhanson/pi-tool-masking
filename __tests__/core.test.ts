@@ -1,3 +1,6 @@
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { describe, it, expect, vi } from "vitest";
 import { MockPI } from "./mock-pi.js";
@@ -6,7 +9,21 @@ import {
 	TOOLSET_EVENTS,
 	setDefaultResolutionMode,
 	getDefaultResolutionMode,
+	getActiveAllowlist,
 	getRegisteredToolsets,
+	parseToolsetDefaults,
+	mergeToolsetDefaults,
+	readMergedToolsetDefaults,
+	readToolsetDefaults,
+	getEffectiveDefault,
+	setSettingsOverrideForTests,
+	setSettingsWriterOverrideForTests,
+	writeToolsetDefaults,
+	clearToolsetDefaults,
+	MalformedSettingsError,
+	clearToolsetEntry,
+	clearAllToolsetEntries,
+	applyToolsetEnabled,
 	type RegistryEntry,
 } from "../index.js";
 
@@ -22,11 +39,13 @@ function createEnv(): { mock: MockPI; pi: ExtensionAPI } {
 const REGISTRY_KEY = "__piToolMaskingRegistry";
 const RESTORE_EVENT_KEY = "__piToolMaskingLastRestoreEvent";
 const MODULE_STATE_KEY = "__piToolMaskingModuleState";
+const DEPRECATION_WARNED_KEY = "__piToolMaskingDeprecationWarned";
 
 function cleanRegistry(): void {
 	delete (globalThis as any)[REGISTRY_KEY];
 	delete (globalThis as any)[RESTORE_EVENT_KEY];
 	delete (globalThis as any)[MODULE_STATE_KEY];
+	delete (globalThis as any)[DEPRECATION_WARNED_KEY];
 }
 
 function makeSpec(
@@ -51,13 +70,19 @@ function makeSpec(
 
 beforeEach(() => {
 	cleanRegistry();
+	setSettingsOverrideForTests({});
+});
+
+afterEach(() => {
+	setSettingsOverrideForTests(null);
+	setSettingsWriterOverrideForTests(null);
 });
 
 // ===================================================================
-// §6.1 Registry
+// Registry
 // ===================================================================
 
-describe("Registry (§6.1)", () => {
+describe("Registry", () => {
 	it("initializes __piToolMaskingRegistry as a Map on globalThis", () => {
 		const { pi } = createEnv();
 		defineToolset(pi, makeSpec());
@@ -202,7 +227,7 @@ describe("defineToolset — restore handler registration", () => {
 		emitSpy.mockRestore();
 	});
 
-	// §10.1 / §6 — companion mirror during restore must stay consistent.
+	// Companion mirror during restore must stay consistent.
 	// A companion listening on `changed` for a base toolset fires synchronously
 	// inside the base's restore and `appendEntry`s for itself. The restore loop
 	// must re-read the branch per toolset so the companion's own restore sees
@@ -228,7 +253,7 @@ describe("defineToolset — restore handler registration", () => {
 		defineToolset(pi, baseSpec);
 		const comp = defineToolset(pi, compSpec);
 
-		// Companion co-activation: mirror base `changed` only (§10.1).
+		// Companion co-activation: mirror base `changed` only.
 		pi.events.on(TOOLSET_EVENTS.changed, (data: any) => {
 			if (data.id === "base") {
 				if (data.enabled) comp.enable(pi);
@@ -570,10 +595,10 @@ describe("defineToolset — name-overlap guard", () => {
 });
 
 // ===================================================================
-// Toolset.enable (§9, §4.1)
+// Toolset.enable
 // ===================================================================
 
-describe("Toolset.enable (§9, §4.1)", () => {
+describe("Toolset.enable", () => {
 	it("activates toolset names and appends entry", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
@@ -644,10 +669,10 @@ describe("Toolset.enable (§9, §4.1)", () => {
 });
 
 // ===================================================================
-// Toolset.disable (§9)
+// Toolset.disable
 // ===================================================================
 
-describe("Toolset.disable (§9)", () => {
+describe("Toolset.disable", () => {
 	it("removes toolset names from active set and appends entry", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
@@ -716,10 +741,10 @@ describe("Toolset.disable (§9)", () => {
 });
 
 // ===================================================================
-// §9 invariant: disable reads from getActiveTools, not getAllTools
+// Invariant: disable reads from getActiveTools, not getAllTools
 // ===================================================================
 
-describe("§9 invariant — disable reads getActiveTools, not getAllTools", () => {
+describe("Invariant — disable reads getActiveTools, not getAllTools", () => {
 	it("disable does not re-activate tools in getAllTools but absent from getActiveTools", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "a", description: "" });
@@ -808,10 +833,10 @@ describe("Toolset.isEnabled", () => {
 });
 
 // ===================================================================
-// Toolset with empty names (§9)
+// Toolset with empty names
 // ===================================================================
 
-describe("Toolset with empty names (§9)", () => {
+describe("Toolset with empty names", () => {
 	it("enable does nothing and does not throw", () => {
 		const { mock, pi } = createEnv();
 		const ts = defineToolset(pi, makeSpec({ names: new Set([]) }));
@@ -834,10 +859,10 @@ describe("Toolset with empty names (§9)", () => {
 });
 
 // ===================================================================
-// Peer composition (§9 canonical test)
+// Peer composition (canonical test)
 // ===================================================================
 
-describe("Peer composition (§9 canonical test)", () => {
+describe("Peer composition (canonical test)", () => {
 	it("disable(A) does not re-activate B when disable(B) is called", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "a-only", description: "" });
@@ -897,10 +922,10 @@ describe("Peer composition (§9 canonical test)", () => {
 });
 
 // ===================================================================
-// getRegisteredToolsets (§5)
+// getRegisteredToolsets
 // ===================================================================
 
-describe("getRegisteredToolsets (§5)", () => {
+describe("getRegisteredToolsets", () => {
 	it("returns empty array when no toolsets registered", () => {
 		const result = getRegisteredToolsets();
 		expect(result).toEqual([]);
@@ -983,10 +1008,10 @@ describe("getRegisteredToolsets (§5)", () => {
 });
 
 // ===================================================================
-// Default resolution mode (§4.5)
+// Default resolution mode
 // ===================================================================
 
-describe("Default resolution mode (§4.5)", () => {
+describe("Default resolution mode", () => {
 	it("defaults to exclusion", () => {
 		expect(getDefaultResolutionMode()).toBe("exclusion");
 	});
@@ -1022,16 +1047,56 @@ describe("Default resolution mode (§4.5)", () => {
 	it("throws for invalid mode", () => {
 		const { pi } = createEnv();
 		expect(() => (setDefaultResolutionMode as any)(pi, "invalid")).toThrow(
-			'[pi-tool-masking] Invalid defaultResolutionMode: "invalid". Must be "exclusion" or "inclusion".',
+			'[pi-tool-masking] Invalid defaultResolutionMode: "invalid". Must be "exclusion", "inclusion", or "allowlist".',
 		);
 	});
 });
 
 // ===================================================================
-// Resolution mode persistence — survives quit/resume (§4.5, §13.2)
+// Inclusion deprecation — runtime warning
 // ===================================================================
 
-describe("Resolution mode persistence — survives quit/resume (§4.5, §13.2)", () => {
+describe("Inclusion mode deprecation warning", () => {
+	it('setDefaultResolutionMode("inclusion") warns once; suppressed on repeat', () => {
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const { pi } = createEnv();
+		setDefaultResolutionMode(pi, "inclusion");
+		setDefaultResolutionMode(pi, "inclusion");
+		setDefaultResolutionMode(pi, "exclusion");
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		expect(warnSpy).toHaveBeenCalledWith(
+			expect.stringContaining(
+				'"inclusion" resolution mode is deprecated since 1.2.0',
+			),
+		);
+		warnSpy.mockRestore();
+	});
+
+	it('doRestore resolving an "inclusion" branch mode entry warns once; suppressed on repeat', () => {
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const { mock, pi } = createEnv();
+		// Handler registration happens via defineToolset; the branch carries a
+		// legacy "inclusion" mode entry (written before the upgrade).
+		defineToolset(pi, makeSpec());
+		mock.appendEntry("toolset-resolution-mode", { mode: "inclusion" });
+		mock.fireLifecycleEvent("session_start");
+		mock.fireLifecycleEvent("session_start");
+		expect(getDefaultResolutionMode()).toBe("inclusion"); // still resolved
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		expect(warnSpy).toHaveBeenCalledWith(
+			expect.stringContaining(
+				'"inclusion" resolution mode is deprecated since 1.2.0',
+			),
+		);
+		warnSpy.mockRestore();
+	});
+});
+
+// ===================================================================
+// Resolution mode persistence — survives quit/resume
+// ===================================================================
+
+describe("Resolution mode persistence — survives quit/resume", () => {
 	it("inclusion mode persisted on process 1 restores on a fresh process; unknown toolset defaults off", () => {
 		// Process 1: focus sets inclusion mode (appends MODE_PERSIST_KEY entry)
 		const { mock: mock1, pi: pi1 } = createEnv();
@@ -1069,10 +1134,350 @@ describe("Resolution mode persistence — survives quit/resume (§4.5, §13.2)",
 });
 
 // ===================================================================
-// Dependency cascade on enable (§9, §4.4)
+// Allowlist resolution mode
 // ===================================================================
 
-describe("Dependency cascade on enable (§9, §4.4)", () => {
+describe("Allowlist resolution mode", () => {
+	it("AL1: setDefaultResolutionMode persists the array; getActiveAllowlist reads it", () => {
+		const { mock, pi } = createEnv();
+		setDefaultResolutionMode(pi, "allowlist", [
+			"my-plugin.web",
+			"my-plugin.learn",
+		]);
+
+		expect(getDefaultResolutionMode()).toBe("allowlist");
+		expect(getActiveAllowlist()).toEqual(["my-plugin.web", "my-plugin.learn"]);
+		const entries = mock.getEntries("toolset-resolution-mode");
+		expect(entries).toHaveLength(1);
+		expect(entries[0]?.data).toEqual({
+			mode: "allowlist",
+			allowlist: ["my-plugin.web", "my-plugin.learn"],
+		});
+	});
+
+	it("AL2: restore under allowlist — members on, others off; stale branch entry and settings pin bypassed", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		mock.registerTool({ name: "tool-b", description: "" });
+		mock.registerTool({ name: "tool-c", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({ id: "a", persistKey: "k:a", names: new Set(["tool-a"]) }),
+		);
+		defineToolset(
+			pi,
+			makeSpec({ id: "b", persistKey: "k:b", names: new Set(["tool-b"]) }),
+		);
+		defineToolset(
+			pi,
+			makeSpec({ id: "c", persistKey: "k:c", names: new Set(["tool-c"]) }),
+		);
+
+		// Stale branch entry (bypassed) and settings pin (bypassed) must both lose
+		// to the set-level allowlist override.
+		mock.appendEntry("k:b", { enabled: true });
+		setSettingsOverrideForTests({ "k:c": { enabled: true } });
+
+		setDefaultResolutionMode(pi, "allowlist", ["a"]);
+		// Real pi activates every extension tool at startup, THEN restore runs.
+		mock.setActiveTools(["tool-a", "tool-b", "tool-c"]);
+
+		mock.fireLifecycleEvent("session_start");
+
+		expect(mock.getActiveTools()).toEqual(["tool-a"]);
+	});
+
+	it("AL3 (B1): non-toolset tools preserved during allowlist restore", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		mock.registerTool({ name: "orphan-tool", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({ id: "a", persistKey: "k:a", names: new Set(["tool-a"]) }),
+		);
+
+		setDefaultResolutionMode(pi, "allowlist", ["a"]);
+		mock.setActiveTools(["tool-a", "orphan-tool"]);
+
+		mock.fireLifecycleEvent("session_start");
+
+		// orphan-tool is not owned by any registered toolset — the library does
+		// not govern it and must leave it active (`setActiveTools` is a full
+		// replacement, so the short-circuit computes a delta from current).
+		expect(mock.getActiveTools()).toEqual(["tool-a", "orphan-tool"]);
+	});
+
+	it("AL4: future-install suppression — toolset registered after allowlist is off", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		mock.registerTool({ name: "tool-b", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({ id: "a", persistKey: "k:a", names: new Set(["tool-a"]) }),
+		);
+
+		setDefaultResolutionMode(pi, "allowlist", ["a"]);
+		mock.fireLifecycleEvent("session_start");
+		expect(mock.getActiveTools()).toEqual(["tool-a"]);
+
+		// Toolset installed AFTER focus was entered (a consumer's actuation
+		// path consults getActiveAllowlist() — the library has no actuation
+		// surface, so the consultation is simulated here).
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "b",
+				persistKey: "k:b",
+				names: new Set(["tool-b"]),
+				defaultEnabled: true,
+			}),
+		);
+		expect(getActiveAllowlist()).toEqual(["a"]); // b not in the array → off
+
+		// Simulate actuation turning the new toolset on, then the next restore
+		// suppresses it.
+		mock.setActiveTools(["tool-a", "tool-b"]);
+		mock.fireLifecycleEvent("session_start");
+
+		expect(mock.getActiveTools()).toEqual(["tool-a"]);
+	});
+
+	it("AL5: later exclusion entry supersedes the allowlist; per-toolset tiering resumes", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		mock.registerTool({ name: "tool-b", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "a",
+				persistKey: "k:a",
+				names: new Set(["tool-a"]),
+				defaultEnabled: true,
+			}),
+		);
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "b",
+				persistKey: "k:b",
+				names: new Set(["tool-b"]),
+				defaultEnabled: true,
+			}),
+		);
+
+		setDefaultResolutionMode(pi, "allowlist", ["a"]);
+		mock.setActiveTools(["tool-a", "tool-b"]);
+		mock.fireLifecycleEvent("session_start");
+		expect(mock.getActiveTools()).toEqual(["tool-a"]);
+
+		// Focus lifted: exclusion supersedes the array; tiering resumes.
+		setDefaultResolutionMode(pi, "exclusion");
+		expect(getActiveAllowlist()).toBeUndefined();
+
+		mock.setActiveTools(["tool-a", "tool-b"]);
+		mock.fireLifecycleEvent("session_start");
+
+		// No branch entry, no settings pin → exclusion floor (`defaultEnabled ?? true`).
+		expect(mock.getActiveTools()).toEqual(["tool-a", "tool-b"]);
+	});
+
+	it("AL6: validation — missing/empty allowlist throws; unregistered ids allowed", () => {
+		const { pi } = createEnv();
+		expect(() => setDefaultResolutionMode(pi, "allowlist")).toThrow(
+			'[pi-tool-masking] defaultResolutionMode "allowlist" requires a non-empty allowlist array of toolset ids.',
+		);
+		expect(() => setDefaultResolutionMode(pi, "allowlist", [])).toThrow(
+			'[pi-tool-masking] defaultResolutionMode "allowlist" requires a non-empty allowlist array of toolset ids.',
+		);
+		// Forward references are legal — registration may come later.
+		expect(() =>
+			setDefaultResolutionMode(pi, "allowlist", ["not-registered"]),
+		).not.toThrow();
+		expect(getActiveAllowlist()).toEqual(["not-registered"]);
+	});
+
+	it("AL7: changed-mirror companion never fires during allowlist restore (two-phase)", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "base-tool", description: "" });
+		mock.registerTool({ name: "comp-tool", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "base",
+				persistKey: "k:base",
+				names: new Set(["base-tool"]),
+			}),
+		);
+		const comp = defineToolset(
+			pi,
+			makeSpec({
+				id: "comp",
+				persistKey: "k:comp",
+				names: new Set(["comp-tool"]),
+			}),
+		);
+
+		// Companion mirror on `changed` (the standard pattern).
+		pi.events.on(TOOLSET_EVENTS.changed, (data: any) => {
+			if (data.id === "base") {
+				if (data.enabled) comp.enable(pi);
+				else comp.disable(pi);
+			}
+		});
+
+		setDefaultResolutionMode(pi, "allowlist", ["base"]);
+		mock.setActiveTools(["base-tool", "comp-tool"]);
+
+		mock.fireLifecycleEvent("session_start");
+
+		// Authoritative state: base on, comp off.
+		expect(mock.getActiveTools()).toEqual(["base-tool"]);
+		// The mirror fires only on `changed`; allowlist restore emits `restored`
+		// in phase 2, so the mirror never appendEntry'd an `{enabled:true}` for
+		// comp mid-restore.
+		expect(mock.getEntries("k:comp")).toHaveLength(0);
+	});
+
+	it("AL8: restore fail-closed — mode entry claims allowlist with no array → empty allowlist, everything off", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "a",
+				persistKey: "k:a",
+				names: new Set(["tool-a"]),
+				defaultEnabled: true,
+			}),
+		);
+
+		// Hand-edited branch corruption: mode claims "allowlist", array missing
+		// (write-time validation would prevent this, but branch files are
+		// hand-editable).
+		mock.appendEntry("toolset-resolution-mode", { mode: "allowlist" });
+		mock.setActiveTools(["tool-a"]);
+
+		mock.fireLifecycleEvent("session_start");
+
+		// Mode claim respected — not silently rewritten to "exclusion"...
+		expect(getDefaultResolutionMode()).toBe("allowlist");
+		// ...recovered to an empty array (consistent, not undefined)...
+		expect(getActiveAllowlist()).toEqual([]);
+		// ...and the recovery fails CLOSED: nothing is on. (Recovering to
+		// "exclusion" instead would fail open — `defaultEnabled: true` would
+		// have turned tool-a on.)
+		expect(mock.getActiveTools()).toEqual([]);
+	});
+
+	it("AL9: restore fail-closed — allowlist present but not an array → empty allowlist, everything off", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "a",
+				persistKey: "k:a",
+				names: new Set(["tool-a"]),
+				defaultEnabled: true,
+			}),
+		);
+
+		mock.appendEntry("toolset-resolution-mode", {
+			mode: "allowlist",
+			allowlist: "tool-a", // not an array
+		});
+		mock.setActiveTools(["tool-a"]);
+
+		mock.fireLifecycleEvent("session_start");
+
+		expect(getDefaultResolutionMode()).toBe("allowlist");
+		expect(getActiveAllowlist()).toEqual([]);
+		expect(mock.getActiveTools()).toEqual([]);
+	});
+
+	it("AL10: null-tombstoned mode entry supersedes a prior allowlist → exclusion, allowlist undefined", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "a",
+				persistKey: "k:a",
+				names: new Set(["tool-a"]),
+				defaultEnabled: true,
+			}),
+		);
+
+		// Focus was active (allowlist), then a mode tombstone — the tombstone is
+		// the LAST mode entry and must beat the stale prior allowlist (null-tombstone
+		// awareness; unreachable today since no API tombstones
+		// the mode entry, kept as a defensive guard).
+		mock.appendEntry("toolset-resolution-mode", {
+			mode: "allowlist",
+			allowlist: ["a"],
+		});
+		mock.appendEntry("toolset-resolution-mode", null);
+		mock.setActiveTools(["tool-a"]);
+
+		mock.fireLifecycleEvent("session_start");
+
+		// Fall through to "exclusion" — no mode resurrection from the stale entry.
+		expect(getDefaultResolutionMode()).toBe("exclusion");
+		expect(getActiveAllowlist()).toBeUndefined();
+		// Per-toolset tiering resumes: no entry, no pin → exclusion floor
+		// (`defaultEnabled ?? true`).
+		expect(mock.getActiveTools()).toEqual(["tool-a"]);
+	});
+
+	it("AL11: mode absent / unknown value in the last entry falls through to exclusion; allowlist undefined", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "a",
+				persistKey: "k:a",
+				names: new Set(["tool-a"]),
+				defaultEnabled: true,
+			}),
+		);
+
+		mock.appendEntry("toolset-resolution-mode", {}); // no `mode` field
+		mock.setActiveTools(["tool-a"]);
+
+		mock.fireLifecycleEvent("session_start");
+
+		expect(getDefaultResolutionMode()).toBe("exclusion");
+		expect(getActiveAllowlist()).toBeUndefined();
+		expect(mock.getActiveTools()).toEqual(["tool-a"]);
+	});
+
+	it("AL12: getActiveAllowlist() is undefined under inclusion", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		// A toolset must exist — defineToolset registers the restore handler.
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "a",
+				persistKey: "k:a",
+				names: new Set(["tool-a"]),
+			}),
+		);
+		mock.appendEntry("toolset-resolution-mode", { mode: "inclusion" });
+
+		mock.fireLifecycleEvent("session_start");
+
+		expect(getDefaultResolutionMode()).toBe("inclusion");
+		expect(getActiveAllowlist()).toBeUndefined();
+	});
+});
+
+// ===================================================================
+// Dependency cascade on enable
+// ===================================================================
+
+describe("Dependency cascade on enable", () => {
 	it("L requires [B]; enable(L) → B enabled", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "b-tool", description: "" });
@@ -1232,10 +1637,10 @@ describe("Dependency cascade on enable (§9, §4.4)", () => {
 });
 
 // ===================================================================
-// Cascade appendEntry consistency (§4.4)
+// Cascade appendEntry consistency
 // ===================================================================
 
-describe("Cascade appendEntry consistency (§4.4)", () => {
+describe("Cascade appendEntry consistency", () => {
 	it("enable(L) writes one entry for L and one for B (dependency)", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "b-tool", description: "" });
@@ -1287,10 +1692,10 @@ describe("Cascade appendEntry consistency (§4.4)", () => {
 });
 
 // ===================================================================
-// Cycle detection on enable (§4.4)
+// Cycle detection on enable
 // ===================================================================
 
-describe("Cycle detection on enable (§4.4)", () => {
+describe("Cycle detection on enable", () => {
 	it("throws on direct cycle (A → B → A)", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "a-tool", description: "" });
@@ -1444,10 +1849,10 @@ describe("Cycle detection on enable (§4.4)", () => {
 });
 
 // ===================================================================
-// Forward references (§4.4)
+// Forward references
 // ===================================================================
 
-describe("Forward references (§4.4)", () => {
+describe("Forward references", () => {
 	it("defineToolset with forward ref does not throw on enable", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "a-tool", description: "" });
@@ -1492,10 +1897,10 @@ describe("Forward references (§4.4)", () => {
 });
 
 // ===================================================================
-// Reverse cascade on disable (§4.4, §9)
+// Reverse cascade on disable
 // ===================================================================
 
-describe("Reverse cascade on disable (§4.4, §9)", () => {
+describe("Reverse cascade on disable", () => {
 	it("linear chain: A requires B requires C — disable(B) cascades to A but not C", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "a-tool", description: "" });
@@ -1598,10 +2003,10 @@ describe("Reverse cascade on disable (§4.4, §9)", () => {
 });
 
 // ===================================================================
-// Cycle detection on disable (§4.4)
+// Cycle detection on disable
 // ===================================================================
 
-describe("Cycle detection on disable (§4.4)", () => {
+describe("Cycle detection on disable", () => {
 	it("throws on enable of a toolset in a cycle", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "a-tool", description: "" });
@@ -1674,10 +2079,10 @@ describe("Cycle detection on disable (§4.4)", () => {
 });
 
 // ===================================================================
-// Restore — persistence round-trip (§6, §12)
+// Restore — persistence round-trip
 // ===================================================================
 
-describe("Restore — persistence round-trip (§6, §12)", () => {
+describe("Restore — persistence round-trip", () => {
 	it("disable writes { enabled: false } under persistKey", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
@@ -1745,10 +2150,10 @@ describe("Restore — persistence round-trip (§6, §12)", () => {
 });
 
 // ===================================================================
-// Restore — no entry (default fallback, §6, §7.1)
+// Restore — no entry (default fallback)
 // ===================================================================
 
-describe("Restore — no entry (default fallback, §6, §7.1)", () => {
+describe("Restore — no entry (default fallback)", () => {
 	it("exclusion mode with defaultEnabled: true → applies on, emits changed", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
@@ -1829,10 +2234,10 @@ describe("Restore — no entry (default fallback, §6, §7.1)", () => {
 });
 
 // ===================================================================
-// Restore — always-emit invariant (§6)
+// Restore — always-emit invariant
 // ===================================================================
 
-describe("Restore — always-emit invariant (§6)", () => {
+describe("Restore — always-emit invariant", () => {
 	it("restore emits one event per registered toolset always", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "t1", description: "" });
@@ -1873,10 +2278,10 @@ describe("Restore — always-emit invariant (§6)", () => {
 });
 
 // ===================================================================
-// Restore — event split changed vs restored (§6)
+// Restore — event split changed vs restored
 // ===================================================================
 
-describe("Restore — event split changed vs restored (§6)", () => {
+describe("Restore — event split changed vs restored", () => {
 	it("enable emits changed (not restored)", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
@@ -1955,10 +2360,10 @@ describe("Restore — event split changed vs restored (§6)", () => {
 });
 
 // ===================================================================
-// emitMemberEvents (§6, §13)
+// emitMemberEvents
 // ===================================================================
 
-describe("emitMemberEvents (§6, §13)", () => {
+describe("emitMemberEvents", () => {
 	it("true produces N+1 events on enable (1 group + N members)", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "a", description: "" });
@@ -2074,10 +2479,10 @@ describe("emitMemberEvents (§6, §13)", () => {
 });
 
 // ===================================================================
-// Restore — idempotent / last-writer-wins (§6)
+// Restore — idempotent / last-writer-wins
 // ===================================================================
 
-describe("Restore — idempotent / last-writer-wins (§6)", () => {
+describe("Restore — idempotent / last-writer-wins", () => {
 	it("second restore on same branch produces same state", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
@@ -2113,10 +2518,10 @@ describe("Restore — idempotent / last-writer-wins (§6)", () => {
 });
 
 // ===================================================================
-// Restore — session_tree (§6)
+// Restore — session_tree
 // ===================================================================
 
-describe("Restore — session_tree (§6)", () => {
+describe("Restore — session_tree", () => {
 	it("session_tree also triggers restore", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
@@ -2183,10 +2588,10 @@ describe("Restore — session_tree (§6)", () => {
 });
 
 // ===================================================================
-// Restore independence with requires (§7.1)
+// Restore independence with requires
 // ===================================================================
 
-describe("Restore independence — does not cascade (§7.1)", () => {
+describe("Restore independence — does not cascade", () => {
 	it("restore applies persisted entries independently without cascading requires", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "b-tool", description: "" });
@@ -2224,10 +2629,10 @@ describe("Restore independence — does not cascade (§7.1)", () => {
 });
 
 // ===================================================================
-// Default-resolution mode — entry vs no-entry (§4.5)
+// Default-resolution mode — entry vs no-entry
 // ===================================================================
 
-describe("Default-resolution mode — entry vs no-entry (§4.5)", () => {
+describe("Default-resolution mode — entry vs no-entry", () => {
 	it("toolset A (with entry) B (no entry): mode affects B but not A", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "a-tool", description: "" });
@@ -2275,10 +2680,10 @@ describe("Default-resolution mode — entry vs no-entry (§4.5)", () => {
 });
 
 // ===================================================================
-// Entry-point exports (§5)
+// Entry-point exports
 // ===================================================================
 
-describe("Entry-point exports (§5)", () => {
+describe("Entry-point exports", () => {
 	it("all public exports resolve from the package entry", () => {
 		expect(typeof defineToolset).toBe("function");
 		expect(typeof setDefaultResolutionMode).toBe("function");
@@ -2287,5 +2692,1010 @@ describe("Entry-point exports (§5)", () => {
 		expect(typeof TOOLSET_EVENTS).toBe("object");
 		expect(typeof TOOLSET_EVENTS.changed).toBe("string");
 		expect(typeof TOOLSET_EVENTS.restored).toBe("string");
+	});
+});
+
+// ===================================================================
+// Settings.json reader — parseToolsetDefaults
+// ===================================================================
+
+describe("parseToolsetDefaults", () => {
+	it("absent toolsetDefaults returns {}", () => {
+		expect(parseToolsetDefaults({})).toEqual({});
+	});
+
+	it("non-object toolsetDefaults (string) returns {}", () => {
+		expect(parseToolsetDefaults({ toolsetDefaults: "" })).toEqual({});
+	});
+
+	it("non-object toolsetDefaults (array) returns {}", () => {
+		expect(parseToolsetDefaults({ toolsetDefaults: [] })).toEqual({});
+	});
+
+	it("drops entry with string enabled value", () => {
+		expect(
+			parseToolsetDefaults({ toolsetDefaults: { "k:x": { enabled: "true" } } }),
+		).toEqual({});
+	});
+
+	it("drops entry with number enabled value", () => {
+		expect(
+			parseToolsetDefaults({ toolsetDefaults: { "k:x": { enabled: 1 } } }),
+		).toEqual({});
+	});
+
+	it("keeps valid entry with extra fields (extra ignored)", () => {
+		const input = {
+			toolsetDefaults: {
+				"k:extra": { enabled: true, extra: 1 },
+			},
+		};
+		expect(parseToolsetDefaults(input)).toEqual({
+			"k:extra": { enabled: true },
+		});
+	});
+
+	it("returns the on-disk shape, not flattened booleans", () => {
+		const input = {
+			toolsetDefaults: {
+				"k:a": { enabled: true },
+				"k:b": { enabled: false },
+			},
+		};
+		expect(parseToolsetDefaults(input)).toEqual({
+			"k:a": { enabled: true },
+			"k:b": { enabled: false },
+		});
+	});
+});
+
+// ===================================================================
+// Settings.json reader — mergeToolsetDefaults
+// ===================================================================
+
+describe("mergeToolsetDefaults", () => {
+	it("shallow per-key merge: project wins on collision", () => {
+		const global_ = {
+			"k:a": { enabled: true },
+			"k:b": { enabled: false },
+		};
+		const project = { "k:b": { enabled: true } };
+		expect(mergeToolsetDefaults(global_, project)).toEqual({
+			"k:a": { enabled: true },
+			"k:b": { enabled: true },
+		});
+	});
+
+	it("empty project does not clobber global", () => {
+		expect(mergeToolsetDefaults({ "k:a": { enabled: true } }, {})).toEqual({
+			"k:a": { enabled: true },
+		});
+	});
+
+	it("empty global is populated by project", () => {
+		expect(mergeToolsetDefaults({}, { "k:a": { enabled: true } })).toEqual({
+			"k:a": { enabled: true },
+		});
+	});
+});
+
+// ===================================================================
+// Settings.json reader — readMergedToolsetDefaults / readToolsetDefaults
+// ===================================================================
+
+describe("readMergedToolsetDefaults / readToolsetDefaults", () => {
+	it("returns the override verbatim when set", () => {
+		setSettingsOverrideForTests({ "k:a": { enabled: false } });
+		expect(readMergedToolsetDefaults()).toEqual({ "k:a": { enabled: false } });
+		expect(readToolsetDefaults("global")).toEqual({
+			"k:a": { enabled: false },
+		});
+		expect(readToolsetDefaults("project")).toEqual({
+			"k:a": { enabled: false },
+		});
+	});
+
+	it("returns {} when override is empty", () => {
+		setSettingsOverrideForTests({});
+		expect(readMergedToolsetDefaults()).toEqual({});
+	});
+
+	it("returns a copy, not the override object itself", () => {
+		const seed = { "k:a": { enabled: true } };
+		setSettingsOverrideForTests(seed);
+		const out = readMergedToolsetDefaults();
+		expect(out).toEqual(seed);
+		expect(out).not.toBe(seed);
+	});
+});
+
+// ===================================================================
+// Settings.json writer — writeToolsetDefaults / clearToolsetDefaults
+// ===================================================================
+
+describe("writeToolsetDefaults & clearToolsetDefaults", () => {
+	// W1–W3, W5 use the writer seam; W4, W6–W8 hit disk
+
+	beforeEach(() => {
+		setSettingsWriterOverrideForTests({ global: {}, project: {} });
+	});
+
+	afterEach(() => {
+		setSettingsWriterOverrideForTests(null);
+	});
+
+	it("W1: writeToolsetDefaults merges entries into scope, preserves existing keys", () => {
+		const state = {
+			global: { "toolset-state:z": { enabled: true } },
+			project: {},
+		};
+		setSettingsWriterOverrideForTests(state);
+		try {
+			writeToolsetDefaults(
+				{
+					"toolset-state:x": { enabled: true },
+					"toolset-state:y": { enabled: false },
+				},
+				"global",
+			);
+			expect(state.global).toEqual({
+				"toolset-state:z": { enabled: true },
+				"toolset-state:x": { enabled: true },
+				"toolset-state:y": { enabled: false },
+			});
+			expect(state.project).toEqual({});
+		} finally {
+			setSettingsWriterOverrideForTests(null);
+		}
+	});
+
+	it("W2: writing to project does not touch global, and vice versa", () => {
+		const state = { global: {}, project: {} };
+		setSettingsWriterOverrideForTests(state);
+		try {
+			writeToolsetDefaults({ "toolset-state:x": { enabled: true } }, "project");
+			expect(state.global).toEqual({});
+			expect(state.project).toEqual({ "toolset-state:x": { enabled: true } });
+
+			writeToolsetDefaults({ "toolset-state:y": { enabled: false } }, "global");
+			expect(state.global).toEqual({ "toolset-state:y": { enabled: false } });
+			expect(state.project).toEqual({ "toolset-state:x": { enabled: true } });
+		} finally {
+			setSettingsWriterOverrideForTests(null);
+		}
+	});
+
+	it("W3: clearToolsetDefaults empties scope and returns path (null when empty)", () => {
+		const state = {
+			global: {
+				"toolset-state:x": { enabled: true },
+				"toolset-state:y": { enabled: false },
+			},
+			project: {},
+		};
+		setSettingsWriterOverrideForTests(state);
+		try {
+			expect(clearToolsetDefaults("global")).toEqual(
+				expect.stringContaining("settings.json"),
+			);
+			expect(state.global).toEqual({});
+
+			expect(clearToolsetDefaults("global")).toBeNull();
+
+			expect(clearToolsetDefaults("project")).toBeNull();
+		} finally {
+			setSettingsWriterOverrideForTests(null);
+		}
+	});
+
+	it("W5: writer override and reader override are independent", () => {
+		const writerState = {
+			global: { "toolset-state:writer": { enabled: true } },
+			project: {},
+		};
+		setSettingsWriterOverrideForTests(writerState);
+		setSettingsOverrideForTests({ "toolset-state:reader": { enabled: false } });
+		try {
+			// Reader returns the reader override, not writer-captured state
+			const merged = readMergedToolsetDefaults();
+			expect(merged["toolset-state:reader"]).toEqual({ enabled: false });
+			expect(merged["toolset-state:writer"]).toBeUndefined();
+		} finally {
+			setSettingsWriterOverrideForTests(null);
+			setSettingsOverrideForTests({});
+		}
+	});
+
+	// W4 — write→read round-trip on disk
+	describe("W4: disk round-trip (writeToolsetDefaults + readMergedToolsetDefaults)", () => {
+		let tmpDir: string;
+		let agentDir: string;
+		let origCwd: string;
+		let origAgentDir: string | undefined;
+
+		beforeEach(() => {
+			setSettingsWriterOverrideForTests(null);
+			setSettingsOverrideForTests(null);
+
+			tmpDir = mkdtempSync(join(tmpdir(), "pi-tool-masking-w4-"));
+			agentDir = join(tmpDir, "agent");
+			mkdirSync(join(tmpDir, ".pi"), { recursive: true });
+			mkdirSync(agentDir, { recursive: true });
+			origCwd = process.cwd();
+			origAgentDir = process.env.PI_CODING_AGENT_DIR;
+			process.env.PI_CODING_AGENT_DIR = agentDir;
+			process.chdir(tmpDir);
+		});
+
+		afterEach(() => {
+			process.chdir(origCwd);
+			if (origAgentDir !== undefined) {
+				process.env.PI_CODING_AGENT_DIR = origAgentDir;
+			} else {
+				delete process.env.PI_CODING_AGENT_DIR;
+			}
+			setSettingsWriterOverrideForTests(null);
+			setSettingsOverrideForTests({});
+		});
+
+		it("W4a: write→readMergedToolsetDefaults round-trip (project overrides global)", () => {
+			const globalPath = join(agentDir, "settings.json");
+			writeFileSync(
+				globalPath,
+				JSON.stringify({
+					toolsetDefaults: {
+						"toolset-state:shared": { enabled: false },
+					},
+				}) + "\n",
+			);
+
+			writeToolsetDefaults(
+				{ "toolset-state:new": { enabled: true } },
+				"project",
+			);
+			writeToolsetDefaults(
+				{ "toolset-state:shared": { enabled: true } },
+				"project",
+			);
+
+			const merged = readMergedToolsetDefaults();
+			expect(merged["toolset-state:shared"]).toEqual({ enabled: true });
+			expect(merged["toolset-state:new"]).toEqual({ enabled: true });
+			expect(merged["toolset-state:missing"]).toBeUndefined();
+		});
+
+		it("W4b: readToolsetDefaults attributes to the correct scope", () => {
+			// Global has an entry; project has no file yet
+			const globalPath = join(agentDir, "settings.json");
+			writeFileSync(
+				globalPath,
+				JSON.stringify({
+					toolsetDefaults: {
+						"toolset-state:x": { enabled: true },
+					},
+				}) + "\n",
+			);
+
+			// project doesn't exist yet — readToolsetDefaults returns {}
+			expect(readToolsetDefaults("project")).toEqual({});
+
+			// Write only to project
+			writeToolsetDefaults(
+				{ "toolset-state:y": { enabled: false } },
+				"project",
+			);
+
+			// Per-scope readers are independent
+			expect(readToolsetDefaults("global")).toEqual({
+				"toolset-state:x": { enabled: true },
+			});
+			expect(readToolsetDefaults("project")).toEqual({
+				"toolset-state:y": { enabled: false },
+			});
+
+			// Merged returns project-overrides-global
+			expect(readMergedToolsetDefaults()["toolset-state:x"]).toEqual({
+				enabled: true,
+			});
+			expect(readMergedToolsetDefaults()["toolset-state:y"]).toEqual({
+				enabled: false,
+			});
+		});
+	});
+
+	// W6 — malformed-file guard (disk)
+	describe("W6: malformed-file guard (disk)", () => {
+		let tmpDir: string;
+		let origCwd: string;
+
+		beforeEach(() => {
+			// Clear both overrides so reads and writes hit disk
+			setSettingsWriterOverrideForTests(null);
+			setSettingsOverrideForTests(null);
+
+			tmpDir = mkdtempSync(join(tmpdir(), "pi-tool-masking-writer-"));
+			mkdirSync(join(tmpDir, ".pi"), { recursive: true });
+			origCwd = process.cwd();
+			process.chdir(tmpDir);
+		});
+
+		afterEach(() => {
+			process.chdir(origCwd);
+			setSettingsWriterOverrideForTests(null);
+			setSettingsOverrideForTests({});
+		});
+
+		it("W6a: writeToolsetDefaults throws on malformed JSON", () => {
+			const settingsPath = join(tmpDir, ".pi", "settings.json");
+			writeFileSync(settingsPath, "{not valid");
+			const before = readFileSync(settingsPath, "utf-8");
+
+			expect(() =>
+				writeToolsetDefaults(
+					{ "toolset-state:x": { enabled: true } },
+					"project",
+				),
+			).toThrow(/malformed settings.json/);
+
+			// File unchanged
+			expect(readFileSync(settingsPath, "utf-8")).toBe(before);
+		});
+
+		it("W6a2: writeToolsetDefaults throws MalformedSettingsError on non-object (array)", () => {
+			const settingsPath = join(tmpDir, ".pi", "settings.json");
+			writeFileSync(settingsPath, "[]");
+			const before = readFileSync(settingsPath, "utf-8");
+
+			expect(() =>
+				writeToolsetDefaults(
+					{ "toolset-state:x": { enabled: true } },
+					"project",
+				),
+			).toThrow(MalformedSettingsError);
+
+			expect(readFileSync(settingsPath, "utf-8")).toBe(before);
+		});
+
+		it("W6a3: writeToolsetDefaults throws on non-object (null)", () => {
+			const settingsPath = join(tmpDir, ".pi", "settings.json");
+			writeFileSync(settingsPath, "null");
+			const before = readFileSync(settingsPath, "utf-8");
+
+			expect(() =>
+				writeToolsetDefaults(
+					{ "toolset-state:x": { enabled: true } },
+					"project",
+				),
+			).toThrow(/non-object settings.json/);
+
+			expect(readFileSync(settingsPath, "utf-8")).toBe(before);
+		});
+
+		it("W6b: clearToolsetDefaults throws on malformed JSON", () => {
+			const settingsPath = join(tmpDir, ".pi", "settings.json");
+			writeFileSync(settingsPath, "{not valid");
+			const before = readFileSync(settingsPath, "utf-8");
+
+			expect(() => clearToolsetDefaults("project")).toThrow(
+				/malformed settings.json/,
+			);
+
+			expect(readFileSync(settingsPath, "utf-8")).toBe(before);
+		});
+
+		it("W6b2: clearToolsetDefaults throws on non-object (array)", () => {
+			const settingsPath = join(tmpDir, ".pi", "settings.json");
+			writeFileSync(settingsPath, "[]");
+			const before = readFileSync(settingsPath, "utf-8");
+
+			expect(() => clearToolsetDefaults("project")).toThrow(
+				/non-object settings.json/,
+			);
+
+			expect(readFileSync(settingsPath, "utf-8")).toBe(before);
+		});
+
+		it("W6b3: clearToolsetDefaults returns null for missing file", () => {
+			// No .pi/settings.json written — file doesn't exist
+			expect(clearToolsetDefaults("project")).toBeNull();
+		});
+	});
+
+	// W7 — top-level-key preservation (disk)
+	describe("W7: top-level-key preservation (disk)", () => {
+		let tmpDir: string;
+		let origCwd: string;
+
+		beforeEach(() => {
+			setSettingsWriterOverrideForTests(null);
+			setSettingsOverrideForTests(null);
+
+			tmpDir = mkdtempSync(join(tmpdir(), "pi-tool-masking-writer-"));
+			mkdirSync(join(tmpDir, ".pi"), { recursive: true });
+			origCwd = process.cwd();
+			process.chdir(tmpDir);
+
+			// Seed a settings file with non-toolsetDefaults keys
+			const settingsPath = join(tmpDir, ".pi", "settings.json");
+			writeFileSync(
+				settingsPath,
+				JSON.stringify(
+					{
+						provider: "mistral",
+						theme: "x",
+						toolsetDefaults: {
+							"toolset-state:old": { enabled: false },
+						},
+					},
+					null,
+					2,
+				) + "\n",
+			);
+		});
+
+		afterEach(() => {
+			process.chdir(origCwd);
+			setSettingsWriterOverrideForTests(null);
+			setSettingsOverrideForTests({});
+		});
+
+		it("W7: write preserves provider, theme, existing td entries; adds new entry", () => {
+			const settingsPath = join(tmpDir, ".pi", "settings.json");
+
+			writeToolsetDefaults(
+				{ "toolset-state:new": { enabled: true } },
+				"project",
+			);
+
+			const raw = JSON.parse(readFileSync(settingsPath, "utf-8"));
+			expect(raw.provider).toBe("mistral");
+			expect(raw.theme).toBe("x");
+			expect(raw.toolsetDefaults["toolset-state:old"]).toEqual({
+				enabled: false,
+			});
+			expect(raw.toolsetDefaults["toolset-state:new"]).toEqual({
+				enabled: true,
+			});
+		});
+
+		it("W7b: clearToolsetDefaults removes the wrapper key, preserves other keys", () => {
+			const settingsPath = join(tmpDir, ".pi", "settings.json");
+
+			const result = clearToolsetDefaults("project");
+			expect(result).toBe(settingsPath);
+
+			const raw = JSON.parse(readFileSync(settingsPath, "utf-8"));
+			expect(raw.provider).toBe("mistral");
+			expect(raw.theme).toBe("x");
+			expect(raw.toolsetDefaults).toBeUndefined();
+		});
+
+		it("W7c: clearToolsetDefaults returns null when no toolsetDefaults key", () => {
+			// Remove the key first
+			clearToolsetDefaults("project");
+			expect(clearToolsetDefaults("project")).toBeNull();
+
+			// Other keys still intact
+			const raw = JSON.parse(
+				readFileSync(join(tmpDir, ".pi", "settings.json"), "utf-8"),
+			);
+			expect(raw.provider).toBe("mistral");
+		});
+	});
+
+	// W8 — no-op writes skip disk reformat (don't rewrite a hand-edited file
+	// when the values are already what's being written). Observable: the
+	// writer serializes with JSON.stringify(_, null, 2), so a skip preserves
+	// our compact seed bytes while a real write would reformat to indented.
+	describe("W8: no-op writes skip disk reformat", () => {
+		let tmpDir: string;
+		let origCwd: string;
+
+		beforeEach(() => {
+			setSettingsWriterOverrideForTests(null);
+			setSettingsOverrideForTests(null);
+
+			tmpDir = mkdtempSync(join(tmpdir(), "pi-tool-masking-writer-"));
+			mkdirSync(join(tmpDir, ".pi"), { recursive: true });
+			origCwd = process.cwd();
+			process.chdir(tmpDir);
+		});
+
+		afterEach(() => {
+			process.chdir(origCwd);
+			setSettingsWriterOverrideForTests(null);
+			setSettingsOverrideForTests({});
+		});
+
+		it("W8a: writeToolsetDefaults with unchanged values does not rewrite", () => {
+			const settingsPath = join(tmpDir, ".pi", "settings.json");
+			// Compact seed (writer would emit 2-space indented + trailing \n)
+			const seed = '{"toolsetDefaults":{"toolset-state:x":{"enabled":true}}}';
+			writeFileSync(settingsPath, seed);
+
+			writeToolsetDefaults({ "toolset-state:x": { enabled: true } }, "project");
+
+			expect(readFileSync(settingsPath, "utf-8")).toBe(seed);
+		});
+
+		it("W8b: writeToolsetDefaults with {} entries does not rewrite", () => {
+			const settingsPath = join(tmpDir, ".pi", "settings.json");
+			const seed = '{"toolsetDefaults":{"toolset-state:x":{"enabled":true}}}';
+			writeFileSync(settingsPath, seed);
+
+			writeToolsetDefaults({}, "project");
+
+			expect(readFileSync(settingsPath, "utf-8")).toBe(seed);
+		});
+
+		it("W8d: a real change still rewrites (sanity for W8a observable)", () => {
+			const settingsPath = join(tmpDir, ".pi", "settings.json");
+			const seed = '{"toolsetDefaults":{"toolset-state:x":{"enabled":true}}}';
+			writeFileSync(settingsPath, seed);
+
+			writeToolsetDefaults(
+				{ "toolset-state:x": { enabled: false } },
+				"project",
+			);
+
+			// A real change must reformat — proves the compact-seed observable
+			// actually detects writes (else W8a would pass for the wrong reason)
+			expect(readFileSync(settingsPath, "utf-8")).not.toBe(seed);
+			const raw = JSON.parse(readFileSync(settingsPath, "utf-8"));
+			expect(raw.toolsetDefaults["toolset-state:x"]).toEqual({
+				enabled: false,
+			});
+		});
+	});
+});
+
+// ===================================================================
+// Restore — settings.json defaults tier
+// ===================================================================
+
+describe("Restore — settings.json defaults tier", () => {
+	it("S1: settings default on fresh session — settings false beats spec.defaultEnabled true", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		setSettingsOverrideForTests({
+			"toolset-state:test.toolset": { enabled: false },
+		});
+		defineToolset(
+			pi,
+			makeSpec({ names: new Set(["tool-a"]), defaultEnabled: true }),
+		);
+		mock.fireLifecycleEvent("session_start");
+		expect(mock.getActiveTools()).not.toContain("tool-a");
+	});
+
+	it("S2: chat-branch entry beats settings default (tier 1 > tier 2)", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		mock.appendEntry("toolset-state:test.toolset", { enabled: true });
+		setSettingsOverrideForTests({
+			"toolset-state:test.toolset": { enabled: false },
+		});
+		defineToolset(
+			pi,
+			makeSpec({ names: new Set(["tool-a"]), defaultEnabled: false }),
+		);
+		mock.fireLifecycleEvent("session_start");
+		expect(mock.getActiveTools()).toContain("tool-a");
+	});
+
+	it("S3: settings absent → packaged default (tier 3 unchanged)", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		setSettingsOverrideForTests({});
+		defineToolset(
+			pi,
+			makeSpec({ names: new Set(["tool-a"]), defaultEnabled: false }),
+		);
+		mock.fireLifecycleEvent("session_start");
+		expect(mock.getActiveTools()).not.toContain("tool-a");
+	});
+
+	it("S4: settings honored in inclusion mode — pinned true restores on", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		setSettingsOverrideForTests({
+			"toolset-state:test.toolset": { enabled: true },
+		});
+		defineToolset(
+			pi,
+			makeSpec({ names: new Set(["tool-a"]), defaultEnabled: true }),
+		);
+		setDefaultResolutionMode(pi, "inclusion");
+		mock.fireLifecycleEvent("session_start");
+		expect(mock.getActiveTools()).toContain("tool-a");
+	});
+
+	it("S5: settings pinned false in inclusion stays off", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		setSettingsOverrideForTests({
+			"toolset-state:test.toolset": { enabled: false },
+		});
+		defineToolset(
+			pi,
+			makeSpec({ names: new Set(["tool-a"]), defaultEnabled: true }),
+		);
+		setDefaultResolutionMode(pi, "inclusion");
+		mock.fireLifecycleEvent("session_start");
+		expect(mock.getActiveTools()).not.toContain("tool-a");
+	});
+
+	it("S6: unpinned in inclusion falls to false regardless of defaultEnabled", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		setSettingsOverrideForTests({});
+		defineToolset(
+			pi,
+			makeSpec({ names: new Set(["tool-a"]), defaultEnabled: true }),
+		);
+		setDefaultResolutionMode(pi, "inclusion");
+		mock.fireLifecycleEvent("session_start");
+		expect(mock.getActiveTools()).not.toContain("tool-a");
+	});
+
+	it("S7: null-tombstoned branch entry falls through to settings pin", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		setSettingsOverrideForTests({
+			"toolset-state:test.toolset": { enabled: false },
+		});
+		defineToolset(
+			pi,
+			makeSpec({ names: new Set(["tool-a"]), defaultEnabled: true }),
+		);
+		// real entry (true), then null tombstone → settings pin (false) wins
+		mock.appendEntry("toolset-state:test.toolset", { enabled: true });
+		mock.appendEntry("toolset-state:test.toolset", null);
+		mock.fireLifecycleEvent("session_start");
+		expect(mock.getActiveTools()).not.toContain("tool-a");
+	});
+});
+
+// ===================================================================
+// getEffectiveDefault
+// ===================================================================
+
+describe("getEffectiveDefault", () => {
+	it("G1: snapshot overrides spec.defaultEnabled", () => {
+		const spec = makeSpec({ defaultEnabled: true });
+		const snapshot = { "toolset-state:test.toolset": { enabled: false } };
+		expect(getEffectiveDefault(spec, snapshot)).toBe(false);
+	});
+
+	it("G2: falls back to spec.defaultEnabled ?? true", () => {
+		const spec = makeSpec({ defaultEnabled: false });
+		expect(getEffectiveDefault(spec, {})).toBe(false);
+
+		const specNoDefault = makeSpec(); // defaultEnabled undefined
+		expect(getEffectiveDefault(specNoDefault, {})).toBe(true);
+	});
+
+	it("G3: reads disk when no snapshot passed", () => {
+		setSettingsOverrideForTests({
+			"toolset-state:test.toolset": { enabled: false },
+		});
+		try {
+			const spec = makeSpec({ defaultEnabled: true });
+			expect(getEffectiveDefault(spec)).toBe(false);
+		} finally {
+			setSettingsOverrideForTests({});
+		}
+	});
+});
+
+// ===================================================================
+// Null-tombstone — toolset restore
+// ===================================================================
+
+describe("Null-tombstone — toolset restore", () => {
+	it("AT1: null tombstone after real entry falls through to settings/packaged", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({ names: new Set(["tool-a"]), defaultEnabled: false }),
+		);
+
+		// Branch: real entry then null tombstone
+		mock.appendEntry("toolset-state:test.toolset", { enabled: true });
+		mock.appendEntry("toolset-state:test.toolset", null);
+
+		mock.fireLifecycleEvent("session_start");
+
+		// Falls through to packaged default (false), not the stale true entry
+		expect(mock.getActiveTools()).not.toContain("tool-a");
+	});
+
+	it("AT2: real entry without tombstone restores true (regression guard)", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({ names: new Set(["tool-a"]), defaultEnabled: false }),
+		);
+
+		mock.appendEntry("toolset-state:test.toolset", { enabled: true });
+
+		mock.fireLifecycleEvent("session_start");
+
+		expect(mock.getActiveTools()).toContain("tool-a");
+	});
+
+	it("AT3: only a null tombstone (no prior real entry) falls through", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({ names: new Set(["tool-a"]), defaultEnabled: true }),
+		);
+
+		mock.appendEntry("toolset-state:test.toolset", null);
+
+		mock.fireLifecycleEvent("session_start");
+
+		// No real entry → packaged default (true)
+		expect(mock.getActiveTools()).toContain("tool-a");
+	});
+
+	it("AT4: live toggle after tombstone supersedes it (last-writer-wins)", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({ names: new Set(["tool-a"]), defaultEnabled: false }),
+		);
+
+		// Tombstone, then live toggle (enabled)
+		mock.appendEntry("toolset-state:test.toolset", null);
+		mock.appendEntry("toolset-state:test.toolset", { enabled: true });
+
+		mock.fireLifecycleEvent("session_start");
+
+		expect(mock.getActiveTools()).toContain("tool-a");
+	});
+
+	it("AT5: malformed last entry (no enabled field) falls through", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({ names: new Set(["tool-a"]), defaultEnabled: false }),
+		);
+
+		// Malformed entry: has data but no `enabled` field
+		mock.appendEntry("toolset-state:test.toolset", { foo: "bar" });
+
+		mock.fireLifecycleEvent("session_start");
+
+		// Falls through to packaged default (false), not silently unrestored
+		expect(mock.getActiveTools()).not.toContain("tool-a");
+	});
+
+	it("AT6: companion-mirror write across a tombstone in the same pass is visible", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "base-tool", description: "" });
+		mock.registerTool({ name: "comp-tool", description: "" });
+
+		// Base defaults OFF with a tombstoned stale {enabled:true} entry; comp
+		// defaults ON. The tombstone makes base fall through to its packaged
+		// default (off) — emitting `changed` (fallback path, not `restored`) —
+		// and the mirror's synchronous disable of comp must be visible to
+		// comp's own restore later in the same pass (branch re-read per
+		// toolset, same mechanism as the companion-mirror test but across a tombstone).
+		const baseSpec = makeSpec({
+			id: "base",
+			persistKey: "k:base",
+			names: new Set(["base-tool"]),
+			defaultEnabled: false,
+		});
+		const compSpec = makeSpec({
+			id: "comp",
+			persistKey: "k:comp",
+			names: new Set(["comp-tool"]),
+			defaultEnabled: true,
+		});
+		defineToolset(pi, baseSpec);
+		const comp = defineToolset(pi, compSpec);
+
+		pi.events.on(TOOLSET_EVENTS.changed, (data: any) => {
+			if (data.id === "base") {
+				if (data.enabled) comp.enable(pi);
+				else comp.disable(pi);
+			}
+		});
+
+		// Real entry then null tombstone — the tombstone must beat the stale
+		// {enabled:true} and fall through, not restore true.
+		mock.appendEntry("k:base", { enabled: true });
+		mock.appendEntry("k:base", null);
+
+		mock.setActiveTools(["base-tool", "comp-tool"]);
+		mock.fireLifecycleEvent("session_start");
+
+		// Base off (tombstone fell through to packaged default), comp off —
+		// comp's own restore saw the mirror-written {enabled:false}, not its
+		// packaged default true.
+		expect(mock.getActiveTools()).not.toContain("base-tool");
+		expect(mock.getActiveTools()).not.toContain("comp-tool");
+		const compEntries = mock
+			.getEntries("k:comp")
+			.map((e) => (e.data as any)?.enabled);
+		expect(compEntries).toContain(false);
+	});
+});
+
+// ===================================================================
+// Tombstone helpers
+// ===================================================================
+
+describe("Tombstone helpers", () => {
+	const branchOf = (mock: MockPI) =>
+		mock.createContext().sessionManager.getBranch();
+
+	it("BT1: clearToolsetEntry appends null when last entry is non-null", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
+		mock.appendEntry("toolset-state:test.toolset", { enabled: true });
+
+		clearToolsetEntry(pi, "toolset-state:test.toolset", branchOf(mock));
+
+		const entries = mock.getEntries("toolset-state:test.toolset");
+		expect(entries).toHaveLength(2);
+		expect(entries[1]!.data).toBeNull();
+	});
+
+	it("BT2: clearToolsetEntry no-ops when last entry already cleared", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
+		mock.appendEntry("toolset-state:test.toolset", { enabled: true });
+		mock.appendEntry("toolset-state:test.toolset", null);
+
+		clearToolsetEntry(pi, "toolset-state:test.toolset", branchOf(mock));
+
+		// No second tombstone stacked
+		expect(mock.getEntries("toolset-state:test.toolset")).toHaveLength(2);
+	});
+
+	it("BT3: clearToolsetEntry no-ops when key has no prior entry", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
+
+		clearToolsetEntry(pi, "toolset-state:test.toolset", branchOf(mock));
+
+		// No redundant tombstone for a never-toggled toolset
+		expect(mock.getEntries("toolset-state:test.toolset")).toHaveLength(0);
+	});
+
+	it("BT4: clearAllToolsetEntries tombstones only toolsets with prior entries", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		mock.registerTool({ name: "tool-b", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "a",
+				persistKey: "toolset-state:a",
+				names: new Set(["tool-a"]),
+			}),
+		);
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "b",
+				persistKey: "toolset-state:b",
+				names: new Set(["tool-b"]),
+			}),
+		);
+		mock.appendEntry("toolset-state:a", { enabled: true });
+		// toolset b never toggled → no branch entry
+
+		clearAllToolsetEntries(pi, branchOf(mock));
+
+		const a = mock.getEntries("toolset-state:a");
+		expect(a).toHaveLength(2);
+		expect(a[1]!.data).toBeNull();
+		expect(mock.getEntries("toolset-state:b")).toHaveLength(0);
+	});
+
+	it("BT5: consecutive clearAllToolsetEntries write zero new tombstones", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
+		mock.appendEntry("toolset-state:test.toolset", { enabled: true });
+
+		clearAllToolsetEntries(pi, branchOf(mock));
+		clearAllToolsetEntries(pi, branchOf(mock));
+
+		// First call appends the tombstone; second sees it and skips
+		expect(mock.getEntries("toolset-state:test.toolset")).toHaveLength(2);
+	});
+
+	it("BT6: tombstone then restore falls through to settings pin", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({ names: new Set(["tool-a"]), defaultEnabled: true }),
+		);
+		setSettingsOverrideForTests({
+			"toolset-state:test.toolset": { enabled: false },
+		});
+		mock.appendEntry("toolset-state:test.toolset", { enabled: true });
+
+		clearToolsetEntry(pi, "toolset-state:test.toolset", branchOf(mock));
+		mock.fireLifecycleEvent("session_start");
+
+		// Tombstone makes the stale {enabled:true} invisible; settings pin wins
+		expect(mock.getActiveTools()).not.toContain("tool-a");
+	});
+});
+
+// ===================================================================
+// applyToolsetEnabled
+// ===================================================================
+
+describe("applyToolsetEnabled", () => {
+	it("E1: applies state and emits changed, no appendEntry", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		const spec = makeSpec({ names: new Set(["tool-a"]) });
+		defineToolset(pi, spec);
+
+		const changed: { id: string; enabled: boolean }[] = [];
+		const restored: { id: string; enabled: boolean }[] = [];
+		mock.events.on(TOOLSET_EVENTS.changed, (data: any) => changed.push(data));
+		mock.events.on(TOOLSET_EVENTS.restored, (data: any) => restored.push(data));
+
+		applyToolsetEnabled(pi, spec, true);
+
+		expect(mock.getActiveTools()).toContain("tool-a");
+		expect(changed).toEqual([{ id: "test.toolset", enabled: true }]);
+		expect(restored).toHaveLength(0);
+		expect(mock.getEntries("toolset-state:test.toolset")).toHaveLength(0);
+	});
+
+	it("E2: applyToolsetEnabled(false) deactivates without persisting", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		mock.setActiveTools(["tool-a"]);
+		const spec = makeSpec({ names: new Set(["tool-a"]) });
+		defineToolset(pi, spec);
+
+		const changed: { id: string; enabled: boolean }[] = [];
+		mock.events.on(TOOLSET_EVENTS.changed, (data: any) => changed.push(data));
+
+		applyToolsetEnabled(pi, spec, false);
+
+		expect(mock.getActiveTools()).not.toContain("tool-a");
+		expect(changed).toEqual([{ id: "test.toolset", enabled: false }]);
+		expect(mock.getEntries("toolset-state:test.toolset")).toHaveLength(0);
+	});
+
+	it("E3: emits member fanout when emitMemberEvents is set", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		const spec = makeSpec({
+			names: new Set(["tool-a"]),
+			emitMemberEvents: true,
+		});
+		defineToolset(pi, spec);
+
+		const changed: any[] = [];
+		mock.events.on(TOOLSET_EVENTS.changed, (data: any) => changed.push(data));
+
+		applyToolsetEnabled(pi, spec, true);
+
+		expect(changed).toEqual([
+			{ id: "test.toolset", enabled: true },
+			{ id: "test.toolset", enabled: true, member: "tool-a" },
+		]);
 	});
 });

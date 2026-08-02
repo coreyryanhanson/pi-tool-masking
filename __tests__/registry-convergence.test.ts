@@ -3,7 +3,7 @@ import { describe, it, expect } from "vitest";
 import { MockPI } from "./mock-pi.js";
 
 // ---------------------------------------------------------------------------
-// GlobalThis registry convergence tests (§6.1, §12)
+// GlobalThis registry convergence tests
 //
 // These tests prove the toolset registry lives on globalThis, not in module
 // state. They use cache-busting dynamic import queries to simulate isolated
@@ -33,9 +33,9 @@ beforeEach(() => {
 	cleanRegistry();
 });
 
-describe("GlobalThis registry convergence (§6.1, §12)", () => {
+describe("GlobalThis registry convergence", () => {
 	// NOTE: baseline registry tests (initialization, same-Map identity) live
-	// in core.test.ts "Registry (§6.1)" — this file covers only the scenarios
+	// in core.test.ts "Registry" — this file covers only the scenarios
 	// that require dynamic imports with cache-busting.
 
 	it("two module instances via dynamic import share the same globalThis registry", async () => {

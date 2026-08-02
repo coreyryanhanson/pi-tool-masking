@@ -134,7 +134,7 @@ export class MockPI implements Partial<ExtensionAPI> {
 		const handlers = this._handlers.get(event) ?? [];
 		const ctx = this.createContext();
 		// Create ONE event object — the real runner passes the same reference
-		// to every extension's handler (§6 event-identity dedup).
+		// to every extension's handler (event-identity dedup).
 		const eventObj = {};
 		for (const h of handlers) {
 			h(eventObj, ctx);
@@ -172,7 +172,9 @@ export class MockPI implements Partial<ExtensionAPI> {
 			cwd: "/mock",
 			modelRegistry: {} as any,
 			model: undefined,
+			scopedModels: [],
 			isIdle: () => true,
+			isProjectTrusted: () => false,
 			signal: undefined,
 			abort: () => {},
 			hasPendingMessages: () => false,
