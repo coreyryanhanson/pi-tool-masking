@@ -44,6 +44,16 @@ export interface ToolsetChangedEvent {
 	member?: string;
 }
 
+/**
+ * How toolsets with no persisted branch entry resolve on restore.
+ *
+ * @deprecated The `"inclusion"` member is deprecated since 1.2.0 — use
+ * `"allowlist"` for focus-style suppression (a finite, branch-persisted set
+ * whose complement is computed at restore), or `"exclusion"` for the
+ * default-on floor. `"inclusion"` still works (with a one-time runtime
+ * warning) through the deprecation window; it is scheduled for removal in a
+ * near-term 1.x minor.
+ */
 export type DefaultResolutionMode = "exclusion" | "inclusion" | "allowlist";
 
 // ---------------------------------------------------------------------------
@@ -85,6 +95,28 @@ function getRegistry(): Registry {
 
 const MODULE_KEY = "__piToolMaskingModuleState";
 const MODE_PERSIST_KEY = "toolset-resolution-mode";
+const DEPRECATION_WARNED_KEY = "__piToolMaskingDeprecationWarned";
+
+const INCLUSION_DEPRECATED_MESSAGE =
+	'[pi-tool-masking] "inclusion" resolution mode is deprecated since 1.2.0 ' +
+	'and will be removed in a coming 1.x minor; use "allowlist" for focus suppression.';
+
+// Once-per-process-per-site dedup for the inclusion deprecation warning.
+// Keyed by trigger site (`"setDefaultResolutionMode"` / `"doRestore"`), not
+// per call — "you're on the deprecated path" needs saying once per entry
+// point. Lives on globalThis (like the registry and module state) so a
+// /reload, which re-evals modules in the same process, does not re-warn.
+function warnInclusionDeprecation(
+	site: "setDefaultResolutionMode" | "doRestore",
+): void {
+	if (!(DEPRECATION_WARNED_KEY in globalThis)) {
+		(globalThis as any)[DEPRECATION_WARNED_KEY] = new Set<string>();
+	}
+	const warned = (globalThis as any)[DEPRECATION_WARNED_KEY] as Set<string>;
+	if (warned.has(site)) return;
+	warned.add(site);
+	console.warn(INCLUSION_DEPRECATED_MESSAGE);
+}
 
 interface ModuleState {
 	defaultResolutionMode: DefaultResolutionMode;
@@ -194,6 +226,11 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 					: "exclusion";
 		const ms = getModuleState();
 		ms.defaultResolutionMode = mode;
+		// Deprecation: resolving a branch mode entry to "inclusion" is the
+		// deprecated path (fires on /reload of a session that last set
+		// inclusion). warnInclusionDeprecation dedups once per process per
+		// trigger site.
+		if (mode === "inclusion") warnInclusionDeprecation("doRestore");
 		// Mirror the allowlist into module state so the parameterless
 		// `getActiveAllowlist()` can read it — branch is the source of truth,
 		// module state is the live mirror (same pattern as
@@ -592,11 +629,27 @@ export function defineToolset(pi: ExtensionAPI, spec: ToolsetSpec): Toolset {
 	return toolset;
 }
 
+/**
+ * Set how toolsets with no persisted entry resolve on restore.
+ *
+ * - `"exclusion"` (default): toolsets fall back to `defaultEnabled ?? true`.
+ * - `"allowlist"` (ids): only the listed toolset ids are on, everything else
+ *   off — the finite, branch-persisted focus constraint, resilient to
+ *   toolsets installed after the mode was set. Requires a non-empty array.
+ * - `"inclusion"`: all unknown toolsets default off.
+ *
+ * @deprecated The `"inclusion"` mode is deprecated since 1.2.0 — use
+ * `"allowlist"` for focus-style suppression (or `"exclusion"` for the
+ * default-on floor). Setting `"inclusion"` emits a one-time runtime warning;
+ * it is scheduled for removal in a near-term 1.x minor.
+ */
 export function setDefaultResolutionMode(
 	pi: ExtensionAPI,
 	mode: DefaultResolutionMode,
 	allowlist?: string[],
 ): void {
+	if (mode === "inclusion")
+		warnInclusionDeprecation("setDefaultResolutionMode");
 	if (mode !== "exclusion" && mode !== "inclusion" && mode !== "allowlist") {
 		throw new Error(
 			`[pi-tool-masking] Invalid defaultResolutionMode: "${mode}". Must be "exclusion", "inclusion", or "allowlist".`,

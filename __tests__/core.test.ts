@@ -39,11 +39,13 @@ function createEnv(): { mock: MockPI; pi: ExtensionAPI } {
 const REGISTRY_KEY = "__piToolMaskingRegistry";
 const RESTORE_EVENT_KEY = "__piToolMaskingLastRestoreEvent";
 const MODULE_STATE_KEY = "__piToolMaskingModuleState";
+const DEPRECATION_WARNED_KEY = "__piToolMaskingDeprecationWarned";
 
 function cleanRegistry(): void {
 	delete (globalThis as any)[REGISTRY_KEY];
 	delete (globalThis as any)[RESTORE_EVENT_KEY];
 	delete (globalThis as any)[MODULE_STATE_KEY];
+	delete (globalThis as any)[DEPRECATION_WARNED_KEY];
 }
 
 function makeSpec(
@@ -1047,6 +1049,46 @@ describe("Default resolution mode", () => {
 		expect(() => (setDefaultResolutionMode as any)(pi, "invalid")).toThrow(
 			'[pi-tool-masking] Invalid defaultResolutionMode: "invalid". Must be "exclusion", "inclusion", or "allowlist".',
 		);
+	});
+});
+
+// ===================================================================
+// Inclusion deprecation — runtime warning
+// ===================================================================
+
+describe("Inclusion mode deprecation warning", () => {
+	it('setDefaultResolutionMode("inclusion") warns once; suppressed on repeat', () => {
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const { pi } = createEnv();
+		setDefaultResolutionMode(pi, "inclusion");
+		setDefaultResolutionMode(pi, "inclusion");
+		setDefaultResolutionMode(pi, "exclusion");
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		expect(warnSpy).toHaveBeenCalledWith(
+			expect.stringContaining(
+				'"inclusion" resolution mode is deprecated since 1.2.0',
+			),
+		);
+		warnSpy.mockRestore();
+	});
+
+	it('doRestore resolving an "inclusion" branch mode entry warns once; suppressed on repeat', () => {
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const { mock, pi } = createEnv();
+		// Handler registration happens via defineToolset; the branch carries a
+		// legacy "inclusion" mode entry (written before the upgrade).
+		defineToolset(pi, makeSpec());
+		mock.appendEntry("toolset-resolution-mode", { mode: "inclusion" });
+		mock.fireLifecycleEvent("session_start");
+		mock.fireLifecycleEvent("session_start");
+		expect(getDefaultResolutionMode()).toBe("inclusion"); // still resolved
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		expect(warnSpy).toHaveBeenCalledWith(
+			expect.stringContaining(
+				'"inclusion" resolution mode is deprecated since 1.2.0',
+			),
+		);
+		warnSpy.mockRestore();
 	});
 });
 

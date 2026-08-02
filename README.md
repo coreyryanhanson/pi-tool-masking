@@ -89,14 +89,15 @@ Register a toolset and receive a `Toolset` handle (`enable`, `disable`, `isEnabl
 
 **Idempotent re-registration:** calling `defineToolset` with the same `spec.id` and an unchanged spec returns the existing toolset. This is safe across `/reload`.
 
-### `setDefaultResolutionMode(pi, mode)`
+### `setDefaultResolutionMode(pi, mode, allowlist?)`
 
-Switch how toolsets with no persisted state resolve on restore. Two modes:
+Switch how toolsets with no persisted state resolve on restore. Three modes:
 
 | Mode | Behavior on restore (no persisted entry) |
 |---|---|
 | `"exclusion"` (default) | Toolsets default **on** if `defaultEnabled` is true, **off** otherwise |
-| `"inclusion"` | All unknown toolsets default **off** — useful for focus-mode "only these tools" workflows |
+| `"inclusion"` (@deprecated since 1.2.0) | All unknown toolsets default **off** — a weaker, unbounded floor. Use `"allowlist"` instead for focus-style "only these tools" suppression |
+| `"allowlist"` | Only the listed toolset ids are **on**, everything else **off** — a finite, branch-persisted set whose complement is computed at restore, resilient to toolsets installed later. Pass the array as the third argument: `setDefaultResolutionMode(pi, "allowlist", ["my-plugin.web"])` |
 
 ### `getDefaultResolutionMode()`
 
@@ -121,7 +122,7 @@ Return a read-only snapshot of every registered toolset (`{ spec, toolset }`). N
 | `Toolset` | Handle returned by `defineToolset` |
 | `ToolsetChangedEvent` | Shape of events emitted by `TOOLSET_EVENTS` |
 | `RegistryEntry` | `{ spec: ToolsetSpec; toolset: Toolset }` — a single registered toolset |
-| `DefaultResolutionMode` | `"exclusion" \| "inclusion"` |
+| `DefaultResolutionMode` | `"exclusion" \| "inclusion" \| "allowlist"` |
 
 ---
 
@@ -206,15 +207,18 @@ pi.events.on(TOOLSET_EVENTS.restored, (event) => {
 });
 ```
 
-### Focus mode (inclusion resolution)
+### Focus mode (allowlist resolution)
 
 ```ts
 import { setDefaultResolutionMode, getRegisteredToolsets } from "pi-tool-masking";
 
-// Enter focus: set inclusion mode so unknown toolsets stay off
-setDefaultResolutionMode(pi, "inclusion");
+// Enter focus: allowlist mode keeps only the listed toolsets on — restore
+// applies it on the next /reload, and the loop below applies it live.
+// "inclusion" (deprecated) cannot guarantee this: a toolset installed after
+// focus leaks on, because the set of "on" toolsets was never recorded.
+setDefaultResolutionMode(pi, "allowlist", ["my-plugin.web"]);
 
-// Enable only the allowlisted toolsets
+// Apply live: enable only the allowlisted toolsets
 const allowlist = new Set(["my-plugin.web"]);
 for (const entry of getRegisteredToolsets()) {
  if (allowlist.has(entry.spec.id)) {
