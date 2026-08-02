@@ -1035,18 +1035,22 @@ function mutateSettingsJson(
  *     (data-loss guard — would destroy unparsable user config).
  *   - `JSON.parse` throws → **throw** (same reason).
  *
+ * Returns the path of the settings file the entries were merged into
+ * (whether or not any entry actually changed — the file is the write
+ * destination either way).
+ *
  * @public
  */
 export function writeToolsetDefaults(
 	entries: ToolsetDefaultsMap,
 	scope: "global" | "project",
-): void {
+): string {
 	// Seam path: merge into memory
 	if (_settingsWriterOverride !== null) {
 		for (const [key, val] of Object.entries(entries)) {
 			_settingsWriterOverride[scope][key] = { enabled: val.enabled };
 		}
-		return;
+		return settingsPath(scope);
 	}
 
 	mutateSettingsJson(scope, (existing) => {
@@ -1072,6 +1076,7 @@ export function writeToolsetDefaults(
 		existing.toolsetDefaults = td;
 		return true;
 	});
+	return settingsPath(scope);
 }
 
 /**
@@ -1080,17 +1085,19 @@ export function writeToolsetDefaults(
  * toolset in that scope falls back to tier 3 (packaged default, or
  * `spec.defaultEnabled ?? true`).
  *
- * Returns `true` if the key existed and was removed, `false` if it was
- * already absent (or the file was missing). No per-entry clear path by
- * design — callers who want that write an `entries` map without the
- * unwanted keys via `writeToolsetDefaults`.
+ * Returns the path of the settings file the key was removed from, or
+ * `null` if the key was already absent (or the file was missing). No
+ * per-entry clear path by design — callers who want that write an
+ * `entries` map without the unwanted keys via `writeToolsetDefaults`.
  *
  * **Malformed-file guard:** same as `writeToolsetDefaults` — throws on
  * non-object or unparsable JSON rather than overwriting user config.
  *
  * @public
  */
-export function clearToolsetDefaults(scope: "global" | "project"): boolean {
+export function clearToolsetDefaults(
+	scope: "global" | "project",
+): string | null {
 	// Seam path: clear all keys in memory
 	if (_settingsWriterOverride !== null) {
 		const state = _settingsWriterOverride[scope];
@@ -1098,14 +1105,16 @@ export function clearToolsetDefaults(scope: "global" | "project"): boolean {
 		for (const key of keys) {
 			delete state[key];
 		}
-		return keys.length > 0;
+		return keys.length > 0 ? settingsPath(scope) : null;
 	}
 
 	return mutateSettingsJson(scope, (existing) => {
 		if (!("toolsetDefaults" in existing)) return false; // no write, no reformat
 		delete existing.toolsetDefaults;
 		return true;
-	});
+	})
+		? settingsPath(scope)
+		: null;
 }
 
 /**

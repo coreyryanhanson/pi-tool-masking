@@ -2822,7 +2822,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 		}
 	});
 
-	it("W3: clearToolsetDefaults empties scope and returns correct boolean", () => {
+	it("W3: clearToolsetDefaults empties scope and returns path (null when empty)", () => {
 		const state = {
 			global: {
 				"toolset-state:x": { enabled: true },
@@ -2832,12 +2832,14 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 		};
 		setSettingsWriterOverrideForTests(state);
 		try {
-			expect(clearToolsetDefaults("global")).toBe(true);
+			expect(clearToolsetDefaults("global")).toEqual(
+				expect.stringContaining("settings.json"),
+			);
 			expect(state.global).toEqual({});
 
-			expect(clearToolsetDefaults("global")).toBe(false);
+			expect(clearToolsetDefaults("global")).toBeNull();
 
-			expect(clearToolsetDefaults("project")).toBe(false);
+			expect(clearToolsetDefaults("project")).toBeNull();
 		} finally {
 			setSettingsWriterOverrideForTests(null);
 		}
@@ -3050,9 +3052,9 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 			expect(readFileSync(settingsPath, "utf-8")).toBe(before);
 		});
 
-		it("W6b3: clearToolsetDefaults returns false for missing file", () => {
+		it("W6b3: clearToolsetDefaults returns null for missing file", () => {
 			// No .pi/settings.json written — file doesn't exist
-			expect(clearToolsetDefaults("project")).toBe(false);
+			expect(clearToolsetDefaults("project")).toBeNull();
 		});
 	});
 
@@ -3117,7 +3119,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 			const settingsPath = join(tmpDir, ".pi", "settings.json");
 
 			const result = clearToolsetDefaults("project");
-			expect(result).toBe(true);
+			expect(result).toBe(settingsPath);
 
 			const raw = JSON.parse(readFileSync(settingsPath, "utf-8"));
 			expect(raw.provider).toBe("anthropic");
@@ -3125,10 +3127,10 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 			expect(raw.toolsetDefaults).toBeUndefined();
 		});
 
-		it("W7c: clearToolsetDefaults returns false when no toolsetDefaults key", () => {
+		it("W7c: clearToolsetDefaults returns null when no toolsetDefaults key", () => {
 			// Remove the key first
 			clearToolsetDefaults("project");
-			expect(clearToolsetDefaults("project")).toBe(false);
+			expect(clearToolsetDefaults("project")).toBeNull();
 
 			// Other keys still intact
 			const raw = JSON.parse(

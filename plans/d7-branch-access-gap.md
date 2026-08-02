@@ -63,7 +63,7 @@ it to justify a parameterless `getActiveAllowlist()`. But D7's helpers take
 `pi: ExtensionAPI` **and need branch reads**. Same fact, opposite conclusion.
 One of D5 or D7 is wrong.
 
-The pi-tbox design doc (`/root/pi-tbox/docs/focus-and-restore-revision.md:255-286`)
+The pi-tbox design doc (`/root/pi-tbox/docs/defaults-and-focus-unified-plan.md`)
 carries the same broken pattern (`pi.sessionManager.getBranch()`), and the
 current plan's "How G dissolves restore" flow calls `clearAllToolsetEntries(pi)`
 from a command handler — where `ctx` (not `pi`) is the object with branch access.
@@ -163,9 +163,8 @@ export function clearToolsetEntry(
 
 Call site: `clearAllToolsetEntries(pi, ctx.sessionManager.getBranch())`.
 
-Note this also means the **pi-tbox design doc** (`focus-and-restore-revision.md`)
-needs the same correction wherever it reads `pi.sessionManager` (lines 255–286,
-485) — that doc is slated for revision anyway per the plan's scope note.
+Note this also means the **pi-tbox design doc** (`defaults-and-focus-unified-plan.md`)
+needs the same correction wherever it reads `pi.sessionManager` — that doc is slated for revision anyway per the plan's scope note.
 
 ## Files / tests affected if we revise
 
@@ -177,6 +176,6 @@ needs the same correction wherever it reads `pi.sessionManager` (lines 255–286
 - `__tests__/core.test.ts`: BT1–BT4 test call sites (`clearToolsetEntry(pi, …)`
   → add branch arg, or change assertions under option B).
 - `plans/settings-tier-and-allowlist-mode.md` D7 + test-scope paragraph.
-- `/root/pi-tbox/docs/focus-and-restore-revision.md` (downstream).
+- `/root/pi-tbox/docs/defaults-and-focus-unified-plan.md` (downstream).
 - `applyToolsetEnabled` (D8) is **unaffected** — it takes `pi`, but only
   touches `setActiveTools`/events, no branch read.

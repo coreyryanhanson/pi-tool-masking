@@ -21,7 +21,7 @@ they land and test together.
 **Scope:** `pi-tool-masking` only. `pi-tbox` adoption is a downstream
 sprint anchored to the published `1.2.0`; it is **not** in this PR. The
 pi-tbox-side design lives in
-[`docs/focus-and-restore-revision.md`](../../docs/focus-and-restore-revision.md)
+[`docs/defaults-and-focus-unified-plan.md`](../../docs/defaults-and-focus-unified-plan.md)
 and will be revised to consume the surface defined here.
 
 ## Problem
