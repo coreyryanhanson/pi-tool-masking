@@ -2,7 +2,13 @@
 
 **Target version:** `1.2.0` (minor, unreleased). One PR, two features that
 ship together. Additive in public API — no export removed or renamed, no
-existing caller's behavior changed.
+existing caller's behavior changed. **`inclusion` mode is deprecated**
+(JSDoc + runtime warning) in this release; removal follows after a few
+`1.x` minors (breaking, flagged in CHANGELOG — see
+[`deprecate-inclusion-mode.md`](./deprecate-inclusion-mode.md)).
+`allowlist` is the mode `inclusion` should have been — a finite
+branch-persisted constraint rather than an unbounded floor — so `inclusion`
+is retained only for a deprecation window, not indefinitely.
 
 **Supersedes:**
 [`settings-json-defaults.md`](./settings-json-defaults.md) and
@@ -127,10 +133,16 @@ through." Mode stays branch-persisted only.
 ### D3 — Add `"allowlist"` as a third resolution mode (idea G)
 
 `DefaultResolutionMode` becomes `"exclusion" | "inclusion" | "allowlist"`.
-**Additive** — `"exclusion"` and `"inclusion"` are unchanged, no caller
-breaks, no deprecation. `inclusion` stays as-is for any current or future
-consumer that wants a weak floor; `pi-tbox`'s focus switches to
-`"allowlist"`.
+**Additive** — `"exclusion"` is unchanged, no caller breaks. `"inclusion"`
+remains accepted but is **deprecated** in this release (JSDoc `@deprecated`
+on the type member + `setDefaultResolutionMode`, plus a one-time runtime
+warning when a caller sets or restores to `"inclusion"`). `pi-tbox`'s focus
+switches to `"allowlist"`. `allowlist` is the correct implementation of the
+intent `inclusion` was reaching for (a finite, branch-persisted constraint
+resilient to future installs); `inclusion`'s unbounded floor is retained
+only for the deprecation window, not as a long-term second mode. See
+[`deprecate-inclusion-mode.md`](./deprecate-inclusion-mode.md) for the
+removal schedule.
 
 The allowlist is a **finite array of toolset ids stored in the branch
 mode entry**. The suppression (the complement) is **computed by the
@@ -664,7 +676,9 @@ the fundamental flaw; dropping it is the point.
 - **Settings tier is sound and independently useful.** `toolsetDefaults`
   solves the real "users can't durably override defaults" problem
   regardless of focus.
-- **Backward compat preserved.** No export removed. `inclusion` stays.
+- **Backward compat preserved.** No export removed. `inclusion` stays
+  *accepted* but is **deprecated** this release (warning, not removal) —
+  see [`deprecate-inclusion-mode.md`](./deprecate-inclusion-mode.md).
   No existing caller appends an allowlist entry, so the new top tier is a
   no-op today. No settings file carries `toolsetDefaults` yet, so the
   settings tier is a no-op for existing installs.
@@ -684,11 +698,17 @@ the fundamental flaw; dropping it is the point.
   that would make saved configs resilient too, and it's a clean future
   addition (a `toolsetAllowlist` settings key read when no branch mode
   entry wins). Not in this release.
-- **`inclusion` mode is now dead-ish code.** No consumer will use it
-  after pi-tbox switches to `allowlist`. It stays for compat (public
-  export, other consumers may exist). The `doRestore` inclusion floor
-  branch stays too. Cost: a few lines of dead-but-correct logic. Better
-  than a breaking major-version removal.
+- **`inclusion` mode is deprecated, not yet removed.** No consumer will
+  use it after pi-tbox switches to `allowlist`; it is marked `@deprecated`
+  and emits a one-time runtime warning when set or restored to. The
+  `doRestore` inclusion floor branch stays functional through the
+  deprecation window (behavior unchanged for any external caller still on
+  `"inclusion"`). Removal — deleting the type member, the `setDefault
+  ResolutionMode` acceptance, the restore branch, and its tests — is
+  scheduled for a near-term `1.x` minor in
+  [`deprecate-inclusion-mode.md`](./deprecate-inclusion-mode.md). Cost
+  during the window: a few lines of deprecated-but-correct logic plus the
+  warning.
 - **Allowlist restore doesn't re-run the `requires` cascade.** Caller
   must pass the forward closure. Documented in the JSDoc. Same invariant
   as today's per-toolset restore.
@@ -862,6 +882,10 @@ scaffolding into history and gives a clean commit story.
 - **`toolsetAllowlist` settings key** for resilient saved configs on
   fresh sessions. Clean future addition; not needed for the concession.
 - **pi-core compact-toolset-entries op** (tombstone accumulation ceiling).
-- **Removing or deprecating `inclusion` mode.** Stays as-is. No
-  deprecation comment needed — it's a valid mode that pi-tbox happens not
-  to use after this lands.
+- **Removing `inclusion` mode (the removal half of deprecation).** The
+  deprecation (JSDoc + runtime warning) lands with `1.2.0` in this PR;
+  the actual deletion of the `"inclusion"` type member, its
+  `setDefaultResolutionMode` acceptance, the `doRestore` inclusion floor
+  branch, and its tests is deferred to a near-term `1.x` minor (breaking,
+  flagged in CHANGELOG). Tracked in
+  [`deprecate-inclusion-mode.md`](./deprecate-inclusion-mode.md).
