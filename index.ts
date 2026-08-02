@@ -661,7 +661,10 @@ export function setDefaultResolutionMode(
 	// missing/non-array allowlist to `[]` (fail closed). Write-time validates
 	// intent; restore-time picks the safe recovery. Forward references are
 	// legal — ids need not be registered yet.
-	if (mode === "allowlist" && (!allowlist || allowlist.length === 0)) {
+	if (
+		mode === "allowlist" &&
+		(!allowlist || !Array.isArray(allowlist) || allowlist.length === 0)
+	) {
 		throw new Error(
 			`[pi-tool-masking] defaultResolutionMode "allowlist" requires a non-empty allowlist array of toolset ids.`,
 		);

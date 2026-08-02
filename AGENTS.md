@@ -70,10 +70,20 @@ they do NOT test, commit, tag, or publish.
 | Export | Notes |
 |---|---|
 | `defineToolset(pi, spec)` | Idempotent re-registration by `spec.id` |
-| `setDefaultResolutionMode(pi, mode)` | `"exclusion"` (default) or `"inclusion"` |
-| `getDefaultResolutionMode(pi)` | Read current mode |
+| `setDefaultResolutionMode(pi, mode, allowlist?)` | `"exclusion"` (default), `"inclusion"` (deprecated since 1.2.0), or `"allowlist"` (requires `allowlist: string[]`) |
+| `getDefaultResolutionMode()` | Read current mode (no `pi` argument) |
+| `getActiveAllowlist()` | Copy-on-read mirror of the active allowlist, or `undefined` when not in allowlist mode |
 | `getRegisteredToolsets()` | Pure registry read — no `pi` argument needed |
+| `clearToolsetEntry(pi, persistKey, branch)` / `clearAllToolsetEntries(pi, branch)` | Write a null tombstone (single / all) so restore supersedes stale persisted state |
+| `applyToolsetEnabled(pi, spec, enabled)` | Apply a single toggle through the `requires` cascade — live-apply without writing a branch entry (used by tbox) |
+| `readToolsetDefaults(scope)` / `readMergedToolsetDefaults()` | Read `toolsetDefaults` from one scope / merged global+project |
+| `writeToolsetDefaults(entries, scope)` / `clearToolsetDefaults(scope)` | Mutate / clear `toolsetDefaults` settings |
+| `getEffectiveDefault(spec, snapshot?)` | Resolve a toolset's effective default through mode + settings tiers |
+| `parseToolsetDefaults(json)` / `mergeToolsetDefaults(...)` | Pure parse / merge helpers for `toolsetDefaults` |
+| `MalformedSettingsError` | Thrown by reader/writer on unparseable settings JSON |
 | `TOOLSET_EVENTS` | `changed`, `restored` |
+
+`setSettingsOverrideForTests` / `setSettingsWriterOverrideForTests` are test seams, not public API.
 
 ## Architecture notes
 
