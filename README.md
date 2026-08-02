@@ -16,7 +16,7 @@ Without `pi-tool-masking`, every pi extension that toggles tools reimplements th
 4. On `session_start` / `session_tree`, walk the branch for persisted entries and re-apply state.
 5. Emit events so side-effect owners (status bars, pickers) can re-render.
 
-`pi-tool-masking` does all of that in one call: `defineToolset(pi, spec)`. It also adds dependency cascading (enabling a toolset auto-enables its dependencies) and reverse cascading (disabling a toolset auto-disables dependents).
+`pi-tool-masking` does all of that in one call: `defineToolset(pi, spec)`. It also adds dependency cascading (enabling a toolset auto-enables its dependencies) and reverse cascading (disabling a toolset auto-disables dependents), plus a settings tier for per-scope defaults and allowlist mode for reliable focus across reloads.
 
 ---
 
