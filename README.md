@@ -103,6 +103,10 @@ Switch how toolsets with no persisted state resolve on restore. Three modes:
 
 Read the current default resolution mode. Returns `"exclusion"` until a session restore loads the persisted mode.
 
+### `getActiveAllowlist()`
+
+Read the live allowlist array from module state. Returns the `string[]` when the active mode is `"allowlist"`, otherwise `undefined`. Parameterless (like `getDefaultResolutionMode`) — the downstream call site receives `ExtensionAPI`, which doesn't expose `sessionManager`, so the branch can't be read there. The branch remains the source of truth; module state is the live mirror, snapped from the last mode branch entry by `doRestore` (and by `setDefaultResolutionMode` when it appends the entry). A consumer consults this to keep toolsets registered *after* focus was entered off.
+
 ### `getRegisteredToolsets()`
 
 Return a read-only snapshot of every registered toolset (`{ spec, toolset }`). No `pi` argument needed — pure registry read.
@@ -123,8 +127,57 @@ Return a read-only snapshot of every registered toolset (`{ spec, toolset }`). N
 | `ToolsetChangedEvent` | Shape of events emitted by `TOOLSET_EVENTS` |
 | `RegistryEntry` | `{ spec: ToolsetSpec; toolset: Toolset }` — a single registered toolset |
 | `DefaultResolutionMode` | `"exclusion" \| "inclusion" \| "allowlist"` |
+| `MalformedSettingsError` | Thrown by `writeToolsetDefaults` / `clearToolsetDefaults` when settings.json is corrupt or non-object (never silently overwritten). Catch with `instanceof`. |
 
 ---
+
+## Toolset defaults (settings tier)
+
+A toolset's fresh-session default is no longer locked to its packaged `spec.defaultEnabled`. Users can pin `{ enabled: boolean }` under a reserved `toolsetDefaults` key in pi-core settings, keyed by the toolset's full `persistKey` — without toggling (which writes a session-scoped chat-branch entry). The library reads both files itself inside `doRestore`, fresh on each `/reload`, so downstream consumers no longer need to reinvent a settings reader to inject values into `spec.defaultEnabled` before `defineToolset`.
+
+Restore resolves each toolset's default in this order (first hit wins):
+
+1. **Chat-branch entry** — the last `appendEntry(persistKey, …)` on this branch. A `null` tombstone (see [`clearToolsetEntry`](#tombstone-helpers)) falls through to tier 2.
+2. **Settings pin** — `toolsetDefaults[persistKey].enabled`, merged global → project (project wins per entry). Mode-agnostic.
+3. **Packaged default** — `spec.defaultEnabled ?? true`, filtered by resolution mode for unpinned toolsets only.
+
+Settings pins are honored in all three modes, mirroring how chat-branch entries are honored — only unpinned toolsets consult mode for the floor.
+
+### `readMergedToolsetDefaults()`
+
+Read and merge `toolsetDefaults` from global (`~/.pi/agent/settings.json`, or `$PI_CODING_AGENT_DIR/settings.json`) and project (`<cwd>/.pi/settings.json`) settings. Project overrides global per entry. Missing/unreadable/malformed files contribute `{}`. Never throws. Returns `Record<persistKey, { enabled: boolean }>`. Read once per loop and pass the snapshot to `getEffectiveDefault` to avoid re-reading disk per toolset.
+
+### `readToolsetDefaults(scope)`
+
+Read one scope's raw `toolsetDefaults` block (no merge). `scope` is `"global"` or `"project"`. Same never-throw policy. Use for `defaults show`-style commands that need per-scope attribution.
+
+### `writeToolsetDefaults(entries, scope)`
+
+Merge a batch of `{ [persistKey]: { enabled } }` entries into one scope's `toolsetDefaults`, preserving every other top-level key and every existing entry not in `entries`. A write where every entry already matches its on-disk value is a no-op (no reformat, no mtime bump). Returns the settings file path. **Throws `MalformedSettingsError`** if the file exists but parses to a non-object or is unparsable — a corrupt file is never silently overwritten.
+
+### `clearToolsetDefaults(scope)`
+
+Remove the `toolsetDefaults` wrapper key entirely from one scope, preserving every other top-level key. Returns the path removed from, or `null` if the key was already absent (or the file missing). No per-entry clear by design — write an `entries` map without the unwanted keys via `writeToolsetDefaults`. Same `MalformedSettingsError` guard.
+
+### `getEffectiveDefault(spec, snapshot?)`
+
+Resolve a toolset's effective fresh-session default: settings tier (2) then packaged `spec.defaultEnabled ?? true` (3). **Ignores resolution mode** — callers needing mode-aware behavior must consult `getDefaultResolutionMode()` themselves. Pass an explicit `snapshot` (from `readMergedToolsetDefaults()`) when looping over multiple toolsets; omit it for a one-off (it performs its own read).
+
+## Tombstone helpers
+
+Within pi-core's append-only `SessionManager`, a toolset's chat-branch entry can't be deleted — but a `null` tombstone appended after the last entry makes `doRestore` fall through to the settings tier so settings re-assert. Tombstones are dedup'd (no-op when the last entry is already cleared) and never written for never-toggled toolsets. A later manual toggle appends after the tombstone and supersedes it.
+
+### `clearToolsetEntry(pi, persistKey, branch)`
+
+Append a `null` tombstone for one toolset's branch entry (dedup'd). `branch` is the caller's `ctx.sessionManager.getBranch()` snapshot — `ExtensionAPI` exposes `appendEntry` but not `sessionManager`, so the dedup read comes from the caller.
+
+### `clearAllToolsetEntries(pi, branch)`
+
+Tombstone every registered toolset's branch entry (dedup'd per toolset). Covers exactly the toolsets in the global registry.
+
+### `applyToolsetEnabled(pi, spec, enabled)`
+
+Apply a toolset's enabled state via `setActiveTools` and emit `TOOLSET_EVENTS.changed` **without** writing a branch entry — the live-apply half of a settings restore (pull a toolset to its settings/packaged default without persisting a chat-branch pin).
 
 ## ToolsetSpec fields
 
@@ -286,7 +339,9 @@ ids with a stable namespace (<product-family>.<subset>, e.g. "foo.web").
 
 - **Registration:** `defineToolset` stores the spec and handle in a global registry (shared across module instances, so multiple extensions see the same toolsets).
 - **Persistence:** each toolset writes `{ enabled }` entries under its `persistKey` on the session branch. On `session_start` or `session_tree`, the library re-reads the branch and applies the last persisted state.
-- **Default resolution:** a single `toolset-resolution-mode` entry on the branch controls whether unknown toolsets default on or off. This is set by `setDefaultResolutionMode` and persists across reloads.
+- **Default resolution:** a `toolset-resolution-mode` entry on the branch controls how toolsets with no persisted state resolve on restore — `exclusion` (on/off by `defaultEnabled`), `inclusion` (deprecated unbounded floor), or `allowlist` (a finite branch-persisted array whose complement is computed at restore). Set by `setDefaultResolutionMode`, persists across reloads.
+- **Defaults tiers:** each toolset's restore default resolves chat-branch entry → `toolsetDefaults` settings pin → packaged `spec.defaultEnabled`, filtered by resolution mode for unpinned toolsets only. Settings pins are read fresh from disk on each restore.
+- **Null-tombstone-aware restore:** a `null` last branch entry (written by `clearToolsetEntry`) falls through to the settings tier instead of any stale prior entry; mode resolution is likewise null-tombstone-aware (`branchMode ?? "exclusion"`). Tombstones aren't sticky — a later toggle supersedes them.
 - **Events:** a live toggle emits only when state actually changes (no-op toggles are suppressed); restore always emits, so side-effect owners stay in sync across reloads and tree navigations.
 
 ---
