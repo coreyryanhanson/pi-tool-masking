@@ -73,6 +73,7 @@ beforeEach(() => {
 
 afterEach(() => {
 	setSettingsOverrideForTests(null);
+	setSettingsWriterOverrideForTests(null);
 });
 
 // ===================================================================

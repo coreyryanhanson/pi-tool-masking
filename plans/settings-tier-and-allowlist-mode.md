@@ -613,7 +613,7 @@ Localized to `ensureRestoreHandler`'s `doRestore`:
 | `readMergedToolsetDefaults()` | Merged settings reader (global + project, shallow per-entry merge). Returns `Record<persistKey, { enabled: boolean }>` — the on-disk shape, not flattened; call sites unwrap via `?.enabled`. |
 | `readToolsetDefaults(scope)` | Per-scope reader (for `show` attribution). |
 | `writeToolsetDefaults(entries, scope)` | Settings writer (for `save`). Preserves every non-`toolsetDefaults` key. |
-| `clearToolsetDefaults(scope)` | Settings clearer (for `clear`). Returns `true` if the block existed. |
+| `clearToolsetDefaults(scope)` | Settings clearer (for `clear`). Returns the path of the settings file the block was removed from, or `null` if it was already absent. |
 | `getEffectiveDefault(spec, snapshot?)` | Tier-2 (settings) then tier-3 (packaged) resolver. Ignores mode — caller checks allowlist mode separately. Reads `snapshot[spec.persistKey]?.enabled` from the same `readMergedToolsetDefaults()` shape, then falls back to `spec.defaultEnabled ?? true`. |
 | `clearToolsetEntry(pi, persistKey, branch)` | Tombstone one toolset branch entry (dedup'd). `branch` is the caller's `ctx.sessionManager.getBranch()` snapshot — see D7 / the [branch-access gap](./d7-branch-access-gap.md). |
 | `clearAllToolsetEntries(pi, branch)` | Tombstone all registered toolset branch entries. Same `branch` snapshot arg. |
