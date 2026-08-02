@@ -3121,7 +3121,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 				settingsPath,
 				JSON.stringify(
 					{
-						provider: "anthropic",
+						provider: "mistral",
 						theme: "x",
 						toolsetDefaults: {
 							"toolset-state:old": { enabled: false },
@@ -3148,7 +3148,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 			);
 
 			const raw = JSON.parse(readFileSync(settingsPath, "utf-8"));
-			expect(raw.provider).toBe("anthropic");
+			expect(raw.provider).toBe("mistral");
 			expect(raw.theme).toBe("x");
 			expect(raw.toolsetDefaults["toolset-state:old"]).toEqual({
 				enabled: false,
@@ -3165,7 +3165,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 			expect(result).toBe(settingsPath);
 
 			const raw = JSON.parse(readFileSync(settingsPath, "utf-8"));
-			expect(raw.provider).toBe("anthropic");
+			expect(raw.provider).toBe("mistral");
 			expect(raw.theme).toBe("x");
 			expect(raw.toolsetDefaults).toBeUndefined();
 		});
@@ -3179,7 +3179,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 			const raw = JSON.parse(
 				readFileSync(join(tmpDir, ".pi", "settings.json"), "utf-8"),
 			);
-			expect(raw.provider).toBe("anthropic");
+			expect(raw.provider).toBe("mistral");
 		});
 	});
 
