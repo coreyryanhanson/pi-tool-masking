@@ -77,10 +77,10 @@ afterEach(() => {
 });
 
 // ===================================================================
-// §6.1 Registry
+// Registry
 // ===================================================================
 
-describe("Registry (§6.1)", () => {
+describe("Registry", () => {
 	it("initializes __piToolMaskingRegistry as a Map on globalThis", () => {
 		const { pi } = createEnv();
 		defineToolset(pi, makeSpec());
@@ -225,7 +225,7 @@ describe("defineToolset — restore handler registration", () => {
 		emitSpy.mockRestore();
 	});
 
-	// §10.1 / §6 — companion mirror during restore must stay consistent.
+	// Companion mirror during restore must stay consistent.
 	// A companion listening on `changed` for a base toolset fires synchronously
 	// inside the base's restore and `appendEntry`s for itself. The restore loop
 	// must re-read the branch per toolset so the companion's own restore sees
@@ -251,7 +251,7 @@ describe("defineToolset — restore handler registration", () => {
 		defineToolset(pi, baseSpec);
 		const comp = defineToolset(pi, compSpec);
 
-		// Companion co-activation: mirror base `changed` only (§10.1).
+		// Companion co-activation: mirror base `changed` only.
 		pi.events.on(TOOLSET_EVENTS.changed, (data: any) => {
 			if (data.id === "base") {
 				if (data.enabled) comp.enable(pi);
@@ -593,10 +593,10 @@ describe("defineToolset — name-overlap guard", () => {
 });
 
 // ===================================================================
-// Toolset.enable (§9, §4.1)
+// Toolset.enable
 // ===================================================================
 
-describe("Toolset.enable (§9, §4.1)", () => {
+describe("Toolset.enable", () => {
 	it("activates toolset names and appends entry", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
@@ -667,10 +667,10 @@ describe("Toolset.enable (§9, §4.1)", () => {
 });
 
 // ===================================================================
-// Toolset.disable (§9)
+// Toolset.disable
 // ===================================================================
 
-describe("Toolset.disable (§9)", () => {
+describe("Toolset.disable", () => {
 	it("removes toolset names from active set and appends entry", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
@@ -739,10 +739,10 @@ describe("Toolset.disable (§9)", () => {
 });
 
 // ===================================================================
-// §9 invariant: disable reads from getActiveTools, not getAllTools
+// Invariant: disable reads from getActiveTools, not getAllTools
 // ===================================================================
 
-describe("§9 invariant — disable reads getActiveTools, not getAllTools", () => {
+describe("Invariant — disable reads getActiveTools, not getAllTools", () => {
 	it("disable does not re-activate tools in getAllTools but absent from getActiveTools", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "a", description: "" });
@@ -831,10 +831,10 @@ describe("Toolset.isEnabled", () => {
 });
 
 // ===================================================================
-// Toolset with empty names (§9)
+// Toolset with empty names
 // ===================================================================
 
-describe("Toolset with empty names (§9)", () => {
+describe("Toolset with empty names", () => {
 	it("enable does nothing and does not throw", () => {
 		const { mock, pi } = createEnv();
 		const ts = defineToolset(pi, makeSpec({ names: new Set([]) }));
@@ -857,10 +857,10 @@ describe("Toolset with empty names (§9)", () => {
 });
 
 // ===================================================================
-// Peer composition (§9 canonical test)
+// Peer composition (canonical test)
 // ===================================================================
 
-describe("Peer composition (§9 canonical test)", () => {
+describe("Peer composition (canonical test)", () => {
 	it("disable(A) does not re-activate B when disable(B) is called", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "a-only", description: "" });
@@ -920,10 +920,10 @@ describe("Peer composition (§9 canonical test)", () => {
 });
 
 // ===================================================================
-// getRegisteredToolsets (§5)
+// getRegisteredToolsets
 // ===================================================================
 
-describe("getRegisteredToolsets (§5)", () => {
+describe("getRegisteredToolsets", () => {
 	it("returns empty array when no toolsets registered", () => {
 		const result = getRegisteredToolsets();
 		expect(result).toEqual([]);
@@ -1006,10 +1006,10 @@ describe("getRegisteredToolsets (§5)", () => {
 });
 
 // ===================================================================
-// Default resolution mode (§4.5)
+// Default resolution mode
 // ===================================================================
 
-describe("Default resolution mode (§4.5)", () => {
+describe("Default resolution mode", () => {
 	it("defaults to exclusion", () => {
 		expect(getDefaultResolutionMode()).toBe("exclusion");
 	});
@@ -1051,10 +1051,10 @@ describe("Default resolution mode (§4.5)", () => {
 });
 
 // ===================================================================
-// Resolution mode persistence — survives quit/resume (§4.5, §13.2)
+// Resolution mode persistence — survives quit/resume
 // ===================================================================
 
-describe("Resolution mode persistence — survives quit/resume (§4.5, §13.2)", () => {
+describe("Resolution mode persistence — survives quit/resume", () => {
 	it("inclusion mode persisted on process 1 restores on a fresh process; unknown toolset defaults off", () => {
 		// Process 1: focus sets inclusion mode (appends MODE_PERSIST_KEY entry)
 		const { mock: mock1, pi: pi1 } = createEnv();
@@ -1092,10 +1092,10 @@ describe("Resolution mode persistence — survives quit/resume (§4.5, §13.2)",
 });
 
 // ===================================================================
-// Allowlist resolution mode — idea G (§ D3)
+// Allowlist resolution mode
 // ===================================================================
 
-describe("Allowlist resolution mode (D3)", () => {
+describe("Allowlist resolution mode", () => {
 	it("AL1: setDefaultResolutionMode persists the array; getActiveAllowlist reads it", () => {
 		const { mock, pi } = createEnv();
 		setDefaultResolutionMode(pi, "allowlist", [
@@ -1178,7 +1178,7 @@ describe("Allowlist resolution mode (D3)", () => {
 		mock.fireLifecycleEvent("session_start");
 		expect(mock.getActiveTools()).toEqual(["tool-a"]);
 
-		// Toolset installed AFTER focus was entered (pi-tbox's actuateNewToolsets
+		// Toolset installed AFTER focus was entered (a consumer's actuation
 		// path consults getActiveAllowlist() — the library has no actuation
 		// surface, so the consultation is simulated here).
 		defineToolset(
@@ -1275,7 +1275,7 @@ describe("Allowlist resolution mode (D3)", () => {
 			}),
 		);
 
-		// §10.1 companion mirror on `changed` (the standard pattern).
+		// Companion mirror on `changed` (the standard pattern).
 		pi.events.on(TOOLSET_EVENTS.changed, (data: any) => {
 			if (data.id === "base") {
 				if (data.enabled) comp.enable(pi);
@@ -1367,8 +1367,8 @@ describe("Allowlist resolution mode (D3)", () => {
 		);
 
 		// Focus was active (allowlist), then a mode tombstone — the tombstone is
-		// the LAST mode entry and must beat the stale prior allowlist (D6
-		// null-tombstone awareness; unreachable today since no API tombstones
+		// the LAST mode entry and must beat the stale prior allowlist (null-tombstone
+		// awareness; unreachable today since no API tombstones
 		// the mode entry, kept as a defensive guard).
 		mock.appendEntry("toolset-resolution-mode", {
 			mode: "allowlist",
@@ -1432,10 +1432,10 @@ describe("Allowlist resolution mode (D3)", () => {
 });
 
 // ===================================================================
-// Dependency cascade on enable (§9, §4.4)
+// Dependency cascade on enable
 // ===================================================================
 
-describe("Dependency cascade on enable (§9, §4.4)", () => {
+describe("Dependency cascade on enable", () => {
 	it("L requires [B]; enable(L) → B enabled", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "b-tool", description: "" });
@@ -1595,10 +1595,10 @@ describe("Dependency cascade on enable (§9, §4.4)", () => {
 });
 
 // ===================================================================
-// Cascade appendEntry consistency (§4.4)
+// Cascade appendEntry consistency
 // ===================================================================
 
-describe("Cascade appendEntry consistency (§4.4)", () => {
+describe("Cascade appendEntry consistency", () => {
 	it("enable(L) writes one entry for L and one for B (dependency)", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "b-tool", description: "" });
@@ -1650,10 +1650,10 @@ describe("Cascade appendEntry consistency (§4.4)", () => {
 });
 
 // ===================================================================
-// Cycle detection on enable (§4.4)
+// Cycle detection on enable
 // ===================================================================
 
-describe("Cycle detection on enable (§4.4)", () => {
+describe("Cycle detection on enable", () => {
 	it("throws on direct cycle (A → B → A)", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "a-tool", description: "" });
@@ -1807,10 +1807,10 @@ describe("Cycle detection on enable (§4.4)", () => {
 });
 
 // ===================================================================
-// Forward references (§4.4)
+// Forward references
 // ===================================================================
 
-describe("Forward references (§4.4)", () => {
+describe("Forward references", () => {
 	it("defineToolset with forward ref does not throw on enable", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "a-tool", description: "" });
@@ -1855,10 +1855,10 @@ describe("Forward references (§4.4)", () => {
 });
 
 // ===================================================================
-// Reverse cascade on disable (§4.4, §9)
+// Reverse cascade on disable
 // ===================================================================
 
-describe("Reverse cascade on disable (§4.4, §9)", () => {
+describe("Reverse cascade on disable", () => {
 	it("linear chain: A requires B requires C — disable(B) cascades to A but not C", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "a-tool", description: "" });
@@ -1961,10 +1961,10 @@ describe("Reverse cascade on disable (§4.4, §9)", () => {
 });
 
 // ===================================================================
-// Cycle detection on disable (§4.4)
+// Cycle detection on disable
 // ===================================================================
 
-describe("Cycle detection on disable (§4.4)", () => {
+describe("Cycle detection on disable", () => {
 	it("throws on enable of a toolset in a cycle", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "a-tool", description: "" });
@@ -2037,10 +2037,10 @@ describe("Cycle detection on disable (§4.4)", () => {
 });
 
 // ===================================================================
-// Restore — persistence round-trip (§6, §12)
+// Restore — persistence round-trip
 // ===================================================================
 
-describe("Restore — persistence round-trip (§6, §12)", () => {
+describe("Restore — persistence round-trip", () => {
 	it("disable writes { enabled: false } under persistKey", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
@@ -2108,10 +2108,10 @@ describe("Restore — persistence round-trip (§6, §12)", () => {
 });
 
 // ===================================================================
-// Restore — no entry (default fallback, §6, §7.1)
+// Restore — no entry (default fallback)
 // ===================================================================
 
-describe("Restore — no entry (default fallback, §6, §7.1)", () => {
+describe("Restore — no entry (default fallback)", () => {
 	it("exclusion mode with defaultEnabled: true → applies on, emits changed", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
@@ -2192,10 +2192,10 @@ describe("Restore — no entry (default fallback, §6, §7.1)", () => {
 });
 
 // ===================================================================
-// Restore — always-emit invariant (§6)
+// Restore — always-emit invariant
 // ===================================================================
 
-describe("Restore — always-emit invariant (§6)", () => {
+describe("Restore — always-emit invariant", () => {
 	it("restore emits one event per registered toolset always", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "t1", description: "" });
@@ -2236,10 +2236,10 @@ describe("Restore — always-emit invariant (§6)", () => {
 });
 
 // ===================================================================
-// Restore — event split changed vs restored (§6)
+// Restore — event split changed vs restored
 // ===================================================================
 
-describe("Restore — event split changed vs restored (§6)", () => {
+describe("Restore — event split changed vs restored", () => {
 	it("enable emits changed (not restored)", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
@@ -2318,10 +2318,10 @@ describe("Restore — event split changed vs restored (§6)", () => {
 });
 
 // ===================================================================
-// emitMemberEvents (§6, §13)
+// emitMemberEvents
 // ===================================================================
 
-describe("emitMemberEvents (§6, §13)", () => {
+describe("emitMemberEvents", () => {
 	it("true produces N+1 events on enable (1 group + N members)", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "a", description: "" });
@@ -2437,10 +2437,10 @@ describe("emitMemberEvents (§6, §13)", () => {
 });
 
 // ===================================================================
-// Restore — idempotent / last-writer-wins (§6)
+// Restore — idempotent / last-writer-wins
 // ===================================================================
 
-describe("Restore — idempotent / last-writer-wins (§6)", () => {
+describe("Restore — idempotent / last-writer-wins", () => {
 	it("second restore on same branch produces same state", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
@@ -2476,10 +2476,10 @@ describe("Restore — idempotent / last-writer-wins (§6)", () => {
 });
 
 // ===================================================================
-// Restore — session_tree (§6)
+// Restore — session_tree
 // ===================================================================
 
-describe("Restore — session_tree (§6)", () => {
+describe("Restore — session_tree", () => {
 	it("session_tree also triggers restore", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
@@ -2546,10 +2546,10 @@ describe("Restore — session_tree (§6)", () => {
 });
 
 // ===================================================================
-// Restore independence with requires (§7.1)
+// Restore independence with requires
 // ===================================================================
 
-describe("Restore independence — does not cascade (§7.1)", () => {
+describe("Restore independence — does not cascade", () => {
 	it("restore applies persisted entries independently without cascading requires", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "b-tool", description: "" });
@@ -2587,10 +2587,10 @@ describe("Restore independence — does not cascade (§7.1)", () => {
 });
 
 // ===================================================================
-// Default-resolution mode — entry vs no-entry (§4.5)
+// Default-resolution mode — entry vs no-entry
 // ===================================================================
 
-describe("Default-resolution mode — entry vs no-entry (§4.5)", () => {
+describe("Default-resolution mode — entry vs no-entry", () => {
 	it("toolset A (with entry) B (no entry): mode affects B but not A", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "a-tool", description: "" });
@@ -2638,10 +2638,10 @@ describe("Default-resolution mode — entry vs no-entry (§4.5)", () => {
 });
 
 // ===================================================================
-// Entry-point exports (§5)
+// Entry-point exports
 // ===================================================================
 
-describe("Entry-point exports (§5)", () => {
+describe("Entry-point exports", () => {
 	it("all public exports resolve from the package entry", () => {
 		expect(typeof defineToolset).toBe("function");
 		expect(typeof setDefaultResolutionMode).toBe("function");
@@ -3208,10 +3208,10 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 });
 
 // ===================================================================
-// Restore — settings.json defaults tier (§2, D1)
+// Restore — settings.json defaults tier
 // ===================================================================
 
-describe("Restore — settings.json defaults tier (§2)", () => {
+describe("Restore — settings.json defaults tier", () => {
 	it("S1: settings default on fresh session — settings false beats spec.defaultEnabled true", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
@@ -3315,10 +3315,10 @@ describe("Restore — settings.json defaults tier (§2)", () => {
 });
 
 // ===================================================================
-// getEffectiveDefault (§2, D1)
+// getEffectiveDefault
 // ===================================================================
 
-describe("getEffectiveDefault (§2)", () => {
+describe("getEffectiveDefault", () => {
 	it("G1: snapshot overrides spec.defaultEnabled", () => {
 		const spec = makeSpec({ defaultEnabled: true });
 		const snapshot = { "toolset-state:test.toolset": { enabled: false } };
@@ -3347,10 +3347,10 @@ describe("getEffectiveDefault (§2)", () => {
 });
 
 // ===================================================================
-// Null-tombstone — toolset restore (A.1, D6)
+// Null-tombstone — toolset restore
 // ===================================================================
 
-describe("Null-tombstone — toolset restore (A.1)", () => {
+describe("Null-tombstone — toolset restore", () => {
 	it("AT1: null tombstone after real entry falls through to settings/packaged", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
@@ -3444,7 +3444,7 @@ describe("Null-tombstone — toolset restore (A.1)", () => {
 		// default (off) — emitting `changed` (fallback path, not `restored`) —
 		// and the mirror's synchronous disable of comp must be visible to
 		// comp's own restore later in the same pass (branch re-read per
-		// toolset, same mechanism as the §10.1 test but across a tombstone).
+		// toolset, same mechanism as the companion-mirror test but across a tombstone).
 		const baseSpec = makeSpec({
 			id: "base",
 			persistKey: "k:base",
@@ -3488,10 +3488,10 @@ describe("Null-tombstone — toolset restore (A.1)", () => {
 });
 
 // ===================================================================
-// Tombstone helpers (D7)
+// Tombstone helpers
 // ===================================================================
 
-describe("Tombstone helpers (D7)", () => {
+describe("Tombstone helpers", () => {
 	const branchOf = (mock: MockPI) =>
 		mock.createContext().sessionManager.getBranch();
 
@@ -3576,7 +3576,7 @@ describe("Tombstone helpers (D7)", () => {
 		expect(mock.getEntries("toolset-state:test.toolset")).toHaveLength(2);
 	});
 
-	it("BT6: tombstone then restore falls through to settings pin (D6+D7)", () => {
+	it("BT6: tombstone then restore falls through to settings pin", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		defineToolset(
@@ -3597,10 +3597,10 @@ describe("Tombstone helpers (D7)", () => {
 });
 
 // ===================================================================
-// applyToolsetEnabled (D8)
+// applyToolsetEnabled
 // ===================================================================
 
-describe("applyToolsetEnabled (D8)", () => {
+describe("applyToolsetEnabled", () => {
 	it("E1: applies state and emits changed, no appendEntry", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });

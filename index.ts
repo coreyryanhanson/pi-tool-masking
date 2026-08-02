@@ -8,7 +8,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 
 // ---------------------------------------------------------------------------
-// §5 Public API — types
+// Public API — types
 // ---------------------------------------------------------------------------
 
 export interface ToolsetSpec {
@@ -47,7 +47,7 @@ export interface ToolsetChangedEvent {
 export type DefaultResolutionMode = "exclusion" | "inclusion" | "allowlist";
 
 // ---------------------------------------------------------------------------
-// §6 Change notification — event names
+// Change notification — event names
 // ---------------------------------------------------------------------------
 
 export const TOOLSET_EVENTS = {
@@ -56,7 +56,7 @@ export const TOOLSET_EVENTS = {
 } as const;
 
 // ---------------------------------------------------------------------------
-// Registry on globalThis (§6.1)
+// Registry on globalThis
 // ---------------------------------------------------------------------------
 
 const REGISTRY_KEY = "__piToolMaskingRegistry";
@@ -104,7 +104,7 @@ function getModuleState(): ModuleState {
 }
 
 // ---------------------------------------------------------------------------
-// deepEqual for spec comparison (§6.1 idempotent re-registration)
+// deepEqual for spec comparison (idempotent re-registration)
 // ---------------------------------------------------------------------------
 
 function deepEqual(a: unknown, b: unknown): boolean {
@@ -140,7 +140,7 @@ function deepEqual(a: unknown, b: unknown): boolean {
 // ---------------------------------------------------------------------------
 
 function ensureRestoreHandler(pi: ExtensionAPI): void {
-	// Dedup by event-object identity (§6). The runner passes the same event
+	// Dedup by event-object identity. The runner passes the same event
 	// reference to every extension's handler in one emit() call, so the first
 	// handler wins and the rest skip. Each /reload constructs a fresh event
 	// object, so restore re-runs with the fresh pi.
@@ -150,7 +150,7 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 
 		const registry = getRegistry();
 
-		// Re-read durable resolution mode before per-toolset fallback (§4.5).
+		// Re-read durable resolution mode before per-toolset fallback.
 		// setDefaultResolutionMode persists this bit; a fresh process defaults
 		// to "exclusion" until the persisted entry is replayed here. Mode
 		// entries are from a prior session (not written during this restore), so
@@ -201,7 +201,7 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		// field when it appends the mode entry. Non-allowlist modes → undefined.
 		ms.activeAllowlist = mode === "allowlist" ? allowArr : undefined;
 
-		// Allowlist short-circuit (idea G): the allowlist is a finite array of
+		// Allowlist short-circuit: the allowlist is a finite array of
 		// toolset ids stored in the branch mode entry; the suppression (the
 		// complement) is COMPUTED here over all registered toolsets, not stored.
 		// While the last mode entry is "allowlist", this set-level override is
@@ -268,18 +268,18 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		const settingsDefaults = readMergedToolsetDefaults();
 
 		// ponytail: restore applies each toolset's entry independently and does
-		// NOT re-run the requires cascade. Safe because §7.1 guarantees persisted
-		// state is always consistent — the live-toggling cascade (§4.4) makes an
+		// NOT re-run the requires cascade. Safe because persisted state is always
+		// consistent — the live-toggling cascade makes an
 		// incoherent persisted combo unreachable. Re-adding cascade here would
 		// double-toggle and break restore independence.
 		//
 		// Re-read the branch per toolset (not once before the loop): a companion
-		// mirror (§10.1) fires synchronously inside `_applyRestoreToolset` and may
+		// mirror fires synchronously inside `_applyRestoreToolset` and may
 		// `appendEntry` for a toolset later in iteration order (e.g. my-plugin.web's
 		// default-false restore makes search.web disable itself). Snapshotting the
 		// branch once would hide that write from the later toolset, so it would
 		// fall back to its packaged default and desync from the companion — the
-		// §6 "search's own restore reads the branch and finds the entry the mirror
+		// "search's own restore reads the branch and finds the entry the mirror
 		// just wrote" guarantee.
 		for (const [, entry] of registry) {
 			const { spec } = entry;
@@ -340,7 +340,7 @@ function _emitToolsetEvents(
 
 	if (spec.emitMemberEvents) {
 		for (const name of spec.names) {
-			// Only emit for names that are actually registered tools (§6)
+			// Only emit for names that are actually registered tools
 			if (!pi.getAllTools().some((t) => t.name === name)) continue;
 			pi.events.emit(eventType, {
 				id: spec.id,
@@ -412,7 +412,7 @@ function _applyRestoreToolset(
 		pi.setActiveTools(filtered);
 	}
 
-	// Always emit regardless of state (always-emit invariant, §6)
+	// Always emit regardless of state (always-emit invariant)
 	const eventType = isPersistedEntry
 		? TOOLSET_EVENTS.restored
 		: TOOLSET_EVENTS.changed;
@@ -420,7 +420,7 @@ function _applyRestoreToolset(
 }
 
 // ---------------------------------------------------------------------------
-// Enable cascade + cycle detection (§4.4, §9)
+// Enable cascade + cycle detection
 // ---------------------------------------------------------------------------
 
 function _enableToolset(
@@ -453,7 +453,7 @@ function _enableToolset(
 }
 
 // ---------------------------------------------------------------------------
-// Disable reverse-cascade (§4.4, §9)
+// Disable reverse-cascade
 // ---------------------------------------------------------------------------
 
 function _disableDependents(
@@ -512,7 +512,7 @@ class ToolsetImpl implements Toolset {
 }
 
 // ---------------------------------------------------------------------------
-// §5 Public API — functions
+// Public API — functions
 // ---------------------------------------------------------------------------
 
 export function defineToolset(pi: ExtensionAPI, spec: ToolsetSpec): Toolset {
@@ -680,12 +680,12 @@ export function getRegisteredToolsets(): readonly RegistryEntry[] {
 }
 
 // ---------------------------------------------------------------------------
-// Tombstone helpers (D7) + apply-without-persist (D8)
+// Tombstone helpers + apply-without-persist
 // ---------------------------------------------------------------------------
 
 /**
  * Tombstone a toolset's chat-branch entry: append `null` for `persistKey`
- * so `doRestore` falls through to the settings tier (D6). Owns the
+ * so `doRestore` falls through to the settings tier. Owns the
  * tombstone-write convention.
  *
  * Dedup: appends `null` only if the key has a prior entry whose last entry
@@ -695,8 +695,7 @@ export function getRegisteredToolsets(): readonly RegistryEntry[] {
  *
  * `branch` is the caller's branch snapshot
  * (`ctx.sessionManager.getBranch()`): `ExtensionAPI` exposes `appendEntry`
- * but not `sessionManager`, so the dedup read comes from the caller. See
- * plans/d7-branch-access-gap.md.
+ * but not `sessionManager`, so the dedup read comes from the caller.
  *
  * ponytail: dedup caps growth at one tombstone per toggle/restore cycle,
  * but many cycles in one session still stack entries. Upgrade path: a
@@ -854,7 +853,7 @@ export function mergeToolsetDefaults(
  * When `setSettingsOverrideForTests` has set an override, returns that
  * override verbatim instead of reading disk.
  *
- * @public — exported for pi-tbox's snapshot-in usage (read once per loop
+ * @public — exported for snapshot-in usage (read once per loop
  * and pass to `getEffectiveDefault`).
  *
  * ponytail: hardcodes the two pi-core settings paths (global
@@ -880,8 +879,8 @@ export function readMergedToolsetDefaults(): ToolsetDefaultsMap {
  * override for both scopes (test mode approximation — attribution tests
  * must use the writer seam + disk round-trip).
  *
- * @public — exported for pi-tbox's /tbox defaults show command, which
- * needs per-scope attribution.
+ * @public — exported for a `defaults show`-style command that needs
+ * per-scope attribution.
  */
 export function readToolsetDefaults(
 	scope: "global" | "project",
@@ -907,9 +906,9 @@ export function readToolsetDefaults(
  * `?.enabled`. A missing or malformed entry falls through to
  * `spec.defaultEnabled ?? true`.
  *
- * @public — exported for pi-tbox's focusOff / actuateNewToolsets call
- * sites, which need the settings-aware default without re-implementing
- * the reader.
+ * @public — exported for call sites that need the settings-aware default
+ * without re-implementing the reader (e.g. focus teardown and
+ * post-install actuation).
  */
 export function getEffectiveDefault(
 	spec: ToolsetSpec,
