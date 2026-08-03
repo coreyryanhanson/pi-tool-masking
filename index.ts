@@ -362,8 +362,8 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 	pi.on("session_start", doRestore);
 	pi.on("session_tree", doRestore);
 
-	// Re-assert the allowlist at every turn boundary. While allowlist (focus)
-	// mode is active, the allowlist is only enforced on session_start /
+	// Re-assert the allowlist at every turn boundary. While allowlist mode is
+	// active, the allowlist is only enforced on session_start /
 	// session_tree (above). Between those events, any extension that calls
 	// `pi.setActiveTools` directly mid-session punches straight through — e.g.
 	// a `before_agent_start` reconciler force-adding its tool. This handler
@@ -630,7 +630,7 @@ export function defineToolset(pi: ExtensionAPI, spec: ToolsetSpec): Toolset {
 
 	// Name-overlap guard: no two toolsets may claim the same tool name. Every
 	// downstream failure mode (isEnabled lying, restore order-dependence, enable
-	// no-op, skipped dependents, focus leaks, mis-attribution, double-counts)
+	// no-op, skipped dependents, allowlist-bypass leaks, mis-attribution, double-counts)
 	// requires two toolsets claiming one name; with that unreachable, toolsets
 	// own disjoint name sets. Gather every collision in this registration into
 	// one error so the author sees the full scope in one pass. `getAllTools()` is
