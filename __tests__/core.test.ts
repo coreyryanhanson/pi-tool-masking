@@ -179,6 +179,7 @@ describe("defineToolset — restore handler registration", () => {
 		// one pi install ONE handler set — O(toolsets) per turn, not O(N·toolsets).
 		expect(mock.handlerCount("session_start")).toBe(1);
 		expect(mock.handlerCount("session_tree")).toBe(1);
+		expect(mock.handlerCount("before_agent_start")).toBe(1);
 		// Single run still emits exactly one event per toolset
 		const emitSpy = vi.spyOn(mock.events, "emit");
 		mock.fireLifecycleEvent("session_start");
