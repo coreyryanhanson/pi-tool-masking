@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
@@ -108,20 +109,12 @@ const INCLUSION_DEPRECATED_MESSAGE =
 	'[pi-tool-masking] "inclusion" resolution mode is deprecated since 1.2.0 ' +
 	'and will be removed in a coming 1.x minor; use "allowlist" for focus suppression.';
 
-// Once-per-process-per-site dedup for the inclusion deprecation warning.
-// Keyed by trigger site (`"setDefaultResolutionMode"` / `"doRestore"`), not
-// per call — "you're on the deprecated path" needs saying once per entry
-// point. Lives on globalThis (like the registry and module state) so a
-// /reload, which re-evals modules in the same process, does not re-warn.
-function warnInclusionDeprecation(
-	site: "setDefaultResolutionMode" | "doRestore",
-): void {
-	if (!(DEPRECATION_WARNED_KEY in globalThis)) {
-		(globalThis as any)[DEPRECATION_WARNED_KEY] = new Set<string>();
-	}
-	const warned = (globalThis as any)[DEPRECATION_WARNED_KEY] as Set<string>;
-	if (warned.has(site)) return;
-	warned.add(site);
+// Once-per-process dedup for the inclusion deprecation warning. Lives on
+// globalThis (like the registry and module state) so a /reload, which
+// re-evals modules in the same process, does not re-warn.
+function warnInclusionDeprecation(): void {
+	if ((globalThis as any)[DEPRECATION_WARNED_KEY]) return;
+	(globalThis as any)[DEPRECATION_WARNED_KEY] = true;
 	console.warn(INCLUSION_DEPRECATED_MESSAGE);
 }
 
@@ -140,37 +133,6 @@ function getModuleState(): ModuleState {
 		};
 	}
 	return (globalThis as any)[MODULE_KEY] as ModuleState;
-}
-
-// ---------------------------------------------------------------------------
-// deepEqual for spec comparison (idempotent re-registration)
-// ---------------------------------------------------------------------------
-
-function deepEqual(a: unknown, b: unknown): boolean {
-	if (Object.is(a, b)) return true;
-	if (a instanceof Set && b instanceof Set) {
-		if (a.size !== b.size) return false;
-		for (const v of a) if (!b.has(v)) return false;
-		return true;
-	}
-	if (
-		typeof a !== "object" ||
-		typeof b !== "object" ||
-		a === null ||
-		b === null
-	)
-		return false;
-	if (Array.isArray(a) && Array.isArray(b)) {
-		if (a.length !== b.length) return false;
-		return a.every((v, i) => deepEqual(v, b[i]));
-	}
-	if (Array.isArray(a) !== Array.isArray(b)) return false;
-	const definedKeys = (o: object) =>
-		Reflect.ownKeys(o).filter((k) => (o as any)[k] !== undefined);
-	const keysA = definedKeys(a);
-	const keysB = definedKeys(b);
-	if (keysA.length !== keysB.length) return false;
-	return keysA.every((k) => deepEqual((a as any)[k], (b as any)[k]));
 }
 
 // ---------------------------------------------------------------------------
@@ -262,19 +224,17 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		// to [] as the safe recovery. Write-time validates intent; restore-time
 		// picks the safe recovery.
 		const allowArr = Array.isArray(branchAllowlist) ? branchAllowlist : [];
-		const mode: DefaultResolutionMode =
-			branchMode === "inclusion" || branchMode === "exclusion"
-				? branchMode
-				: branchMode === "allowlist"
-					? "allowlist"
-					: "exclusion";
+		const mode: DefaultResolutionMode = (
+			["inclusion", "exclusion", "allowlist"] as const
+		).includes(branchMode)
+			? branchMode
+			: "exclusion";
 		const ms = getModuleState();
 		ms.defaultResolutionMode = mode;
 		// Deprecation: resolving a branch mode entry to "inclusion" is the
 		// deprecated path (fires on /reload of a session that last set
-		// inclusion). warnInclusionDeprecation dedups once per process per
-		// trigger site.
-		if (mode === "inclusion") warnInclusionDeprecation("doRestore");
+		// inclusion). warnInclusionDeprecation dedups once per process.
+		if (mode === "inclusion") warnInclusionDeprecation();
 		// Mirror the allowlist into module state so the parameterless
 		// `getActiveAllowlist()` can read it — branch is the source of truth,
 		// module state is the live mirror (same pattern as
@@ -651,7 +611,7 @@ export function defineToolset(pi: ExtensionAPI, spec: ToolsetSpec): Toolset {
 	const existing = registry.get(spec.id);
 
 	if (existing) {
-		if (deepEqual(existing.spec, spec)) {
+		if (isDeepStrictEqual(existing.spec, spec)) {
 			// Idempotent re-registration — return existing toolset.
 			// Still register restore handler with current pi (/reload safety).
 			ensureRestoreHandler(pi);
@@ -733,8 +693,7 @@ export function setDefaultResolutionMode(
 	mode: DefaultResolutionMode,
 	allowlist?: string[],
 ): void {
-	if (mode === "inclusion")
-		warnInclusionDeprecation("setDefaultResolutionMode");
+	if (mode === "inclusion") warnInclusionDeprecation();
 	if (mode !== "exclusion" && mode !== "inclusion" && mode !== "allowlist") {
 		throw new Error(
 			`[pi-tool-masking] Invalid defaultResolutionMode: "${mode}". Must be "exclusion", "inclusion", or "allowlist".`,
@@ -963,21 +922,6 @@ export function parseToolsetDefaults(json: unknown): ToolsetDefaultsMap {
 }
 
 /**
- * Shallow-merge global and project toolset defaults.
- *
- * Project wins on key collision: `{ ...global_, ...project }`. Per-entry
- * only — no deep merge of the `{ enabled }` values.
- *
- * @internal
- */
-export function mergeToolsetDefaults(
-	global_: ToolsetDefaultsMap,
-	project: ToolsetDefaultsMap,
-): ToolsetDefaultsMap {
-	return { ...global_, ...project };
-}
-
-/**
  * Read and merge toolset defaults from settings.json (global + project).
  *
  * Reads `json.toolsetDefaults` from:
@@ -1004,10 +948,10 @@ export function mergeToolsetDefaults(
  */
 export function readMergedToolsetDefaults(): ToolsetDefaultsMap {
 	if (_settingsOverride !== null) return { ..._settingsOverride };
-	return mergeToolsetDefaults(
-		parseToolsetDefaults(readSettingsJsonSafe("global")),
-		parseToolsetDefaults(readSettingsJsonSafe("project")),
-	);
+	return {
+		...parseToolsetDefaults(readSettingsJsonSafe("global")),
+		...parseToolsetDefaults(readSettingsJsonSafe("project")),
+	};
 }
 
 /**

@@ -12,7 +12,6 @@ import {
 	getActiveAllowlist,
 	getRegisteredToolsets,
 	parseToolsetDefaults,
-	mergeToolsetDefaults,
 	readMergedToolsetDefaults,
 	readToolsetDefaults,
 	getEffectiveDefault,
@@ -383,7 +382,7 @@ describe("defineToolset — collision policy", () => {
 		).toThrow("persistKey collision");
 	});
 
-	it("allows duplicate id with deepEqual-identical spec (idempotent re-registration)", () => {
+	it("allows duplicate id with identical spec (idempotent re-registration)", () => {
 		const { pi } = createEnv();
 		const spec = makeSpec();
 		const t1 = defineToolset(pi, spec);
@@ -2892,36 +2891,6 @@ describe("parseToolsetDefaults", () => {
 		expect(parseToolsetDefaults(input)).toEqual({
 			"k:a": { enabled: true },
 			"k:b": { enabled: false },
-		});
-	});
-});
-
-// ===================================================================
-// Settings.json reader — mergeToolsetDefaults
-// ===================================================================
-
-describe("mergeToolsetDefaults", () => {
-	it("shallow per-key merge: project wins on collision", () => {
-		const global_ = {
-			"k:a": { enabled: true },
-			"k:b": { enabled: false },
-		};
-		const project = { "k:b": { enabled: true } };
-		expect(mergeToolsetDefaults(global_, project)).toEqual({
-			"k:a": { enabled: true },
-			"k:b": { enabled: true },
-		});
-	});
-
-	it("empty project does not clobber global", () => {
-		expect(mergeToolsetDefaults({ "k:a": { enabled: true } }, {})).toEqual({
-			"k:a": { enabled: true },
-		});
-	});
-
-	it("empty global is populated by project", () => {
-		expect(mergeToolsetDefaults({}, { "k:a": { enabled: true } })).toEqual({
-			"k:a": { enabled: true },
 		});
 	});
 });

@@ -79,7 +79,6 @@ they do NOT test, commit, tag, or publish.
 | `readToolsetDefaults(scope)` / `readMergedToolsetDefaults()` | Read `toolsetDefaults` from one scope / merged global+project |
 | `writeToolsetDefaults(entries, scope)` / `clearToolsetDefaults(scope)` | Mutate / clear `toolsetDefaults` settings |
 | `getEffectiveDefault(spec, snapshot?)` | Resolve a toolset's effective default through mode + settings tiers |
-| `parseToolsetDefaults(json)` / `mergeToolsetDefaults(...)` | Pure parse / merge helpers for `toolsetDefaults` |
 | `MalformedSettingsError` | Thrown by reader/writer on unparseable settings JSON |
 | `TOOLSET_EVENTS` | `changed`, `restored` |
 
