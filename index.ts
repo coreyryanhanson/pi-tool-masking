@@ -361,6 +361,46 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 
 	pi.on("session_start", doRestore);
 	pi.on("session_tree", doRestore);
+
+	// Re-assert the allowlist at every turn boundary. While allowlist (focus)
+	// mode is active, the allowlist is only enforced on session_start /
+	// session_tree (above). Between those events, any extension that calls
+	// `pi.setActiveTools` directly mid-session punches straight through — e.g.
+	// a `before_agent_start` reconciler force-adding its tool. This handler
+	// defends the mask at each turn.
+	const reassertAllowlist = (): void => {
+		const ms = getModuleState();
+		const allow = ms.activeAllowlist;
+		if (allow === undefined) return; // not in allowlist mode
+		const allowSet = new Set(allow);
+		const registry = getRegistry();
+		const suppress = new Set<string>();
+		for (const [, entry] of registry) {
+			if (!allowSet.has(entry.spec.id)) {
+				for (const n of entry.spec.names) suppress.add(n);
+			}
+		}
+		const current = pi.getActiveTools();
+		const next = current.filter((n) => !suppress.has(n));
+		if (next.length === current.length) return; // delta gate — no churn
+		pi.setActiveTools(next);
+		// Emit `changed` so downstream slots (tbox status bar) re-render to the
+		// corrected count. One emit per affected toolset where a leak was undone.
+		for (const [, entry] of registry) {
+			if (
+				!allowSet.has(entry.spec.id) &&
+				[...entry.spec.names].some((n) => current.includes(n))
+			) {
+				_emitToolsetEvents(entry.spec, pi, TOOLSET_EVENTS.changed, false);
+			}
+		}
+	};
+
+	// ponytail: re-assert runs at this extension's load-order position. If a
+	// force-add reconciler on another extension loads AFTER this consumer,
+	// it re-adds after us and the leak survives. Fully-robust fix needs a
+	// pi-core masking primitive at the setActiveTools boundary.
+	pi.on("before_agent_start", reassertAllowlist);
 }
 
 // ---------------------------------------------------------------------------

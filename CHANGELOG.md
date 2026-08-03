@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- `before_agent_start` now re-asserts the allowlist while focus mode is
+  active, undoing mid-session force-adds by other extensions' reconcilers.
+  Residual: depends on extension load order; a pi-core masking primitive
+  is needed for a fully-robust fix.
+
 ## [1.2.0] - 2026-08-02
 
 ### Added

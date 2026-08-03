@@ -1474,6 +1474,79 @@ describe("Allowlist resolution mode", () => {
 });
 
 // ===================================================================
+// before_agent_start allowlist re-assert
+// ===================================================================
+
+describe("before_agent_start allowlist re-assert", () => {
+	it("removes a tool force-added after focus entered, emits changed, and is a no-op outside allowlist mode", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "search.web", description: "" });
+		mock.registerTool({ name: "ask_user_question", description: "" });
+
+		const search = makeSpec({
+			id: "search.web",
+			persistKey: "tbox.tool@search",
+			names: new Set(["search.web"]),
+		});
+		const ask = makeSpec({
+			id: "tbox.tool@npm:@juicesharp/rpiv-ask-user-question",
+			persistKey: "tbox.tool@npm:@juicesharp/rpiv-ask-user-question",
+			names: new Set(["ask_user_question"]),
+		});
+		defineToolset(pi, search);
+		defineToolset(pi, ask);
+
+		// Enter allowlist mode allowing only search.web.
+		setDefaultResolutionMode(pi, "allowlist", ["search.web"]);
+		// doRestore applies the allowlist: ask_user_question is removed.
+		mock.fireLifecycleEvent("session_start");
+		expect(pi.getActiveTools()).toEqual(["search.web"]);
+
+		// Simulate the reconciler punching through on the next turn.
+		mock.setActiveTools(["search.web", "ask_user_question"]);
+		expect(pi.getActiveTools()).toHaveLength(2);
+
+		const changedSpy = vi.fn();
+		pi.events.on(TOOLSET_EVENTS.changed, changedSpy);
+
+		// Fire the turn boundary — re-assert should undo the leak.
+		mock.fireLifecycleEvent("before_agent_start");
+
+		expect(pi.getActiveTools()).toEqual(["search.web"]);
+		expect(changedSpy).toHaveBeenCalled();
+
+		// Outside allowlist mode: re-assert is a no-op.
+		setDefaultResolutionMode(pi, "exclusion");
+		mock.setActiveTools(["search.web", "ask_user_question"]);
+		changedSpy.mockClear();
+		mock.fireLifecycleEvent("before_agent_start");
+		expect(pi.getActiveTools()).toEqual(["search.web", "ask_user_question"]);
+		expect(changedSpy).not.toHaveBeenCalled();
+	});
+
+	it("does not re-add allowlist members and does not emit when nothing leaked", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "search.web", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "search.web",
+				persistKey: "tbox.tool@search",
+				names: new Set(["search.web"]),
+			}),
+		);
+		setDefaultResolutionMode(pi, "allowlist", ["search.web"]);
+		mock.fireLifecycleEvent("session_start");
+		// Steady state — no leak.
+		const changedSpy = vi.fn();
+		pi.events.on(TOOLSET_EVENTS.changed, changedSpy);
+		mock.fireLifecycleEvent("before_agent_start");
+		expect(pi.getActiveTools()).toEqual(["search.web"]);
+		expect(changedSpy).not.toHaveBeenCalled();
+	});
+});
+
+// ===================================================================
 // Dependency cascade on enable
 // ===================================================================
 
