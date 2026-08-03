@@ -71,6 +71,13 @@ export const TOOLSET_EVENTS = {
 
 const REGISTRY_KEY = "__piToolMaskingRegistry";
 const RESTORE_EVENT_KEY = "__piToolMaskingLastRestoreEvent";
+// Tracks which pi instances have had the restore/re-assert handlers installed.
+// `defineToolset` calls `ensureRestoreHandler` once per toolset; keying the
+// de-dup on the pi object (not a global boolean) keeps turn-boundary work at
+// O(toolsets) per turn across N toolsets sharing one pi, while still re-
+// installing for a fresh pi after `/reload` (new object identity → new
+// WeakSet entry).
+const RESTORE_HANDLER_INSTALLED = new WeakSet<ExtensionAPI>();
 
 export interface RegistryEntry {
 	spec: ToolsetSpec;
@@ -167,11 +174,48 @@ function deepEqual(a: unknown, b: unknown): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Compute the desired active-tool list under allowlist mode
+// ---------------------------------------------------------------------------
+// current − (non-allowlisted members) + (allowlist members), restricted to
+// registered tools. Mirrored by doRestore's allowlist branch and
+// reassertAllowlist so the two NEVER drift on the mask definition. The
+// `registered` filter keeps spec names that aren't registered tools out of
+// the replacement set (parity with `_applyRestoreToolset`'s per-name filter).
+function computeAllowlistDesired(
+	allowlist: readonly string[],
+	current: readonly string[],
+	registered: ReadonlySet<string>,
+	registry: Registry,
+): string[] {
+	const allow = new Set<string>(allowlist);
+	const suppress = new Set<string>();
+	for (const [, entry] of registry) {
+		if (!allow.has(entry.spec.id)) {
+			for (const n of entry.spec.names) suppress.add(n);
+		}
+	}
+	const desired = new Set<string>();
+	for (const n of current) {
+		if (!suppress.has(n)) desired.add(n);
+	}
+	for (const [, entry] of registry) {
+		if (allow.has(entry.spec.id)) {
+			for (const n of entry.spec.names) desired.add(n);
+		}
+	}
+	return [...desired].filter((n) => registered.has(n));
+}
+
+// ---------------------------------------------------------------------------
 // Ensure session_start / session_tree restore handler is registered
 // (dedup at runtime by event-object identity, not at registration time)
 // ---------------------------------------------------------------------------
 
 function ensureRestoreHandler(pi: ExtensionAPI): void {
+	// Install once per pi instance (see RESTORE_HANDLER_INSTALLED above).
+	if (RESTORE_HANDLER_INSTALLED.has(pi)) return;
+	RESTORE_HANDLER_INSTALLED.add(pi);
+
 	// Dedup by event-object identity. The runner passes the same event
 	// reference to every extension's handler in one emit() call, so the first
 	// handler wins and the rest skip. Each /reload constructs a fresh event
@@ -252,37 +296,22 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		if (mode === "allowlist") {
 			// `allowArr` computed above — fail-closed `[]` recovery already applied.
 			const allow = new Set<string>(allowArr);
-			const registered = new Set(pi.getAllTools().map((t) => t.name));
 
 			// Phase 1: desired set = current − (suppressed toolset members) +
-			// (allowlist members). The suppress set is the complement of the
-			// allowlist among registered toolset tools only; everything else in
-			// the current set (tools not owned by any registered toolset) is kept
-			// as-is — `setActiveTools` is a full replacement, so we must not
-			// rebuild the set from only allowlist members. This mirrors the
-			// per-toolset restore (`_applyRestoreToolset` only adds/removes
-			// `spec.names`), applied set-wide.
-			const current = new Set(pi.getActiveTools());
-			const suppress = new Set<string>();
-			for (const [, entry] of registry) {
-				if (!allow.has(entry.spec.id)) {
-					for (const n of entry.spec.names) suppress.add(n);
-				}
-			}
-			const desired = new Set<string>();
-			for (const n of current) {
-				if (!suppress.has(n)) desired.add(n);
-			}
-			for (const [, entry] of registry) {
-				if (allow.has(entry.spec.id)) {
-					for (const n of entry.spec.names) desired.add(n);
-				}
-			}
-			// The `registered` filter is partially redundant: names carried over
-			// from `current` are already active (hence registered); it only
-			// matters for spec names that aren't registered tools. Kept for
-			// parity with `_applyRestoreToolset`'s per-name filtering.
-			pi.setActiveTools([...desired].filter((n) => registered.has(n)));
+			// (allowlist members), via the shared helper. The suppress set is the
+			// complement of the allowlist among registered toolset tools only;
+			// everything else in the current set (tools not owned by any registered
+			// toolset) is kept as-is — `setActiveTools` is a full replacement, so we
+			// must not rebuild the set from only allowlist members.
+			const current = pi.getActiveTools();
+			const registered = new Set(pi.getAllTools().map((t) => t.name));
+			const desired = computeAllowlistDesired(
+				allowArr,
+				current,
+				registered,
+				registry,
+			);
+			pi.setActiveTools(desired);
 
 			// Phase 2: notify AFTER state is final. `restored` for every
 			// registered toolset — the whole pass is a branch replay of the
@@ -361,6 +390,62 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 
 	pi.on("session_start", doRestore);
 	pi.on("session_tree", doRestore);
+
+	// Re-assert the allowlist at every turn boundary. While allowlist mode is
+	// active, the allowlist is only enforced on session_start /
+	// session_tree (above). Between those events, any extension that calls
+	// `pi.setActiveTools` directly mid-session punches straight through — e.g.
+	// a `before_agent_start` reconciler force-adding its tool or force-removing
+	// a permit-list member. This handler defends the mask at each turn,
+	// undoing BOTH directions of drift (leak + force-removal) via the same
+	// shared `computeAllowlistDesired` definition the restore path uses.
+	const reassertAllowlist = (): void => {
+		const ms = getModuleState();
+		const allow = ms.activeAllowlist;
+		if (allow === undefined) return; // not in allowlist mode
+		const registry = getRegistry();
+		const current = pi.getActiveTools();
+		const currentSet = new Set(current);
+		const registered = new Set(pi.getAllTools().map((t) => t.name));
+		const next = computeAllowlistDesired(allow, current, registered, registry);
+		// Delta gate — no-op unless the active set actually changed. `next`/`current`
+		// may share a length while differing (a leak removed AND a member re-added),
+		// so compare length AND that every desired tool is already current.
+		if (
+			next.length === current.length &&
+			next.every((n) => currentSet.has(n))
+		) {
+			return;
+		}
+		pi.setActiveTools(next);
+		// Emit `changed` so downstream slots (tbox status bar) re-render to the
+		// corrected count. One emit per affected toolset, keyed to ACTUAL drift:
+		// allowlist members restored (`enabled: true`) are the names in `next` but
+		// not `current`; leaks removed (`enabled: false`) are the names in
+		// `current` but not `next`. Comparing to the applied sets, not raw spec
+		// names, avoids false emits for allowlisted names whose tools aren't
+		// registered (forward references) — they can't be restored, so they
+		// must not claim a restoration.
+		const nextSet = new Set(next);
+		for (const [, entry] of registry) {
+			const names = [...entry.spec.names];
+			if (allow.includes(entry.spec.id)) {
+				if (names.some((n) => nextSet.has(n) && !currentSet.has(n))) {
+					_emitToolsetEvents(entry.spec, pi, TOOLSET_EVENTS.changed, true);
+				}
+			} else {
+				if (names.some((n) => currentSet.has(n) && !nextSet.has(n))) {
+					_emitToolsetEvents(entry.spec, pi, TOOLSET_EVENTS.changed, false);
+				}
+			}
+		}
+	};
+
+	// ponytail: re-assert runs at this extension's load-order position. If a
+	// force-add reconciler on another extension loads AFTER this consumer,
+	// it re-adds after us and the leak survives. Fully-robust fix needs a
+	// pi-core masking primitive at the setActiveTools boundary.
+	pi.on("before_agent_start", reassertAllowlist);
 }
 
 // ---------------------------------------------------------------------------
@@ -590,7 +675,7 @@ export function defineToolset(pi: ExtensionAPI, spec: ToolsetSpec): Toolset {
 
 	// Name-overlap guard: no two toolsets may claim the same tool name. Every
 	// downstream failure mode (isEnabled lying, restore order-dependence, enable
-	// no-op, skipped dependents, focus leaks, mis-attribution, double-counts)
+	// no-op, skipped dependents, allowlist-bypass leaks, mis-attribution, double-counts)
 	// requires two toolsets claiming one name; with that unreachable, toolsets
 	// own disjoint name sets. Gather every collision in this registration into
 	// one error so the author sees the full scope in one pass. `getAllTools()` is
