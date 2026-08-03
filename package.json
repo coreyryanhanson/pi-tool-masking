@@ -34,7 +34,7 @@
 		"index.ts"
 	],
 	"devDependencies": {
-		"@earendil-works/pi-coding-agent": "^0.78.0",
+		"@earendil-works/pi-coding-agent": "^0.83.0",
 		"@types/node": "^22.0.0",
 		"vitest": "^4.0.0"
 	}
