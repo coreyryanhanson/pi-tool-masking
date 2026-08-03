@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
@@ -140,37 +141,6 @@ function getModuleState(): ModuleState {
 		};
 	}
 	return (globalThis as any)[MODULE_KEY] as ModuleState;
-}
-
-// ---------------------------------------------------------------------------
-// deepEqual for spec comparison (idempotent re-registration)
-// ---------------------------------------------------------------------------
-
-function deepEqual(a: unknown, b: unknown): boolean {
-	if (Object.is(a, b)) return true;
-	if (a instanceof Set && b instanceof Set) {
-		if (a.size !== b.size) return false;
-		for (const v of a) if (!b.has(v)) return false;
-		return true;
-	}
-	if (
-		typeof a !== "object" ||
-		typeof b !== "object" ||
-		a === null ||
-		b === null
-	)
-		return false;
-	if (Array.isArray(a) && Array.isArray(b)) {
-		if (a.length !== b.length) return false;
-		return a.every((v, i) => deepEqual(v, b[i]));
-	}
-	if (Array.isArray(a) !== Array.isArray(b)) return false;
-	const definedKeys = (o: object) =>
-		Reflect.ownKeys(o).filter((k) => (o as any)[k] !== undefined);
-	const keysA = definedKeys(a);
-	const keysB = definedKeys(b);
-	if (keysA.length !== keysB.length) return false;
-	return keysA.every((k) => deepEqual((a as any)[k], (b as any)[k]));
 }
 
 // ---------------------------------------------------------------------------
@@ -651,7 +621,7 @@ export function defineToolset(pi: ExtensionAPI, spec: ToolsetSpec): Toolset {
 	const existing = registry.get(spec.id);
 
 	if (existing) {
-		if (deepEqual(existing.spec, spec)) {
+		if (isDeepStrictEqual(existing.spec, spec)) {
 			// Idempotent re-registration — return existing toolset.
 			// Still register restore handler with current pi (/reload safety).
 			ensureRestoreHandler(pi);

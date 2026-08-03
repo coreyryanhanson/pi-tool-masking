@@ -383,7 +383,7 @@ describe("defineToolset — collision policy", () => {
 		).toThrow("persistKey collision");
 	});
 
-	it("allows duplicate id with deepEqual-identical spec (idempotent re-registration)", () => {
+	it("allows duplicate id with identical spec (idempotent re-registration)", () => {
 		const { pi } = createEnv();
 		const spec = makeSpec();
 		const t1 = defineToolset(pi, spec);
