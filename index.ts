@@ -232,12 +232,11 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		// to [] as the safe recovery. Write-time validates intent; restore-time
 		// picks the safe recovery.
 		const allowArr = Array.isArray(branchAllowlist) ? branchAllowlist : [];
-		const mode: DefaultResolutionMode =
-			branchMode === "inclusion" || branchMode === "exclusion"
-				? branchMode
-				: branchMode === "allowlist"
-					? "allowlist"
-					: "exclusion";
+		const mode: DefaultResolutionMode = (
+			["inclusion", "exclusion", "allowlist"] as const
+		).includes(branchMode)
+			? branchMode
+			: "exclusion";
 		const ms = getModuleState();
 		ms.defaultResolutionMode = mode;
 		// Deprecation: resolving a branch mode entry to "inclusion" is the
