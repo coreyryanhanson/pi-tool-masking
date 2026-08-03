@@ -109,20 +109,12 @@ const INCLUSION_DEPRECATED_MESSAGE =
 	'[pi-tool-masking] "inclusion" resolution mode is deprecated since 1.2.0 ' +
 	'and will be removed in a coming 1.x minor; use "allowlist" for focus suppression.';
 
-// Once-per-process-per-site dedup for the inclusion deprecation warning.
-// Keyed by trigger site (`"setDefaultResolutionMode"` / `"doRestore"`), not
-// per call — "you're on the deprecated path" needs saying once per entry
-// point. Lives on globalThis (like the registry and module state) so a
-// /reload, which re-evals modules in the same process, does not re-warn.
-function warnInclusionDeprecation(
-	site: "setDefaultResolutionMode" | "doRestore",
-): void {
-	if (!(DEPRECATION_WARNED_KEY in globalThis)) {
-		(globalThis as any)[DEPRECATION_WARNED_KEY] = new Set<string>();
-	}
-	const warned = (globalThis as any)[DEPRECATION_WARNED_KEY] as Set<string>;
-	if (warned.has(site)) return;
-	warned.add(site);
+// Once-per-process dedup for the inclusion deprecation warning. Lives on
+// globalThis (like the registry and module state) so a /reload, which
+// re-evals modules in the same process, does not re-warn.
+function warnInclusionDeprecation(): void {
+	if ((globalThis as any)[DEPRECATION_WARNED_KEY]) return;
+	(globalThis as any)[DEPRECATION_WARNED_KEY] = true;
 	console.warn(INCLUSION_DEPRECATED_MESSAGE);
 }
 
@@ -241,9 +233,8 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		ms.defaultResolutionMode = mode;
 		// Deprecation: resolving a branch mode entry to "inclusion" is the
 		// deprecated path (fires on /reload of a session that last set
-		// inclusion). warnInclusionDeprecation dedups once per process per
-		// trigger site.
-		if (mode === "inclusion") warnInclusionDeprecation("doRestore");
+		// inclusion). warnInclusionDeprecation dedups once per process.
+		if (mode === "inclusion") warnInclusionDeprecation();
 		// Mirror the allowlist into module state so the parameterless
 		// `getActiveAllowlist()` can read it — branch is the source of truth,
 		// module state is the live mirror (same pattern as
@@ -702,8 +693,7 @@ export function setDefaultResolutionMode(
 	mode: DefaultResolutionMode,
 	allowlist?: string[],
 ): void {
-	if (mode === "inclusion")
-		warnInclusionDeprecation("setDefaultResolutionMode");
+	if (mode === "inclusion") warnInclusionDeprecation();
 	if (mode !== "exclusion" && mode !== "inclusion" && mode !== "allowlist") {
 		throw new Error(
 			`[pi-tool-masking] Invalid defaultResolutionMode: "${mode}". Must be "exclusion", "inclusion", or "allowlist".`,
