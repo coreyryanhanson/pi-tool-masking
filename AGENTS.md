@@ -93,6 +93,14 @@ they do NOT test, commit, tag, or publish.
 - Persistence via `pi.appendEntry(persistKey, { enabled })` and
   `pi.sessionManager.getBranch()`. Restore triggers on `session_start` and
   `session_tree`; a per-event guard dedupes repeated restore events.
+- `before_agent_start` re-asserts the allowlist mask each turn, undoing
+  mid-session force-adds by other extensions' reconcilers that bypass the
+  mask via `pi.setActiveTools` between restore events. Emits `changed` for
+  each toolset where a leak was undone; delta-gated to no-op when nothing
+  leaked. Residual: runs at this extension's load-order position — a
+  force-add reconciler on a later-loading extension re-adds after us; a
+  fully-robust fix needs a pi-core masking primitive at the
+  `setActiveTools` boundary.
 - `requires` cascade: enable cascades to deps, disable cascades to
   dependents. Cycle detection at toggle time.
 - `emitMemberEvents`: opt into per-member fan-out events for per-tool UI
