@@ -36,7 +36,7 @@ fail otherwise.
 Vitest with **globals on** (`describe`/`it`/`expect` available without import;
 `types: ["node", "vitest/globals"]`). `testTimeout: 15_000`.
 
-Tests live in `__tests__/` (`core.test.ts`, `registry-convergence.test.ts`).
+Tests live in `__tests__/` (`core.test.ts`, `registry-convergence.test.ts`, `custom-entry.test.ts`).
 They use a custom `MockPI` class (`__tests__/mock-pi.ts`) implementing a
 subset of `ExtensionAPI` (`setActiveTools`, `getActiveTools`, `appendEntry`,
 `on`, `events`, `sessionManager.getBranch()`). No external services, no
@@ -80,6 +80,7 @@ they do NOT test, commit, tag, or publish.
 | `writeToolsetDefaults(entries, scope)` / `clearToolsetDefaults(scope)` | Mutate / clear `toolsetDefaults` settings |
 | `getEffectiveDefault(spec, snapshot?)` | Resolve a toolset's effective default through mode + settings tiers |
 | `MalformedSettingsError` | Thrown by reader/writer on unparseable settings JSON |
+| `lastCustomEntry<T>(branch, customType)` | Newest custom entry matching `customType`, narrowed through the `"custom"` discriminator so callers get typed `.data` without per-site `any` casts |
 | `TOOLSET_EVENTS` | `changed`, `restored` |
 
 `setSettingsOverrideForTests` / `setSettingsWriterOverrideForTests` are test seams, not public API.

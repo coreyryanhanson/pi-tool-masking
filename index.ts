@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type {
+	CustomEntry,
 	ExtensionAPI,
 	ExtensionContext,
 	SessionEntry,
@@ -197,10 +198,10 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		// mode fact and must beat a stale prior entry, falling through to
 		// "exclusion"); there is no settings fallback for mode — no mode
 		// settings tier exists, so mode resolution is `branchMode ?? "exclusion"`.
-		const modeEntries = ctx.sessionManager
-			.getBranch()
-			.filter((b: any) => b.customType === MODE_PERSIST_KEY);
-		const lastModeEntry = modeEntries[modeEntries.length - 1] as any;
+		const lastModeEntry = lastCustomEntry<{
+			mode?: DefaultResolutionMode;
+			allowlist?: string[];
+		} | null>(ctx.sessionManager.getBranch(), MODE_PERSIST_KEY);
 		const branchMode = lastModeEntry?.data?.mode;
 		const branchAllowlist = lastModeEntry?.data?.allowlist;
 		// Fail closed: a branch entry claiming "allowlist" with no usable array
@@ -224,11 +225,11 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		// to [] as the safe recovery. Write-time validates intent; restore-time
 		// picks the safe recovery.
 		const allowArr = Array.isArray(branchAllowlist) ? branchAllowlist : [];
-		const mode: DefaultResolutionMode = (
-			["inclusion", "exclusion", "allowlist"] as const
-		).includes(branchMode)
-			? branchMode
-			: "exclusion";
+		const mode: DefaultResolutionMode =
+			branchMode !== undefined &&
+			(["inclusion", "exclusion", "allowlist"] as const).includes(branchMode)
+				? branchMode
+				: "exclusion";
 		const ms = getModuleState();
 		ms.defaultResolutionMode = mode;
 		// Deprecation: resolving a branch mode entry to "inclusion" is the
@@ -317,11 +318,11 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 			// fall through to settings → mode floor → packaged" and must beat
 			// a stale prior entry instead of being invisible.
 			const branchNow = ctx.sessionManager.getBranch();
-			const persistEntries = branchNow.filter(
-				(b: any) => b.customType === spec.persistKey,
+			const lastEntry = lastCustomEntry<{ enabled?: boolean } | null>(
+				branchNow,
+				spec.persistKey,
 			);
-			const lastEntry = persistEntries[persistEntries.length - 1];
-			const enabled = (lastEntry as any)?.data?.enabled;
+			const enabled = lastEntry?.data?.enabled;
 			if (typeof enabled === "boolean") {
 				_applyRestoreToolset(spec, pi, enabled, true);
 			} else {
@@ -431,6 +432,30 @@ function _emitToolsetEvents(
 			});
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Helper: last custom entry (typed read, no per-site `any` cast)
+// ---------------------------------------------------------------------------
+
+/**
+ * Last custom entry matching customType, narrowed through the "custom"
+ * discriminator so callers get typed `.data` without per-site `any` casts.
+ * Scans newest-first (last write wins). Returns the entry even when
+ * `data` is null/undefined (tombstone) — callers decide how to treat that.
+ */
+export function lastCustomEntry<T>(
+	branch: readonly SessionEntry[],
+	customType: string,
+): CustomEntry<T> | undefined {
+	for (let i = branch.length - 1; i >= 0; i--) {
+		const e = branch[i];
+		if (e === undefined) continue;
+		if (e.type === "custom" && e.customType === customType) {
+			return e as CustomEntry<T>;
+		}
+	}
+	return undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -806,14 +831,11 @@ export function clearToolsetEntry(
 	persistKey: string,
 	branch: readonly SessionEntry[],
 ): void {
-	let last: SessionEntry | undefined;
-	for (let i = branch.length - 1; i >= 0; i--) {
-		if ((branch[i] as any).customType === persistKey) {
-			last = branch[i];
-			break;
-		}
-	}
-	const data = (last as any)?.data;
+	const last = lastCustomEntry<{ enabled?: boolean } | null>(
+		branch,
+		persistKey,
+	);
+	const data = last?.data;
 	// No prior entry, a tombstoned last entry (data null), or a last entry
 	// without an `enabled` field → already effectively cleared, skip.
 	if (data == null || data?.enabled == null) {

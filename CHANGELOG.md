@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Added
+
+- `lastCustomEntry<T>(branch, customType)` — returns the last
+  `type === "custom"` branch entry matching `customType`, discriminator-
+  narrowed so callers get typed `.data` without `as any`. Tombstones
+  (`data: null`) are returned, not skipped.
+
+### Changed
+
+- Mode restore, per-toolset restore, and `clearToolsetEntry` now route
+  through `lastCustomEntry` instead of casting `getBranch()` entries to
+  `any`. Behavior-preserving type-safety cleanup at a hand-editable
+  boundary (branch files on disk).
+
 ## [1.2.1] - 2026-08-03
 
 ### Added
