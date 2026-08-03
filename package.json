@@ -1,6 +1,6 @@
 {
 	"name": "pi-tool-masking",
-	"version": "1.2.0",
+	"version": "1.2.1",
 	"private": false,
 	"type": "module",
 	"description": "Core library for grouping pi tools into toggleable toolsets with persistent state and cross-extension events.",
