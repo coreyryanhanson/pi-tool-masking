@@ -922,21 +922,6 @@ export function parseToolsetDefaults(json: unknown): ToolsetDefaultsMap {
 }
 
 /**
- * Shallow-merge global and project toolset defaults.
- *
- * Project wins on key collision: `{ ...global_, ...project }`. Per-entry
- * only — no deep merge of the `{ enabled }` values.
- *
- * @internal
- */
-export function mergeToolsetDefaults(
-	global_: ToolsetDefaultsMap,
-	project: ToolsetDefaultsMap,
-): ToolsetDefaultsMap {
-	return { ...global_, ...project };
-}
-
-/**
  * Read and merge toolset defaults from settings.json (global + project).
  *
  * Reads `json.toolsetDefaults` from:
@@ -963,10 +948,10 @@ export function mergeToolsetDefaults(
  */
 export function readMergedToolsetDefaults(): ToolsetDefaultsMap {
 	if (_settingsOverride !== null) return { ..._settingsOverride };
-	return mergeToolsetDefaults(
-		parseToolsetDefaults(readSettingsJsonSafe("global")),
-		parseToolsetDefaults(readSettingsJsonSafe("project")),
-	);
+	return {
+		...parseToolsetDefaults(readSettingsJsonSafe("global")),
+		...parseToolsetDefaults(readSettingsJsonSafe("project")),
+	};
 }
 
 /**

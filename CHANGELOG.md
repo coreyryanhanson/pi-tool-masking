@@ -16,6 +16,15 @@
   Residual: depends on extension load order; a pi-core masking primitive
   is needed for a fully-robust fix.
 
+### Changed
+
+- The `"inclusion"` deprecation warning now fires once per process total,
+  not once per entry point (`setDefaultResolutionMode` / `doRestore`).
+
+- Internal helper `mergeToolsetDefaults` (never public — `@internal`
+  since 1.2.0, unused by any downstream consumer) was inlined into
+  `readMergedToolsetDefaults` and removed from the exports.
+
 ## [1.2.0] - 2026-08-02
 
 ### Added
