@@ -4,8 +4,15 @@
 
 ### Added
 
-- `before_agent_start` now re-asserts the allowlist while focus mode is
-  active, undoing mid-session force-adds by other extensions' reconcilers.
+- `before_agent_start` now re-asserts the allowlist while allowlist mode is
+  active, undoing BOTH directions of mid-session drift by other extensions'
+  reconcilers: force-adds of non-allowlisted tools are removed AND
+  force-removals of allowlisted members are restored. Emits `changed` for
+  each affected toolset; delta-gated to no-op when nothing drifted. The
+  allowlist mask is now computed from ONE shared definition
+  (`computeAllowlistDesired`) used by both the session restore path and the
+  turn-boundary re-assert, so they cannot drift. Restore/re-assert handlers
+  are also installed once per `pi` instance rather than once per toolset.
   Residual: depends on extension load order; a pi-core masking primitive
   is needed for a fully-robust fix.
 

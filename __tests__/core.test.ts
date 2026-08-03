@@ -164,7 +164,7 @@ describe("defineToolset — restore handler registration", () => {
 		expect(mock.hasHandler("session_tree")).toBe(true);
 	});
 
-	it("dedup by event identity — N handlers, one run per event", () => {
+	it("registers handlers once per pi — N toolsets, one run per event", () => {
 		const { mock, pi } = createEnv();
 		defineToolset(pi, makeSpec({ id: "a.a", persistKey: "k:a.a" }));
 		defineToolset(
@@ -175,10 +175,11 @@ describe("defineToolset — restore handler registration", () => {
 				names: new Set(["tool-c", "tool-d"]),
 			}),
 		);
-		// No registration guard: each defineToolset registers its own handler
-		expect(mock.handlerCount("session_start")).toBe(2);
-		expect(mock.handlerCount("session_tree")).toBe(2);
-		// Runtime dedup: fire once, each toolset emits exactly one event
+		// Registration is deduped per pi (WeakSet guard), so N toolsets sharing
+		// one pi install ONE handler set — O(toolsets) per turn, not O(N·toolsets).
+		expect(mock.handlerCount("session_start")).toBe(1);
+		expect(mock.handlerCount("session_tree")).toBe(1);
+		// Single run still emits exactly one event per toolset
 		const emitSpy = vi.spyOn(mock.events, "emit");
 		mock.fireLifecycleEvent("session_start");
 		const changedOrRestored = emitSpy.mock.calls.filter(
@@ -1513,7 +1514,11 @@ describe("before_agent_start allowlist re-assert", () => {
 		mock.fireLifecycleEvent("before_agent_start");
 
 		expect(pi.getActiveTools()).toEqual(["search.web"]);
-		expect(changedSpy).toHaveBeenCalled();
+		expect(changedSpy).toHaveBeenCalledTimes(1);
+		expect(changedSpy).toHaveBeenCalledWith({
+			id: "tbox.tool@npm:@juicesharp/rpiv-ask-user-question",
+			enabled: false,
+		});
 
 		// Outside allowlist mode: re-assert is a no-op.
 		setDefaultResolutionMode(pi, "exclusion");
@@ -1524,7 +1529,75 @@ describe("before_agent_start allowlist re-assert", () => {
 		expect(changedSpy).not.toHaveBeenCalled();
 	});
 
-	it("does not re-add allowlist members and does not emit when nothing leaked", () => {
+	it("restores an allowlisted member force-removed mid-session, emitting changed enabled:true", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "search.web", description: "" });
+		const search = makeSpec({
+			id: "search.web",
+			persistKey: "tbox.tool@search",
+			names: new Set(["search.web"]),
+		});
+		defineToolset(pi, search);
+		setDefaultResolutionMode(pi, "allowlist", ["search.web"]);
+		mock.fireLifecycleEvent("session_start");
+		expect(pi.getActiveTools()).toEqual(["search.web"]);
+
+		// Another extension force-removes the only allowlisted member.
+		mock.setActiveTools([]);
+		expect(pi.getActiveTools()).toHaveLength(0);
+
+		const changedSpy = vi.fn();
+		pi.events.on(TOOLSET_EVENTS.changed, changedSpy);
+
+		// Turn boundary — re-assert should restore the force-removed member.
+		mock.fireLifecycleEvent("before_agent_start");
+
+		expect(pi.getActiveTools()).toEqual(["search.web"]);
+		expect(changedSpy).toHaveBeenCalledTimes(1);
+		expect(changedSpy).toHaveBeenCalledWith({
+			id: "search.web",
+			enabled: true,
+		});
+	});
+
+	it("does not emit a false restoration for allowlisted names whose tools are unregistered", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "search.web", description: "" });
+		mock.registerTool({ name: "leak.tool", description: "" });
+		// The allowlisted toolset also claims a forward-reference name whose
+		// tool is NOT registered — it can be allowed but never restored.
+		const search = makeSpec({
+			id: "search.web",
+			persistKey: "tbox.tool@search",
+			names: new Set(["search.web", "future.web"]),
+		});
+		const leak = makeSpec({
+			id: "leak.tool",
+			persistKey: "k:leak",
+			names: new Set(["leak.tool"]),
+		});
+		defineToolset(pi, search);
+		defineToolset(pi, leak);
+		setDefaultResolutionMode(pi, "allowlist", ["search.web"]);
+		mock.fireLifecycleEvent("session_start");
+
+		// Reconciler force-adds the non-allowlisted leak.
+		mock.setActiveTools(["search.web", "leak.tool"]);
+		const changedSpy = vi.fn();
+		pi.events.on(TOOLSET_EVENTS.changed, changedSpy);
+
+		mock.fireLifecycleEvent("before_agent_start");
+
+		// Leak removed; search.web was never off, so NO enabled:true for it.
+		expect(pi.getActiveTools()).toEqual(["search.web"]);
+		expect(changedSpy).toHaveBeenCalledTimes(1);
+		expect(changedSpy).toHaveBeenCalledWith({
+			id: "leak.tool",
+			enabled: false,
+		});
+	});
+
+	it("is a steady-state no-op — does not emit or mutate when nothing drifted", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "search.web", description: "" });
 		defineToolset(
@@ -1537,7 +1610,7 @@ describe("before_agent_start allowlist re-assert", () => {
 		);
 		setDefaultResolutionMode(pi, "allowlist", ["search.web"]);
 		mock.fireLifecycleEvent("session_start");
-		// Steady state — no leak.
+		// Steady state — no leak, no member removed.
 		const changedSpy = vi.fn();
 		pi.events.on(TOOLSET_EVENTS.changed, changedSpy);
 		mock.fireLifecycleEvent("before_agent_start");

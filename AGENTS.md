@@ -94,10 +94,15 @@ they do NOT test, commit, tag, or publish.
   `pi.sessionManager.getBranch()`. Restore triggers on `session_start` and
   `session_tree`; a per-event guard dedupes repeated restore events.
 - `before_agent_start` re-asserts the allowlist mask each turn, undoing
-  mid-session force-adds by other extensions' reconcilers that bypass the
-  mask via `pi.setActiveTools` between restore events. Emits `changed` for
-  each toolset where a leak was undone; delta-gated to no-op when nothing
-  leaked. Residual: runs at this extension's load-order position — a
+  BOTH directions of mid-session drift by other extensions' reconcilers that
+  bypass the mask via `pi.setActiveTools` between restore events:
+  force-adds of non-allowlisted tools are removed and force-removals of
+  allowlisted members are restored. Emits `changed` for each affected
+  toolset; delta-gated to no-op when nothing drifted. The mask is computed
+  from a single shared helper (`computeAllowlistDesired`) with the session
+  restore path so the two never drift. Restore/re-assert handlers install
+  once per `pi` instance (WeakSet guard) rather than once per toolset.
+  Residual: runs at this extension's load-order position — a
   force-add reconciler on a later-loading extension re-adds after us; a
   fully-robust fix needs a pi-core masking primitive at the
   `setActiveTools` boundary.
