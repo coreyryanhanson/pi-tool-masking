@@ -1620,6 +1620,149 @@ describe("before_agent_start allowlist re-assert", () => {
 });
 
 // ===================================================================
+// before_agent_start disabled-leak re-assert (exclusion/inclusion)
+// ===================================================================
+
+describe("before_agent_start disabled-leak re-assert", () => {
+	it("removes a disabled toolset's tool force-added mid-session, emits changed, and is a no-op when the toolset is effectively on", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "search.web", description: "" });
+		mock.registerTool({ name: "ask_user_question", description: "" });
+
+		const search = makeSpec({
+			id: "search.web",
+			persistKey: "tbox.tool@search",
+			names: new Set(["search.web"]),
+		});
+		const ask = makeSpec({
+			id: "tbox.tool@npm:@juicesharp/rpiv-ask-user-question",
+			persistKey: "tbox.tool@npm:@juicesharp/rpiv-ask-user-question",
+			names: new Set(["ask_user_question"]),
+		});
+		defineToolset(pi, search);
+		const askTs = defineToolset(pi, ask);
+
+		// Exclusion mode (the default). Restore brings both toolsets on, then
+		// the user disables the ask toolset (writes a branch entry).
+		mock.fireLifecycleEvent("session_start");
+		expect(pi.getActiveTools()).toEqual(["search.web", "ask_user_question"]);
+		askTs.disable(pi);
+		expect(pi.getActiveTools()).toEqual(["search.web"]);
+
+		// Simulate the reconciler punching through on the next turn.
+		mock.setActiveTools(["search.web", "ask_user_question"]);
+		expect(pi.getActiveTools()).toHaveLength(2);
+
+		const changedSpy = vi.fn();
+		pi.events.on(TOOLSET_EVENTS.changed, changedSpy);
+
+		// Fire the turn boundary — re-assert should undo the leak.
+		mock.fireLifecycleEvent("before_agent_start");
+
+		expect(pi.getActiveTools()).toEqual(["search.web"]);
+		expect(changedSpy).toHaveBeenCalledTimes(1);
+		expect(changedSpy).toHaveBeenCalledWith({
+			id: "tbox.tool@npm:@juicesharp/rpiv-ask-user-question",
+			enabled: false,
+		});
+
+		// Effectively on: re-assert is a no-op — a default-on toolset is not
+		// a hard constraint, so the force-added tool is NOT removed.
+		askTs.enable(pi);
+		mock.setActiveTools(["search.web", "ask_user_question"]);
+		changedSpy.mockClear();
+		mock.fireLifecycleEvent("before_agent_start");
+		expect(pi.getActiveTools()).toEqual(["search.web", "ask_user_question"]);
+		expect(changedSpy).not.toHaveBeenCalled();
+	});
+
+	it("is a steady-state no-op — does not emit or mutate when nothing drifted", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		mock.registerTool({ name: "tool-b", description: "" });
+		const ts = defineToolset(pi, makeSpec());
+		ts.enable(pi);
+		ts.disable(pi);
+		expect(pi.getActiveTools()).toEqual([]);
+
+		const changedSpy = vi.fn();
+		pi.events.on(TOOLSET_EVENTS.changed, changedSpy);
+		mock.fireLifecycleEvent("before_agent_start");
+
+		expect(pi.getActiveTools()).toEqual([]);
+		expect(changedSpy).not.toHaveBeenCalled();
+	});
+
+	it("honors each tier — a settings pin or branch entry flipping off is defended, flipping on is not", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		mock.registerTool({ name: "tool-b", description: "" });
+		const ts = defineToolset(pi, makeSpec());
+
+		// Tier 2: settings pin `enabled: false` flips the toolset off with no
+		// branch entry (packaged default-on fallback would say on).
+		setSettingsOverrideForTests({
+			"toolset-state:test.toolset": { enabled: false },
+		});
+		mock.fireLifecycleEvent("session_start");
+		expect(pi.getActiveTools()).toEqual([]);
+
+		// Reconciler force-adds the disabled toolset's tools.
+		mock.setActiveTools(["tool-a", "tool-b"]);
+		const changedSpy = vi.fn();
+		pi.events.on(TOOLSET_EVENTS.changed, changedSpy);
+		mock.fireLifecycleEvent("before_agent_start");
+		expect(pi.getActiveTools()).toEqual([]);
+		expect(changedSpy).toHaveBeenCalledTimes(1);
+		expect(changedSpy).toHaveBeenCalledWith({
+			id: "test.toolset",
+			enabled: false,
+		});
+
+		// Tier 1 beats tier 2: an explicit branch entry `enabled: true` flips
+		// it back on — effectively on, so re-assert does not force-remove.
+		setSettingsOverrideForTests({});
+		ts.enable(pi);
+		expect(pi.getActiveTools()).toEqual(["tool-a", "tool-b"]);
+		changedSpy.mockClear();
+		mock.fireLifecycleEvent("before_agent_start");
+		expect(pi.getActiveTools()).toEqual(["tool-a", "tool-b"]);
+		expect(changedSpy).not.toHaveBeenCalled();
+	});
+
+	it("does not emit changed for a disabled toolset whose tools were never active", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "a1", description: "" });
+		mock.registerTool({ name: "a2", description: "" });
+		mock.registerTool({ name: "b1", description: "" });
+		const tsA = defineToolset(
+			pi,
+			makeSpec({ id: "A", persistKey: "k:A", names: new Set(["a1", "a2"]) }),
+		);
+		const tsB = defineToolset(
+			pi,
+			makeSpec({ id: "B", persistKey: "k:B", names: new Set(["b1"]) }),
+		);
+		tsA.enable(pi);
+		tsA.disable(pi);
+		tsB.enable(pi);
+		tsB.disable(pi);
+		expect(pi.getActiveTools()).toEqual([]);
+
+		// Only B's tool leaks back in; A's tools never return. The emit loop
+		// must not claim A was affected (nothing of A was in the active set).
+		mock.setActiveTools(["b1"]);
+		const changedSpy = vi.fn();
+		pi.events.on(TOOLSET_EVENTS.changed, changedSpy);
+		mock.fireLifecycleEvent("before_agent_start");
+
+		expect(pi.getActiveTools()).toEqual([]);
+		expect(changedSpy).toHaveBeenCalledTimes(1);
+		expect(changedSpy).toHaveBeenCalledWith({ id: "B", enabled: false });
+	});
+});
+
+// ===================================================================
 // Dependency cascade on enable
 // ===================================================================
 
