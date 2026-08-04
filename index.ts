@@ -391,10 +391,7 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 	// a permit-list member. This handler defends the mask at each turn,
 	// undoing BOTH directions of drift (leak + force-removal) via the same
 	// shared `computeAllowlistDesired` definition the restore path uses.
-	const reassertAllowlist = (): void => {
-		const ms = getModuleState();
-		const allow = ms.activeAllowlist;
-		if (allow === undefined) return; // not in allowlist mode
+	const reassertAllowlist = (allow: string[]): void => {
 		const registry = getRegistry();
 		const current = pi.getActiveTools();
 		const currentSet = new Set(current);
@@ -507,7 +504,7 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 	const onBeforeAgentStart = (event: unknown, ctx: ExtensionContext): void => {
 		const ms = getModuleState();
 		if (ms.activeAllowlist !== undefined) {
-			reassertAllowlist();
+			reassertAllowlist(ms.activeAllowlist);
 		} else {
 			reassertDisabled(event, ctx);
 		}
