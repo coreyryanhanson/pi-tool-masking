@@ -170,6 +170,56 @@ function computeAllowlistDesired(
 }
 
 // ---------------------------------------------------------------------------
+// Effective-enabled resolution — shared by restore and the turn re-assert
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve a toolset's effective enabled state through the same tier chain
+ * restore applies per toolset: chat-branch entry → settings pin → mode
+ * floor → packaged `defaultEnabled`.
+ *
+ * A pinned settings entry is explicit user intent and participates in BOTH
+ * modes — mirroring how the chat-branch tier (also user intent) is honored
+ * in inclusion. Only unpinned toolsets consult mode for the floor
+ * (exclusion → `defaultEnabled ?? true`, inclusion → false).
+ * `settingsDefaults` is the on-disk shape
+ * `Record<persistKey, { enabled: boolean }>` (see `readMergedToolsetDefaults`);
+ * the pin is the wrapped object, unwrapped via `?.enabled`. A null
+ * (tombstoned) last branch entry falls through to the next tier, same as
+ * no entry at all.
+ *
+ * `persistedEntry` reports whether the value came from a chat-branch entry
+ * (vs settings/mode-floor/packaged fallback) — restore uses it to pick the
+ * `restored` vs `changed` emit; the turn-boundary re-assert only needs
+ * `.enabled`. Shared by both so the two can never drift on what
+ * "effectively off" means.
+ */
+function effectiveEnabled(
+	spec: ToolsetSpec,
+	branch: readonly SessionEntry[],
+	settingsDefaults: ToolsetDefaultsMap,
+	mode: DefaultResolutionMode,
+): { enabled: boolean; persistedEntry: boolean } {
+	const lastEntry = lastCustomEntry<{ enabled?: boolean } | null>(
+		branch,
+		spec.persistKey,
+	);
+	const enabled = lastEntry?.data?.enabled;
+	if (typeof enabled === "boolean") {
+		return { enabled, persistedEntry: true };
+	}
+	const settingsEnabled = settingsDefaults[spec.persistKey]?.enabled;
+	const fallback = spec.defaultEnabled ?? true;
+	const resolved =
+		typeof settingsEnabled === "boolean"
+			? settingsEnabled
+			: mode === "inclusion"
+				? false
+				: fallback;
+	return { enabled: resolved, persistedEntry: false };
+}
+
+// ---------------------------------------------------------------------------
 // Ensure session_start / session_tree restore handler is registered
 // (dedup at runtime by event-object identity, not at registration time)
 // ---------------------------------------------------------------------------
@@ -316,36 +366,17 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 			// pass are visible to later toolsets. The `b.data != null` filter
 			// is dropped: a null (tombstoned) last entry means "cleared →
 			// fall through to settings → mode floor → packaged" and must beat
-			// a stale prior entry instead of being invisible.
+			// a stale prior entry instead of being invisible. The tier chain
+			// itself lives in `effectiveEnabled` — shared with the
+			// turn-boundary re-assert so the two can never drift.
 			const branchNow = ctx.sessionManager.getBranch();
-			const lastEntry = lastCustomEntry<{ enabled?: boolean } | null>(
+			const { enabled, persistedEntry } = effectiveEnabled(
+				spec,
 				branchNow,
-				spec.persistKey,
+				settingsDefaults,
+				mode,
 			);
-			const enabled = lastEntry?.data?.enabled;
-			if (typeof enabled === "boolean") {
-				_applyRestoreToolset(spec, pi, enabled, true);
-			} else {
-				// No usable branch entry — fall through to settings tier (2),
-				// then mode floor, then packaged `defaultEnabled` (3). A pinned
-				// settings entry is explicit user intent and participates in
-				// BOTH modes — mirroring how the chat-branch tier (also user
-				// intent) is honored in inclusion via the if-branch. Only
-				// unpinned toolsets consult mode for the floor (exclusion →
-				// `defaultEnabled ?? true`, inclusion → false).
-				// `readMergedToolsetDefaults()` returns the on-disk shape
-				//   Record<persistKey, { enabled: boolean }>
-				// so the pin is the wrapped object; unwrap with `?.enabled`.
-				const settingsEnabled = settingsDefaults[spec.persistKey]?.enabled;
-				const fallback = spec.defaultEnabled ?? true;
-				const resolved =
-					typeof settingsEnabled === "boolean"
-						? settingsEnabled
-						: mode === "inclusion"
-							? false
-							: fallback;
-				_applyRestoreToolset(spec, pi, resolved, false);
-			}
+			_applyRestoreToolset(spec, pi, enabled, persistedEntry);
 		}
 	};
 
@@ -402,11 +433,97 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		}
 	};
 
+	// Non-allowlist modes (exclusion — the default — and the deprecated
+	// inclusion): the DISABLED set is a hard constraint — `enabled: false`
+	// means "these tools must be off". Between restore events, a raw
+	// `pi.setActiveTools` call from another extension's reconciler punches
+	// straight through a disabled toolset and the force-add survives into
+	// the turn. This handler defends the LEAK direction at each turn:
+	// force-re-added tools of a toolset whose EFFECTIVE state is off are
+	// removed again. Effective state goes through the same tier chain
+	// restore uses (`effectiveEnabled`), so this can never disagree with
+	// what restore would apply after a `/reload` — no turn-to-turn
+	// flip-flop. Leak-direction only: a default-on toolset is not a hard
+	// constraint — a missing default-on tool may have been intentionally
+	// removed, so it is not force-restored. (An explicit `enabled: true`
+	// branch entry IS user intent but is equally unprotected from
+	// force-removal; force-removal reconcilers are rarer than force-add
+	// ones and this has not been reported.)
+	const reassertDisabled = (_event: unknown, ctx: ExtensionContext): void => {
+		const ms = getModuleState();
+		if (ms.activeAllowlist !== undefined) return; // allowlist mode — reassertAllowlist owns it
+		const registry = getRegistry();
+		const current = pi.getActiveTools();
+
+		// Read settings + branch once per turn; same tier chain as restore.
+		const settingsDefaults = readMergedToolsetDefaults();
+		const branch = ctx.sessionManager.getBranch();
+		const mode = ms.defaultResolutionMode;
+
+		// Suppress set = union of names over toolsets whose effective state
+		// is off.
+		const suppress = new Set<string>();
+		for (const [, entry] of registry) {
+			const { enabled } = effectiveEnabled(
+				entry.spec,
+				branch,
+				settingsDefaults,
+				mode,
+			);
+			if (!enabled) {
+				for (const n of entry.spec.names) suppress.add(n);
+			}
+		}
+
+		const next = current.filter((n) => !suppress.has(n));
+		// Delta gate — no-op unless the active set actually changed. `next` is
+		// a filter of `current`, so equal length already implies equality; the
+		// containment check is kept to mirror reassertAllowlist's gate.
+		const currentSet = new Set(current);
+		if (
+			next.length === current.length &&
+			next.every((n) => currentSet.has(n))
+		) {
+			return;
+		}
+		pi.setActiveTools(next);
+		// Emit `changed` so downstream slots (tbox status bar) re-render to the
+		// corrected count. One emit per affected toolset, keyed to ACTUAL
+		// drift: names in `current` but not `next` (leak direction). The
+		// `currentSet.has(n)` guard skips toolsets whose names were never
+		// active — removing nothing is not drift, so no false `changed`.
+		const nextSet = new Set(next);
+		for (const [, entry] of registry) {
+			const names = [...entry.spec.names];
+			if (names.some((n) => currentSet.has(n) && !nextSet.has(n))) {
+				_emitToolsetEvents(entry.spec, pi, TOOLSET_EVENTS.changed, false);
+			}
+		}
+	};
+
+	// Single dispatcher: branch on mode, NOT a second `pi.on` registration —
+	// the suite asserts `handlerCount("before_agent_start") === 1`. One
+	// registration, two mode-shaped re-asserters behind it.
+	const onBeforeAgentStart = (event: unknown, ctx: ExtensionContext): void => {
+		const ms = getModuleState();
+		if (ms.activeAllowlist !== undefined) {
+			reassertAllowlist();
+		} else {
+			reassertDisabled(event, ctx);
+		}
+	};
+
 	// ponytail: re-assert runs at this extension's load-order position. If a
 	// force-add reconciler on another extension loads AFTER this consumer,
 	// it re-adds after us and the leak survives. Fully-robust fix needs a
 	// pi-core masking primitive at the setActiveTools boundary.
-	pi.on("before_agent_start", reassertAllowlist);
+	//
+	// ponytail: reassertDisabled computes effective state from the branch,
+	// like restore — so a live-applied disable with no branch entry
+	// (`applyToolsetEnabled(pi, spec, false)`) is not defended. By design
+	// (the re-assert must not drift from restore); that API is used in the
+	// allowlist restore path, not for interactive exclusion-mode toggles.
+	pi.on("before_agent_start", onBeforeAgentStart);
 }
 
 // ---------------------------------------------------------------------------

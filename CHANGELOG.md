@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Added
+
+- `before_agent_start` now re-asserts the DISABLED set in exclusion and
+  inclusion modes (not just allowlist), closing the same mid-session
+  authority gap 1.2.1 closed for allowlist mode: force-re-added tools of a
+  toolset whose effective state is off are removed again at each turn
+  boundary, so a disabled toolset can no longer leak back into the turn via
+  another extension's `pi.setActiveTools` reconciler. Effective state
+  resolves through the same tier chain restore uses (branch entry →
+  settings pin → mode floor → packaged `defaultEnabled`), extracted into a
+  shared internal `effectiveEnabled` helper so restore and the re-assert
+  cannot drift. Leak-direction only — default-on is not a hard constraint,
+  so legitimately removed default-on tools are not force-restored. Emits
+  `changed` per affected toolset (delta-gated to no-op when nothing
+  drifted). Residual: depends on extension load order, same as the
+  allowlist re-assert.
+
 ## [1.2.2] - 2026-08-03
 
 ### Added
