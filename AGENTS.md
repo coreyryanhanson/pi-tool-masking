@@ -36,11 +36,15 @@ fail otherwise.
 Vitest with **globals on** (`describe`/`it`/`expect` available without import;
 `types: ["node", "vitest/globals"]`). `testTimeout: 15_000`.
 
-Tests live in `__tests__/` (`core.test.ts`, `registry-convergence.test.ts`, `custom-entry.test.ts`).
+Tests live in `__tests__/` (`core.test.ts`, `registry-convergence.test.ts`, `custom-entry.test.ts`,
+`env-passthrough.test.ts`).
 They use a custom `MockPI` class (`__tests__/mock-pi.ts`) implementing a
-subset of `ExtensionAPI` (`setActiveTools`, `getActiveTools`, `appendEntry`,
-`on`, `events`, `sessionManager.getBranch()`). No external services, no
-fixtures, no snapshots.
+subset of `ExtensionAPI` (`setActiveTools`, `getActiveTools`, `getAllTools`,
+`registerTool`, `appendEntry`, `on`, `events`, `sessionManager.getBranch()`).
+No external services, no fixtures, no snapshots. The env-passthrough tests
+must save/restore `process.env` and delete the `globalThis` registry/boot-id
+keys in `beforeEach` — process-global state is the feature under test, so
+leakage between tests there is a real failure mode.
 
 ## CI
 
@@ -80,6 +84,7 @@ they do NOT test, commit, tag, or publish.
 | `writeToolsetDefaults(entries, scope)` / `clearToolsetDefaults(scope)` | Mutate / clear `toolsetDefaults` settings |
 | `getEffectiveDefault(spec, snapshot?)` | Resolve a toolset's effective default through mode + settings tiers |
 | `MalformedSettingsError` | Thrown by reader/writer on unparseable settings JSON |
+| `parseToolsetDefaults(json)` | Validate/parse raw `toolsetDefaults` JSON (throws `MalformedSettingsError`) |
 | `lastCustomEntry<T>(branch, customType)` | Newest custom entry matching `customType`, narrowed through the `"custom"` discriminator so callers get typed `.data` without per-site `any` casts |
 | `TOOLSET_EVENTS` | `changed`, `restored` |
 
@@ -110,3 +115,17 @@ they do NOT test, commit, tag, or publish.
   dependents. Cycle detection at toggle time.
 - `emitMemberEvents`: opt into per-member fan-out events for per-tool UI
   updates.
+- **Subagent inheritance (env mirror):** parent re-snapshots live toolset
+  state (all registered members active = on, `every()` not `isEnabled()`)
+  into `PI_TOOLMASKING_LIVE_STATE` (`{ v: 1, pid, boot, state }`, booleans
+  only, 64KB cap, delta-gated) on every `tool_call` and at the end of
+  restore. A fresh child read-and-deletes the var at its first restore and
+  holds the consumed map on `globalThis` — resolution precedence is:
+  chat-branch entry → env mirror → settings pin → mode floor → packaged
+  default. Identity guard (pid + boot id on `globalThis`, `/reload`-stable)
+  ignores stale self-mirrors after same-process `/new`; `session_shutdown`
+  deletes the standing mirror. Envelope violations fail closed (log +
+  settings resolve). `PI_TOOLMASKING_NO_INHERIT` opts the consumer out and
+  propagates to grandchildren by design. Consumer-only contract: only this
+  library writes the vars; env vars are a dump vector, so booleans only.
+  Retirement condition: a pi-core spawn/inherit-state mechanism.
