@@ -2,6 +2,33 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Subagent inheritance (env mirror):** a fresh child session spawned by
+  any subagent plugin now inherits the parent's live toolset state instead
+  of re-resolving from `toolsetDefaults`. The parent mirrors every
+  registered toolset's live state into `PI_TOOLMASKING_LIVE_STATE`
+  (`{ v: 1, pid, boot, state }`, booleans only) — re-snapshotted on every
+  `tool_call` and at the end of restore (post-consume, so grandchildren
+  inherit post-restore state), delta-gated against the current env value.
+  A fresh child reads-and-deletes the var at the top of its first restore
+  (before the allowlist short-circuit, so allowlist-mode children consume
+  too) and holds the map on `globalThis` so both restore and the
+  `before_agent_start` re-assert resolve through it — the re-assert cannot
+  strip the inherited mask one turn later. Precedence: chat-branch entry →
+  env mirror → settings pin → mode floor → packaged default, so a valid
+  foreign mirror outranks settings pins; mirror-resolved toolsets emit
+  `restored`. An identity guard (pid + per-process boot id on
+  `globalThis`, `/reload`-stable) ignores stale self-mirrors after same-process
+  session switches (`/new`), which also clears the consumed map
+  (`"startup"` and `"reload"` reasons keep it). Envelope violations
+  (corrupt JSON, bad shape, unknown version, >64KB) fail closed — one log
+  line, var deleted, settings resolve. `session_shutdown` deletes the
+  standing mirror. `PI_TOOLMASKING_NO_INHERIT` opts the consumer out (and
+  propagates to grandchildren by design). README documents the
+  consumer-only env contract, precedence, limitations, and retirement
+  condition (a pi-core spawn/inherit-state mechanism).
+
 ## [1.2.3] - 2026-08-04
 
 ### Added

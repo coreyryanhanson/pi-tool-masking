@@ -137,9 +137,10 @@ A toolset's fresh-session default is no longer locked to its packaged `spec.defa
 
 Restore resolves each toolset's default in this order (first hit wins):
 
-1. **Chat-branch entry** — the last `appendEntry(persistKey, …)` on this branch. A `null` tombstone (see [`clearToolsetEntry`](#tombstone-helpers)) falls through to tier 2.
-2. **Settings pin** — `toolsetDefaults[persistKey].enabled`, merged global → project (project wins per entry). Mode-agnostic.
-3. **Packaged default** — `spec.defaultEnabled ?? true`, filtered by resolution mode for unpinned toolsets only.
+1. **Chat-branch entry** — the last `appendEntry(persistKey, …)` on this branch. A `null` tombstone (see [`clearToolsetEntry`](#tombstone-helpers)) falls through to the tiers below.
+2. **Env mirror** — `PI_TOOLMASKING_LIVE_STATE` inherited from a parent process at spawn, consumed once at the child's first restore (see [Subagent inheritance](#subagent-inheritance-env-mirror)). Present only in a freshly spawned child.
+3. **Settings pin** — `toolsetDefaults[persistKey].enabled`, merged global → project (project wins per entry). Mode-agnostic.
+4. **Packaged default** — `spec.defaultEnabled ?? true`, filtered by resolution mode for unpinned toolsets only.
 
 Settings pins are honored in all three modes, mirroring how chat-branch entries are honored — only unpinned toolsets consult mode for the floor.
 
@@ -161,11 +162,32 @@ Remove the `toolsetDefaults` wrapper key entirely from one scope, preserving eve
 
 ### `getEffectiveDefault(spec, snapshot?)`
 
-Resolve a toolset's effective fresh-session default: settings tier (2) then packaged `spec.defaultEnabled ?? true` (3). **Ignores resolution mode** — callers needing mode-aware behavior must consult `getDefaultResolutionMode()` themselves. Pass an explicit `snapshot` (from `readMergedToolsetDefaults()`) when looping over multiple toolsets; omit it for a one-off (it performs its own read).
+Resolve a toolset's effective fresh-session default: settings tier (3) then packaged `spec.defaultEnabled ?? true` (4). **Ignores resolution mode** — callers needing mode-aware behavior must consult `getDefaultResolutionMode()` themselves. Also ignores the env-mirror tier (that tier exists only in live restore resolution). Pass an explicit `snapshot` (from `readMergedToolsetDefaults()`) when looping over multiple toolsets; omit it for a one-off (it performs its own read).
+
+## Subagent inheritance (env mirror)
+
+Fresh child sessions spawned by subagent plugins re-resolve toolset state from settings — the parent's interactive toggles are chat-branch entries and don't cross the process boundary, so children silently land on settings defaults. This library fixes that by mirroring the parent's **live** toolset state into the process environment — the one channel every spawn path already shares (`child_process.spawn` inherits the parent env by default). A freshly spawned child consumes it once at its first `session_start` / `session_tree`, then resolves normally. No settings changes, no child-detection heuristics, nothing persisted to disk. Grandchildren work the same way: the publisher runs in children too, so a child re-publishes from its own post-restore state at its next dispatch.
+
+`PI_TOOLMASKING_LIVE_STATE` is a **consumer-only** contract: only this library writes the var. Other plugins consume it at their peril — there is no two-way contract.
+
+1. **Envelope format** — `{ v: 1, pid, boot, state }` where `state` is `Record<persistKey, { enabled: boolean }>` for every registered toolset (toolsets whose members all fail to register are omitted). Booleans only, by design: env vars are a dump vector (crash reporters, `set -x`, CI capture), so the envelope must never grow beyond inert booleans. A toolset is mirrored `on` iff every **registered** member is in `getActiveTools()` — a deliberate divergence from `Toolset.isEnabled()` (`.some()`): the mirror reflects the fully-restored mask, which is what a child should inherit. Any envelope violation (corrupt JSON, bad shape, unknown version, >64KB) fails closed — the var is deleted with one log line and the child resolves from settings; individual malformed entries are inert at resolution.
+2. **Precedence tier** — chat-branch entry → env mirror → settings pin → mode floor → packaged default. A valid foreign mirror **outranks explicit settings pins** for that session. Mirror-resolved toolsets emit `restored` (not `changed`) at child `session_start`. The consumed map survives `session_tree` and `/reload` in the child, and is cleared on a same-process session switch (`/new`, `/resume`) so a stale inherited mask never shadows the resumed session's own state.
+3. **`PI_TOOLMASKING_NO_INHERIT`** — consumer opt-out, the escape hatch for the mirror-over-pin precedence above. Set it and the child skips the mirror tier entirely, resolving from settings (and the mirror var is still deleted, so it doesn't leak into the opt-out child's own spawns). The opt-out var itself is never deleted and propagates to grandchildren: set it once (operator or CI harness) and the whole subtree opts out. That's the point — don't scrub it.
+4. **Limitations** — one line each:
+   - A spawning plugin that scrubs child env (`env: {}`) loses the channel — silent fallback to defaults. Genuine pi-core gap.
+   - External-CLI runners (codex-exec etc.) are out of scope — a different runtime; this library isn't loaded there.
+   - Inheritance is all-or-nothing — no per-lane overrides.
+   - The mirror carries **observed live state, not operator intent**: a parent that never touched toolset X still publishes it `on` (under the default exclusion mode), silently overriding a child's settings pin `off` — the inverse of the bug this fixes.
+   - A toggle made after the parent's last lifecycle publish, spawning from a slash-command handler with no intervening `tool_call`, inherits pre-toggle state. Narrow — most spawns go through the `subagent` tool (a `tool_call`).
+   - A plugin using `context: "fork"` doesn't need the mirror — branch-entry replay already outranks it on that path.
+   - The standing mirror leaks into any nested or top-level `pi` process while a session is live (`session_start { reason: "startup" }` is indistinguishable from a spawned child's); consumed as genuine inheritance, bounded by the mandatory `session_shutdown` cleanup. No cheap code fix.
+   - `isEnabled()` uses `.some()` while the mirror uses all-registered-members (deliberate divergence — see above).
+   - `getEffectiveDefault()` does not see the mirror tier; live resolution is `effectiveEnabled`.
+5. **Retirement condition** — the mirror is removed when pi-core provides an official mechanism for parent-side extension state to reach a spawned child session (spawn/launch hook with extension-contributed bindings, a child-visible parent-context API, or an official inherit-state contract in the child spawn path). The trigger is the pi-core capability, not any one subagent plugin's behavior — only a pi-core channel retires the bridge.
 
 ## Tombstone helpers
 
-Within pi-core's append-only `SessionManager`, a toolset's chat-branch entry can't be deleted — but a `null` tombstone appended after the last entry makes `doRestore` fall through to the settings tier so settings re-assert. Tombstones are dedup'd (no-op when the last entry is already cleared) and never written for never-toggled toolsets. A later manual toggle appends after the tombstone and supersedes it.
+Within pi-core's append-only `SessionManager`, a toolset's chat-branch entry can't be deleted — but a `null` tombstone appended after the last entry makes `doRestore` fall through to the env-mirror tier in a freshly spawned child and otherwise to settings, so settings re-assert. Tombstones are dedup'd (no-op when the last entry is already cleared) and never written for never-toggled toolsets. A later manual toggle appends after the tombstone and supersedes it.
 
 ### `clearToolsetEntry(pi, persistKey, branch)`
 
@@ -340,9 +362,10 @@ ids with a stable namespace (<product-family>.<subset>, e.g. "foo.web").
 - **Registration:** `defineToolset` stores the spec and handle in a global registry (shared across module instances, so multiple extensions see the same toolsets).
 - **Persistence:** each toolset writes `{ enabled }` entries under its `persistKey` on the session branch. On `session_start` or `session_tree`, the library re-reads the branch and applies the last persisted state.
 - **Default resolution:** a `toolset-resolution-mode` entry on the branch controls how toolsets with no persisted state resolve on restore — `exclusion` (on/off by `defaultEnabled`), `inclusion` (deprecated unbounded floor), or `allowlist` (a finite branch-persisted array whose complement is computed at restore). Set by `setDefaultResolutionMode`, persists across reloads.
-- **Defaults tiers:** each toolset's restore default resolves chat-branch entry → `toolsetDefaults` settings pin → packaged `spec.defaultEnabled`, filtered by resolution mode for unpinned toolsets only. Settings pins are read fresh from disk on each restore.
+- **Defaults tiers:** each toolset's restore default resolves chat-branch entry → env mirror (in a freshly spawned child; see [Subagent inheritance](#subagent-inheritance-env-mirror)) → `toolsetDefaults` settings pin → packaged `spec.defaultEnabled`, filtered by resolution mode for unpinned toolsets only. Settings pins are read fresh from disk on each restore.
 - **Null-tombstone-aware restore:** a `null` last branch entry (written by `clearToolsetEntry`) falls through to the settings tier instead of any stale prior entry; mode resolution is likewise null-tombstone-aware (`branchMode ?? "exclusion"`). Tombstones aren't sticky — a later toggle supersedes them.
 - **Events:** a live toggle emits only when state actually changes (no-op toggles are suppressed); restore always emits, so side-effect owners stay in sync across reloads and tree navigations.
+- **Env mirror:** the parent re-snapshots every registered toolset's live state into `PI_TOOLMASKING_LIVE_STATE` on each `tool_call` and at the end of restore (post-consume), delta-gated against the current env value. A fresh child reads-and-deletes the var at the top of its first restore — before the allowlist short-circuit — and holds the map on `globalThis` so the `before_agent_start` re-assert sees the same inheritance. An identity guard (pid + per-process boot id) ignores stale self-mirrors (e.g. after `/new`), and a `session_shutdown` handler deletes the standing mirror.
 
 ---
 
