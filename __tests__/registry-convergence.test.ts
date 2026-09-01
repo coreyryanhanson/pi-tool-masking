@@ -27,6 +27,8 @@ function cleanRegistry(): void {
 	delete (globalThis as any)[REGISTRY_KEY];
 	delete (globalThis as any)[RESTORE_EVENT_KEY];
 	delete (globalThis as any)[MODULE_STATE_KEY];
+	delete (globalThis as any)["__piToolMaskingBootId"];
+	delete process.env["PI_TOOLMASKING_LIVE_STATE"];
 }
 
 beforeEach(() => {
@@ -60,10 +62,7 @@ describe("GlobalThis registry convergence", () => {
 		const { mock: m2, pi: p2 } = createEnv();
 		m2.registerTool({ name: "from-mod2", description: "" });
 
-		const registryPre = (globalThis as any)[REGISTRY_KEY] as Map<
-			string,
-			unknown
-		>;
+		const registryPre = (globalThis as any)[REGISTRY_KEY] as Map<string, unknown>;
 		expect(registryPre.has("mod1.test")).toBe(true);
 
 		// mod2 registers its own toolset — both co-exist

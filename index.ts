@@ -211,7 +211,7 @@ function publishLiveState(pi: ExtensionAPI): void {
 	if (registry.size === 0) return;
 	// Hoist the tool-registry scan once per snapshot — this runs on the
 	// tool_call hot path and must not rescan per toolset.
-	const registered = new Set(pi.getAllTools().map((t) => t.name));
+	const registered = getRegisteredNames(pi);
 	const active = new Set(pi.getActiveTools());
 	const state: Record<string, { enabled: boolean }> = {};
 	for (const [, entry] of registry) {

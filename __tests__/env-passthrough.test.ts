@@ -80,6 +80,7 @@ afterEach(() => {
 	else process.env[LIVE_STATE_ENV] = savedLiveState;
 	if (savedNoInherit === undefined) delete process.env[NO_INHERIT_ENV];
 	else process.env[NO_INHERIT_ENV] = savedNoInherit;
+	vi.restoreAllMocks();
 	cleanGlobalState();
 });
 

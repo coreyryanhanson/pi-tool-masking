@@ -45,6 +45,8 @@ function cleanRegistry(): void {
 	delete (globalThis as any)[RESTORE_EVENT_KEY];
 	delete (globalThis as any)[MODULE_STATE_KEY];
 	delete (globalThis as any)[DEPRECATION_WARNED_KEY];
+	delete (globalThis as any)["__piToolMaskingBootId"];
+	delete process.env["PI_TOOLMASKING_LIVE_STATE"];
 }
 
 function makeSpec(
