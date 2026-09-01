@@ -129,16 +129,31 @@ export class MockPI implements Partial<ExtensionAPI> {
 		return this._handlers.get(event)?.length ?? 0;
 	}
 
-	/** Fire a lifecycle event (session_start, session_tree) to registered handlers. */
-	fireLifecycleEvent(event: string): void {
+	/**
+	 * Fire a lifecycle event (session_start, session_tree) to registered
+	 * handlers. `payload` is merged into the single event object — e.g.
+	 * `{ type: "session_start", reason: "startup" }` — so handlers that
+	 * narrow the `unknown` event shape (reason-gated lifecycle rules) see it.
+	 */
+	fireLifecycleEvent(event: string, payload?: Record<string, unknown>): void {
 		const handlers = this._handlers.get(event) ?? [];
 		const ctx = this.createContext();
 		// Create ONE event object — the real runner passes the same reference
 		// to every extension's handler (event-identity dedup).
-		const eventObj = {};
+		const eventObj = { ...payload };
 		for (const h of handlers) {
 			h(eventObj, ctx);
 		}
+	}
+
+	/**
+	 * Simulate a tool dispatch: fires the `tool_call` event (fired by the real
+	 * runner before ANY tool of ANY plugin executes — including whatever tool
+	 * a subagent plugin uses to spawn). The masking lib publishes its
+	 * live-state mirror there.
+	 */
+	dispatchToolCall(): void {
+		this.fireLifecycleEvent("tool_call", { type: "tool_call" });
 	}
 
 	/** Direct emit for tests that need to simulate events. */
