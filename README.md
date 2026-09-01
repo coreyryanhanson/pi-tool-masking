@@ -142,7 +142,7 @@ Restore resolves each toolset's default in this order (first hit wins):
 3. **Settings pin** — `toolsetDefaults[persistKey].enabled`, merged global → project (project wins per entry). Mode-agnostic.
 4. **Packaged default** — `spec.defaultEnabled ?? true`, filtered by resolution mode for unpinned toolsets only.
 
-Settings pins are honored in all three modes, mirroring how chat-branch entries are honored — only unpinned toolsets consult mode for the floor.
+Settings pins are honored in exclusion mode, mirroring how chat-branch entries are honored — only unpinned toolsets consult mode for the floor. While allowlist mode is active, pins and branch entries are bypassed: the active set is exactly the allowlist members.
 
 ### `readMergedToolsetDefaults()`
 

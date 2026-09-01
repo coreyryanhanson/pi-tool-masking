@@ -202,6 +202,10 @@ function getBootId(): string {
  * session_tree//new//resume, so a deleted var must never match the next
  * snapshot or the rewrite after /new would be skipped.
  */
+function getRegisteredNames(pi: ExtensionAPI): Set<string> {
+	return new Set(pi.getAllTools().map((t) => t.name));
+}
+
 function publishLiveState(pi: ExtensionAPI): void {
 	const registry = getRegistry();
 	if (registry.size === 0) return;
@@ -517,7 +521,7 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 			// toolset) is kept as-is — `setActiveTools` is a full replacement, so we
 			// must not rebuild the set from only allowlist members.
 			const current = pi.getActiveTools();
-			const registered = new Set(pi.getAllTools().map((t) => t.name));
+			const registered = getRegisteredNames(pi);
 			const desired = computeAllowlistDesired(
 				allowArr,
 				current,
@@ -610,7 +614,7 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		const registry = getRegistry();
 		const current = pi.getActiveTools();
 		const currentSet = new Set(current);
-		const registered = new Set(pi.getAllTools().map((t) => t.name));
+		const registered = getRegisteredNames(pi);
 		const next = computeAllowlistDesired(allow, current, registered, registry);
 		// Delta gate — no-op unless the active set actually changed. `next`/`current`
 		// may share a length while differing (a leak removed AND a member re-added),
@@ -762,9 +766,10 @@ function _emitToolsetEvents(
 	pi.events.emit(eventType, { id: spec.id, enabled });
 
 	if (spec.emitMemberEvents) {
+		const registered = getRegisteredNames(pi);
 		for (const name of spec.names) {
 			// Only emit for names that are actually registered tools
-			if (!pi.getAllTools().some((t) => t.name === name)) continue;
+			if (!registered.has(name)) continue;
 			pi.events.emit(eventType, {
 				id: spec.id,
 				enabled,
@@ -804,9 +809,8 @@ export function lastCustomEntry<T>(
 
 function _applyEnable(spec: ToolsetSpec, pi: ExtensionAPI): void {
 	const current = new Set(pi.getActiveTools());
-	const registeredNames = [...spec.names].filter((n) =>
-		pi.getAllTools().some((t) => t.name === n),
-	);
+	const registered = getRegisteredNames(pi);
+	const registeredNames = [...spec.names].filter((n) => registered.has(n));
 
 	if (registeredNames.every((n) => current.has(n))) return;
 
@@ -842,9 +846,8 @@ function _applyRestoreToolset(
 	enabled: boolean,
 	isPersistedEntry: boolean,
 ): void {
-	const registeredNames = [...spec.names].filter((n) =>
-		pi.getAllTools().some((t) => t.name === n),
-	);
+	const registered = getRegisteredNames(pi);
+	const registeredNames = [...spec.names].filter((n) => registered.has(n));
 
 	if (enabled) {
 		const current = new Set(pi.getActiveTools());
