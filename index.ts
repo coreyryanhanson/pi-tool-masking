@@ -125,6 +125,14 @@ interface ModuleState {
 	// `undefined` to a bare optional property (TS2412), and both doRestore and
 	// setDefaultResolutionMode assign undefined for non-allowlist modes.
 	activeAllowlist?: string[] | undefined;
+	// Consumed env mirror (subagent live-state inheritance). Held here — not
+	// in per-restore locals — so BOTH effectiveEnabled call sites (restore and
+	// the before_agent_start re-assert) resolve through it; a restore-only
+	// tier would be stripped by the child's first turn re-assert. Survives
+	// session_tree and session_start { reason: "reload" }; cleared on
+	// same-process session switches (see doRestore). Lives on globalThis like
+	// the rest of module state so it survives /reload re-eval.
+	consumedMirror?: ConsumedMirror | undefined;
 }
 
 function getModuleState(): ModuleState {
@@ -134,6 +142,159 @@ function getModuleState(): ModuleState {
 		};
 	}
 	return (globalThis as any)[MODULE_KEY] as ModuleState;
+}
+
+// ---------------------------------------------------------------------------
+// Env passthrough — ephemeral live-state mirror for subagent children
+// ---------------------------------------------------------------------------
+// Publishes the parent's live toolset state into `PI_TOOLMASKING_LIVE_STATE`
+// (inherited by any spawned child process via the default parent env) and
+// consumes it on the child side as a resolution tier above settings
+// defaults. See env-passthrough-plan.md. Consumer-only contract: only this
+// library writes the var; booleans only (env vars are a dump vector).
+
+const LIVE_STATE_ENV = "PI_TOOLMASKING_LIVE_STATE";
+const NO_INHERIT_ENV = "PI_TOOLMASKING_NO_INHERIT";
+const BOOT_ID_KEY = "__piToolMaskingBootId";
+const MIRROR_MAX_BYTES = 64 * 1024;
+
+/**
+ * Consumed mirror map. Stored whole after envelope validation — no registry
+ * intersection at consume time (toolsets can register after session_start;
+ * dropping their keys would re-create the settings-default bug for them).
+ * Unknown keys are inert at resolution (only registered toolsets ever
+ * consult their own persistKey); malformed entries are made inert there by
+ * effectiveEnabled's `typeof enabled === "boolean"` guard.
+ */
+type ConsumedMirror = Record<string, { enabled?: unknown }>;
+
+/**
+ * Per-process boot id for the mirror's identity guard. MUST live on
+ * globalThis: /reload re-evals the module in the same process, and a
+ * module-local id would regenerate while the standing self-mirror keeps the
+ * old one — the guard would then misclassify our own stale mirror as
+ * foreign and consume it over real settings.
+ */
+function getBootId(): string {
+	const existing = (globalThis as any)[BOOT_ID_KEY];
+	if (typeof existing === "string") return existing;
+	const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+	(globalThis as any)[BOOT_ID_KEY] = id;
+	return id;
+}
+
+/**
+ * Snapshot every registered toolset's live enabled state into
+ * `PI_TOOLMASKING_LIVE_STATE` as `{ v: 1, pid, boot, state }` JSON.
+ *
+ * "On" means every REGISTERED member (spec.names filtered through
+ * getAllTools — hoisted once per snapshot, same predicate _applyEnable
+ * uses) is in getActiveTools. NOT Toolset.isEnabled()'s `.some()` —
+ * deliberate divergence (documented in the README): the mirror reflects
+ * the fully-restored mask, which is what a child should inherit. A toolset
+ * that filters to zero registered tools is skipped (`every()` on an empty
+ * set is vacuously true — a phantom "on" would make the child inherit-on a
+ * toolset whose real state is settings-resolved); an empty snapshot
+ * publishes nothing.
+ *
+ * Delta-gated against the LIVE env value, never a held last-published
+ * string: the consumer runs in this process too and deletes the var on
+ * session_tree//new//resume, so a deleted var must never match the next
+ * snapshot or the rewrite after /new would be skipped.
+ */
+function publishLiveState(pi: ExtensionAPI): void {
+	const registry = getRegistry();
+	if (registry.size === 0) return;
+	// Hoist the tool-registry scan once per snapshot — this runs on the
+	// tool_call hot path and must not rescan per toolset.
+	const registered = new Set(pi.getAllTools().map((t) => t.name));
+	const active = new Set(pi.getActiveTools());
+	const state: Record<string, { enabled: boolean }> = {};
+	for (const [, entry] of registry) {
+		const members = [...entry.spec.names].filter((n) => registered.has(n));
+		if (members.length === 0) continue;
+		state[entry.spec.persistKey] = {
+			enabled: members.every((n) => active.has(n)),
+		};
+	}
+	if (Object.keys(state).length === 0) return;
+	const serialized = JSON.stringify({
+		v: 1,
+		pid: process.pid,
+		boot: getBootId(),
+		state,
+	});
+	if (process.env[LIVE_STATE_ENV] === serialized) return;
+	process.env[LIVE_STATE_ENV] = serialized;
+}
+
+/**
+ * Read-and-delete the env mirror. Returns the consumed state map, or
+ * undefined when there is nothing to inherit: absent var,
+ * PI_TOOLMASKING_NO_INHERIT opt-out, stale self-mirror (identity guard), or
+ * fail-closed rejection. The var is deleted on EVERY consumption-path exit
+ * (success, opt-out, fail-closed) so no exit leaks the mirror into this
+ * process's own spawns. The NO_INHERIT opt-out var itself is never deleted
+ * — it propagates to grandchildren by design.
+ *
+ * Fail-closed policy: any envelope violation (corrupt JSON, bad shape,
+ * unknown version, >64KB) rejects the whole map with one log line — a
+ * malformed publisher is not trusted partially. Individual entries are NOT
+ * validated here; malformed entries are made inert at resolution instead.
+ */
+function consumeLiveMirror(): ConsumedMirror | undefined {
+	const raw = process.env[LIVE_STATE_ENV];
+	delete process.env[LIVE_STATE_ENV];
+	if (raw === undefined || process.env[NO_INHERIT_ENV] !== undefined) {
+		return undefined;
+	}
+
+	const failClosed = (why: string): undefined => {
+		console.warn(
+			`[pi-tool-masking] Ignoring ${LIVE_STATE_ENV} (${why}); resolving from settings.`,
+		);
+		return undefined;
+	};
+
+	if (Buffer.byteLength(raw) > MIRROR_MAX_BYTES) return failClosed("oversized");
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch {
+		return failClosed("corrupt JSON");
+	}
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+		return failClosed("bad envelope shape");
+	}
+	const env = parsed as Record<string, unknown>;
+	if (
+		env["v"] !== 1 ||
+		typeof env["pid"] !== "number" ||
+		typeof env["boot"] !== "string" ||
+		!env["state"] ||
+		typeof env["state"] !== "object" ||
+		Array.isArray(env["state"])
+	) {
+		return failClosed("bad envelope shape");
+	}
+	// Identity guard: a mirror tagged with OUR pid+boot is a stale self-mirror
+	// left in our own process env (/new stays in-process) — delete and ignore.
+	// With publish-always + the live-env delta gate, the deleted var never
+	// matches the next snapshot, so the parent rewrites after /new naturally.
+	if (env["pid"] === process.pid && env["boot"] === getBootId()) {
+		return undefined;
+	}
+	const state = env["state"] as Record<string, unknown>;
+	const summary = Object.entries(state)
+		.map(
+			([k, v]) =>
+				`${k}=${(v as { enabled?: unknown } | null)?.enabled === true ? "on" : "off"}`,
+		)
+		.join(", ");
+	console.log(
+		`[pi-tool-masking] Inherited toolset state from pid ${env["pid"]}${summary ? `: ${summary}` : ""}`,
+	);
+	return state as ConsumedMirror;
 }
 
 // ---------------------------------------------------------------------------
@@ -175,8 +336,9 @@ function computeAllowlistDesired(
 
 /**
  * Resolve a toolset's effective enabled state through the same tier chain
- * restore applies per toolset: chat-branch entry → settings pin → mode
- * floor → packaged `defaultEnabled`.
+ * restore applies per toolset: chat-branch entry → consumed env mirror
+ * (subagent inheritance — active only when a foreign-pid mirror was consumed
+ * at restore) → settings pin → mode floor → packaged `defaultEnabled`.
  *
  * A pinned settings entry is explicit user intent and participates in BOTH
  * modes — mirroring how the chat-branch tier (also user intent) is honored
@@ -189,16 +351,22 @@ function computeAllowlistDesired(
  * no entry at all.
  *
  * `persistedEntry` reports whether the value came from a chat-branch entry
- * (vs settings/mode-floor/packaged fallback) — restore uses it to pick the
- * `restored` vs `changed` emit; the turn-boundary re-assert only needs
- * `.enabled`. Shared by both so the two can never drift on what
- * "effectively off" means.
+ * or the env mirror (vs settings/mode-floor/packaged fallback) — restore
+ * uses it to pick the `restored` vs `changed` emit; the turn-boundary
+ * re-assert only needs `.enabled`. Shared by both so the two can never
+ * drift on what "effectively off" means.
+ *
+ * The mirror tier returns `persistedEntry: true` on purpose: the mirror is
+ * the operator's resolved spawn-time intent — semantically a branch entry,
+ * not a fallback — so a child's restore emits `restored` (the documented
+ * contract), not `changed`.
  */
 function effectiveEnabled(
 	spec: ToolsetSpec,
 	branch: readonly SessionEntry[],
 	settingsDefaults: ToolsetDefaultsMap,
 	mode: DefaultResolutionMode,
+	consumedMirror?: ConsumedMirror | undefined,
 ): { enabled: boolean; persistedEntry: boolean } {
 	const lastEntry = lastCustomEntry<{ enabled?: boolean } | null>(
 		branch,
@@ -207,6 +375,12 @@ function effectiveEnabled(
 	const enabled = lastEntry?.data?.enabled;
 	if (typeof enabled === "boolean") {
 		return { enabled, persistedEntry: true };
+	}
+	// Env-mirror tier: acts as the settings tier, guarded by the same
+	// `typeof` check — malformed entries are inert by construction.
+	const mirrorEnabled = consumedMirror?.[spec.persistKey]?.enabled;
+	if (typeof mirrorEnabled === "boolean") {
+		return { enabled: mirrorEnabled, persistedEntry: true };
 	}
 	const settingsEnabled = settingsDefaults[spec.persistKey]?.enabled;
 	const fallback = spec.defaultEnabled ?? true;
@@ -238,6 +412,35 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		(globalThis as any)[RESTORE_EVENT_KEY] = event;
 
 		const registry = getRegistry();
+		const ms = getModuleState();
+
+		// ---- Env-mirror consume (read-and-delete) ----
+		// MUST run at the TOP, before the allowlist short-circuit: the allowlist
+		// branch returns below without reaching the per-toolset loop, so a
+		// consume placed after mode resolution would make allowlist-mode
+		// children never consume. The lifecycle publish in this same dispatch
+		// runs LAST (bottom of this handler), after this consume — reversed
+		// ordering would overwrite the var with our own pid/boot and the child's
+		// identity guard would then eat the mirror.
+		const consumed = consumeLiveMirror();
+		// Clear the held consumed map on a same-process session SWITCH (new,
+		// resume, fork, and any unknown future reason — fail safe toward fresh
+		// resolution). "startup" is a fresh child (the consume above IS its
+		// inheritance) and "reload" is the same session re-resolved in-process,
+		// so the map survives both. The `type` discriminant is load-bearing:
+		// session_tree also routes here and its event carries no `reason` field
+		// — a reason-only gate would clear the map on every tree navigation.
+		// session_tree re-restore KEEPS the map (the var is already deleted;
+		// tree navigation must not silently drop inheritance).
+		const ev = event as { type?: unknown; reason?: unknown };
+		if (
+			ev.type === "session_start" &&
+			ev.reason !== "startup" &&
+			ev.reason !== "reload"
+		) {
+			ms.consumedMirror = undefined;
+		}
+		if (consumed !== undefined) ms.consumedMirror = consumed;
 
 		// Re-read durable resolution mode before per-toolset fallback.
 		// setDefaultResolutionMode persists this bit; a fresh process defaults
@@ -280,7 +483,6 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 			(["inclusion", "exclusion", "allowlist"] as const).includes(branchMode)
 				? branchMode
 				: "exclusion";
-		const ms = getModuleState();
 		ms.defaultResolutionMode = mode;
 		// Deprecation: resolving a branch mode entry to "inclusion" is the
 		// deprecated path (fires on /reload of a session that last set
@@ -336,6 +538,12 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 					allow.has(entry.spec.id),
 				);
 			}
+			// Lifecycle publish runs LAST — after the consume above and the
+			// restore path (ordering is load-bearing, see the comment at the top
+			// of doRestore). Snapshots post-restore getActiveTools(), so a
+			// grandchild spawned before the child's first tool_call inherits
+			// restored state, not pre-restore state.
+			publishLiveState(pi);
 			return;
 		}
 
@@ -375,9 +583,16 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 				branchNow,
 				settingsDefaults,
 				mode,
+				ms.consumedMirror,
 			);
 			_applyRestoreToolset(spec, pi, enabled, persistedEntry);
 		}
+
+		// Lifecycle publish: bottom of the session_start dispatch, after the
+		// consume and the restore path (see top-of-doRestore comment). Closes
+		// the spawn-before-first-tool_call window for slash-command / tree-
+		// navigation spawns. This snapshot captures POST-restore state.
+		publishLiveState(pi);
 	};
 
 	pi.on("session_start", doRestore);
@@ -400,10 +615,7 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		// Delta gate — no-op unless the active set actually changed. `next`/`current`
 		// may share a length while differing (a leak removed AND a member re-added),
 		// so compare length AND that every desired tool is already current.
-		if (
-			next.length === current.length &&
-			next.every((n) => currentSet.has(n))
-		) {
+		if (next.length === current.length && next.every((n) => currentSet.has(n))) {
 			return;
 		}
 		pi.setActiveTools(next);
@@ -422,10 +634,8 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 				if (names.some((n) => nextSet.has(n) && !currentSet.has(n))) {
 					_emitToolsetEvents(entry.spec, pi, TOOLSET_EVENTS.changed, true);
 				}
-			} else {
-				if (names.some((n) => currentSet.has(n) && !nextSet.has(n))) {
-					_emitToolsetEvents(entry.spec, pi, TOOLSET_EVENTS.changed, false);
-				}
+			} else if (names.some((n) => currentSet.has(n) && !nextSet.has(n))) {
+				_emitToolsetEvents(entry.spec, pi, TOOLSET_EVENTS.changed, false);
 			}
 		}
 	};
@@ -452,7 +662,9 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		const registry = getRegistry();
 		const current = pi.getActiveTools();
 
-		// Read settings + branch once per turn; same tier chain as restore.
+		// Read settings + branch once per turn; same tier chain as restore
+		// (including the consumed env-mirror tier — a restore-only mirror tier
+		// would be stripped by this re-assert on the child's first turn).
 		const settingsDefaults = readMergedToolsetDefaults();
 		const branch = ctx.sessionManager.getBranch();
 		const mode = ms.defaultResolutionMode;
@@ -466,6 +678,7 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 				branch,
 				settingsDefaults,
 				mode,
+				ms.consumedMirror,
 			);
 			if (!enabled) {
 				for (const n of entry.spec.names) suppress.add(n);
@@ -477,10 +690,7 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		// a filter of `current`, so equal length already implies equality; the
 		// containment check is kept to mirror reassertAllowlist's gate.
 		const currentSet = new Set(current);
-		if (
-			next.length === current.length &&
-			next.every((n) => currentSet.has(n))
-		) {
+		if (next.length === current.length && next.every((n) => currentSet.has(n))) {
 			return;
 		}
 		pi.setActiveTools(next);
@@ -503,10 +713,10 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 	// registration, two mode-shaped re-asserters behind it.
 	const onBeforeAgentStart = (event: unknown, ctx: ExtensionContext): void => {
 		const ms = getModuleState();
-		if (ms.activeAllowlist !== undefined) {
-			reassertAllowlist(ms.activeAllowlist);
-		} else {
+		if (ms.activeAllowlist === undefined) {
 			reassertDisabled(event, ctx);
+		} else {
+			reassertAllowlist(ms.activeAllowlist);
 		}
 	};
 
@@ -521,6 +731,22 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 	// (the re-assert must not drift from restore); that API is used in the
 	// allowlist restore path, not for interactive exclusion-mode toggles.
 	pi.on("before_agent_start", onBeforeAgentStart);
+
+	// Publisher: re-snapshot the live state on every tool_call (fires before
+	// ANY tool of ANY plugin executes — including whatever tool a subagent
+	// plugin uses to spawn). Publish-always, delta-gated against the live env
+	// value (see publishLiveState — no dirty flag: late defineToolset
+	// registration and identity-guard deletion both flow through the env
+	// comparison for free). Installed once per pi inside this WeakSet-guarded
+	// installer, not per defineToolset — the suite asserts handlerCount === 1.
+	pi.on("tool_call", () => publishLiveState(pi));
+
+	// Mandatory cleanup: delete the standing mirror on session shutdown so it
+	// cannot leak into nested processes spawned after this session is gone.
+	// Fires for quit/new/resume/fork (teardownCurrent) and the /reload path.
+	pi.on("session_shutdown", () => {
+		delete process.env[LIVE_STATE_ENV];
+	});
 }
 
 // ---------------------------------------------------------------------------
@@ -945,10 +1171,7 @@ export function clearToolsetEntry(
 	persistKey: string,
 	branch: readonly SessionEntry[],
 ): void {
-	const last = lastCustomEntry<{ enabled?: boolean } | null>(
-		branch,
-		persistKey,
-	);
+	const last = lastCustomEntry<{ enabled?: boolean } | null>(branch, persistKey);
 	const data = last?.data;
 	// No prior entry, a tombstoned last entry (data null), or a last entry
 	// without an `enabled` field → already effectively cleared, skip.
@@ -1003,15 +1226,26 @@ function settingsPath(scope: "global" | "project"): string {
 }
 
 /**
+ * Parsed settings.json at the read boundary — a plain JSON object, or an
+ * empty object on missing/unreadable/malformed file (never-throw policy;
+ * non-object parses recover to `{}` before crossing the boundary).
+ */
+type ParsedSettings = Record<string, unknown>;
+
+/**
  * Read one scope's settings.json as a parsed object, or `{}` on any
  * read/parse failure (never-throw policy — a malformed file contributes
  * `{}` to the merge; only mutators throw `MalformedSettingsError`).
  */
-function readSettingsJsonSafe(scope: "global" | "project"): unknown {
+function readSettingsJsonSafe(scope: "global" | "project"): ParsedSettings {
 	const path = settingsPath(scope);
 	try {
 		if (!existsSync(path)) return {};
-		return JSON.parse(readFileSync(path, "utf-8"));
+		const parsed: unknown = JSON.parse(readFileSync(path, "utf-8"));
+		if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+			return parsed as ParsedSettings;
+		}
+		return {};
 	} catch {
 		return {};
 	}
@@ -1195,11 +1429,7 @@ function mutateSettingsJson(
 		if (existsSync(path)) {
 			const raw = readFileSync(path, "utf-8");
 			const parsed = JSON.parse(raw);
-			if (
-				typeof parsed !== "object" ||
-				parsed === null ||
-				Array.isArray(parsed)
-			) {
+			if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
 				throw new MalformedSettingsError(
 					`[pi-tool-masking] Refusing to overwrite non-object settings.json at ` +
 						`${path}. The file contains ${
