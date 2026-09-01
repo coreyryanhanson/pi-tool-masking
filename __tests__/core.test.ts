@@ -1139,7 +1139,7 @@ describe("Resolution mode persistence — survives quit/resume", () => {
 // ===================================================================
 
 describe("Allowlist resolution mode", () => {
-	it("AL1: setDefaultResolutionMode persists the array; getActiveAllowlist reads it", () => {
+	it("setDefaultResolutionMode persists the array; getActiveAllowlist reads it", () => {
 		const { mock, pi } = createEnv();
 		setDefaultResolutionMode(pi, "allowlist", [
 			"my-plugin.web",
@@ -1156,7 +1156,7 @@ describe("Allowlist resolution mode", () => {
 		});
 	});
 
-	it("AL2: restore under allowlist — members on, others off; stale branch entry and settings pin bypassed", () => {
+	it("restore under allowlist — members on, others off; stale branch entry and settings pin bypassed", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		mock.registerTool({ name: "tool-b", description: "" });
@@ -1188,7 +1188,7 @@ describe("Allowlist resolution mode", () => {
 		expect(mock.getActiveTools()).toEqual(["tool-a"]);
 	});
 
-	it("AL3 (B1): non-toolset tools preserved during allowlist restore", () => {
+	it("non-toolset tools preserved during allowlist restore", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		mock.registerTool({ name: "orphan-tool", description: "" });
@@ -1208,7 +1208,7 @@ describe("Allowlist resolution mode", () => {
 		expect(mock.getActiveTools()).toEqual(["tool-a", "orphan-tool"]);
 	});
 
-	it("AL4: future-install suppression — toolset registered after allowlist is off", () => {
+	it("future-install suppression — toolset registered after allowlist is off", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		mock.registerTool({ name: "tool-b", description: "" });
@@ -1243,7 +1243,7 @@ describe("Allowlist resolution mode", () => {
 		expect(mock.getActiveTools()).toEqual(["tool-a"]);
 	});
 
-	it("AL5: later exclusion entry supersedes the allowlist; per-toolset tiering resumes", () => {
+	it("later exclusion entry supersedes the allowlist; per-toolset tiering resumes", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		mock.registerTool({ name: "tool-b", description: "" });
@@ -1282,7 +1282,7 @@ describe("Allowlist resolution mode", () => {
 		expect(mock.getActiveTools()).toEqual(["tool-a", "tool-b"]);
 	});
 
-	it("AL6: validation — missing/empty allowlist throws; unregistered ids allowed", () => {
+	it("validation — missing/empty allowlist throws; unregistered ids allowed", () => {
 		const { pi } = createEnv();
 		expect(() => setDefaultResolutionMode(pi, "allowlist")).toThrow(
 			'[pi-tool-masking] defaultResolutionMode "allowlist" requires a non-empty allowlist array of toolset ids.',
@@ -1297,7 +1297,7 @@ describe("Allowlist resolution mode", () => {
 		expect(getActiveAllowlist()).toEqual(["not-registered"]);
 	});
 
-	it("AL7: changed-mirror companion never fires during allowlist restore (two-phase)", () => {
+	it("changed-mirror companion never fires during allowlist restore (two-phase)", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "base-tool", description: "" });
 		mock.registerTool({ name: "comp-tool", description: "" });
@@ -1339,7 +1339,7 @@ describe("Allowlist resolution mode", () => {
 		expect(mock.getEntries("k:comp")).toHaveLength(0);
 	});
 
-	it("AL8: restore fail-closed — mode entry claims allowlist with no array → empty allowlist, everything off", () => {
+	it("restore fail-closed — mode entry claims allowlist with no array → empty allowlist, everything off", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		defineToolset(
@@ -1370,7 +1370,7 @@ describe("Allowlist resolution mode", () => {
 		expect(mock.getActiveTools()).toEqual([]);
 	});
 
-	it("AL9: restore fail-closed — allowlist present but not an array → empty allowlist, everything off", () => {
+	it("restore fail-closed — allowlist present but not an array → empty allowlist, everything off", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		defineToolset(
@@ -1396,7 +1396,7 @@ describe("Allowlist resolution mode", () => {
 		expect(mock.getActiveTools()).toEqual([]);
 	});
 
-	it("AL10: null-tombstoned mode entry supersedes a prior allowlist → exclusion, allowlist undefined", () => {
+	it("null-tombstoned mode entry supersedes a prior allowlist → exclusion, allowlist undefined", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		defineToolset(
@@ -1430,7 +1430,7 @@ describe("Allowlist resolution mode", () => {
 		expect(mock.getActiveTools()).toEqual(["tool-a"]);
 	});
 
-	it("AL11: mode absent / unknown value in the last entry falls through to exclusion; allowlist undefined", () => {
+	it("mode absent / unknown value in the last entry falls through to exclusion; allowlist undefined", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		defineToolset(
@@ -1453,7 +1453,7 @@ describe("Allowlist resolution mode", () => {
 		expect(mock.getActiveTools()).toEqual(["tool-a"]);
 	});
 
-	it("AL12: getActiveAllowlist() is undefined under inclusion", () => {
+	it("getActiveAllowlist() is undefined under inclusion", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		// A toolset must exist — defineToolset registers the restore handler.
@@ -1866,9 +1866,7 @@ describe("Dependency cascade on enable", () => {
 		tsL.enable(pi);
 		expect(tsB.isEnabled(pi)).toBe(true);
 		// Directly remove B's tool (simulates external interference)
-		const withoutB = mock
-			.getActiveTools()
-			.filter((n: string) => n !== "b-tool");
+		const withoutB = mock.getActiveTools().filter((n: string) => n !== "b-tool");
 		mock.setActiveTools(withoutB);
 		expect(tsB.isEnabled(pi)).toBe(false);
 		expect(tsL.isEnabled(pi)).toBe(true);
@@ -3073,8 +3071,6 @@ describe("readMergedToolsetDefaults / readToolsetDefaults", () => {
 // ===================================================================
 
 describe("writeToolsetDefaults & clearToolsetDefaults", () => {
-	// W1–W3, W5 use the writer seam; W4, W6–W8 hit disk
-
 	beforeEach(() => {
 		setSettingsWriterOverrideForTests({ global: {}, project: {} });
 	});
@@ -3083,7 +3079,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 		setSettingsWriterOverrideForTests(null);
 	});
 
-	it("W1: writeToolsetDefaults merges entries into scope, preserves existing keys", () => {
+	it("writeToolsetDefaults merges entries into scope, preserves existing keys", () => {
 		const state = {
 			global: { "toolset-state:z": { enabled: true } },
 			project: {},
@@ -3108,7 +3104,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 		}
 	});
 
-	it("W2: writing to project does not touch global, and vice versa", () => {
+	it("writing to project does not touch global, and vice versa", () => {
 		const state = { global: {}, project: {} };
 		setSettingsWriterOverrideForTests(state);
 		try {
@@ -3124,7 +3120,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 		}
 	});
 
-	it("W3: clearToolsetDefaults empties scope and returns path (null when empty)", () => {
+	it("clearToolsetDefaults empties scope and returns path (null when empty)", () => {
 		const state = {
 			global: {
 				"toolset-state:x": { enabled: true },
@@ -3147,7 +3143,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 		}
 	});
 
-	it("W5: writer override and reader override are independent", () => {
+	it("writer override and reader override are independent", () => {
 		const writerState = {
 			global: { "toolset-state:writer": { enabled: true } },
 			project: {},
@@ -3165,8 +3161,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 		}
 	});
 
-	// W4 — write→read round-trip on disk
-	describe("W4: disk round-trip (writeToolsetDefaults + readMergedToolsetDefaults)", () => {
+	describe("disk round-trip (writeToolsetDefaults + readMergedToolsetDefaults)", () => {
 		let tmpDir: string;
 		let agentDir: string;
 		let origCwd: string;
@@ -3176,7 +3171,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 			setSettingsWriterOverrideForTests(null);
 			setSettingsOverrideForTests(null);
 
-			tmpDir = mkdtempSync(join(tmpdir(), "pi-tool-masking-w4-"));
+			tmpDir = mkdtempSync(join(tmpdir(), "pi-tool-masking-roundtrip-"));
 			agentDir = join(tmpDir, "agent");
 			mkdirSync(join(tmpDir, ".pi"), { recursive: true });
 			mkdirSync(agentDir, { recursive: true });
@@ -3188,16 +3183,16 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 
 		afterEach(() => {
 			process.chdir(origCwd);
-			if (origAgentDir !== undefined) {
-				process.env.PI_CODING_AGENT_DIR = origAgentDir;
-			} else {
+			if (origAgentDir === undefined) {
 				delete process.env.PI_CODING_AGENT_DIR;
+			} else {
+				process.env.PI_CODING_AGENT_DIR = origAgentDir;
 			}
 			setSettingsWriterOverrideForTests(null);
 			setSettingsOverrideForTests({});
 		});
 
-		it("W4a: write→readMergedToolsetDefaults round-trip (project overrides global)", () => {
+		it("write→readMergedToolsetDefaults round-trip (project overrides global)", () => {
 			const globalPath = join(agentDir, "settings.json");
 			writeFileSync(
 				globalPath,
@@ -3208,10 +3203,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 				}) + "\n",
 			);
 
-			writeToolsetDefaults(
-				{ "toolset-state:new": { enabled: true } },
-				"project",
-			);
+			writeToolsetDefaults({ "toolset-state:new": { enabled: true } }, "project");
 			writeToolsetDefaults(
 				{ "toolset-state:shared": { enabled: true } },
 				"project",
@@ -3223,7 +3215,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 			expect(merged["toolset-state:missing"]).toBeUndefined();
 		});
 
-		it("W4b: readToolsetDefaults attributes to the correct scope", () => {
+		it("readToolsetDefaults attributes to the correct scope", () => {
 			// Global has an entry; project has no file yet
 			const globalPath = join(agentDir, "settings.json");
 			writeFileSync(
@@ -3239,10 +3231,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 			expect(readToolsetDefaults("project")).toEqual({});
 
 			// Write only to project
-			writeToolsetDefaults(
-				{ "toolset-state:y": { enabled: false } },
-				"project",
-			);
+			writeToolsetDefaults({ "toolset-state:y": { enabled: false } }, "project");
 
 			// Per-scope readers are independent
 			expect(readToolsetDefaults("global")).toEqual({
@@ -3262,8 +3251,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 		});
 	});
 
-	// W6 — malformed-file guard (disk)
-	describe("W6: malformed-file guard (disk)", () => {
+	describe("malformed-file guard (disk)", () => {
 		let tmpDir: string;
 		let origCwd: string;
 
@@ -3284,53 +3272,44 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 			setSettingsOverrideForTests({});
 		});
 
-		it("W6a: writeToolsetDefaults throws on malformed JSON", () => {
+		it("writeToolsetDefaults throws on malformed JSON", () => {
 			const settingsPath = join(tmpDir, ".pi", "settings.json");
 			writeFileSync(settingsPath, "{not valid");
 			const before = readFileSync(settingsPath, "utf-8");
 
 			expect(() =>
-				writeToolsetDefaults(
-					{ "toolset-state:x": { enabled: true } },
-					"project",
-				),
+				writeToolsetDefaults({ "toolset-state:x": { enabled: true } }, "project"),
 			).toThrow(/malformed settings.json/);
 
 			// File unchanged
 			expect(readFileSync(settingsPath, "utf-8")).toBe(before);
 		});
 
-		it("W6a2: writeToolsetDefaults throws MalformedSettingsError on non-object (array)", () => {
+		it("writeToolsetDefaults throws MalformedSettingsError on non-object (array)", () => {
 			const settingsPath = join(tmpDir, ".pi", "settings.json");
 			writeFileSync(settingsPath, "[]");
 			const before = readFileSync(settingsPath, "utf-8");
 
 			expect(() =>
-				writeToolsetDefaults(
-					{ "toolset-state:x": { enabled: true } },
-					"project",
-				),
+				writeToolsetDefaults({ "toolset-state:x": { enabled: true } }, "project"),
 			).toThrow(MalformedSettingsError);
 
 			expect(readFileSync(settingsPath, "utf-8")).toBe(before);
 		});
 
-		it("W6a3: writeToolsetDefaults throws on non-object (null)", () => {
+		it("writeToolsetDefaults throws on non-object (null)", () => {
 			const settingsPath = join(tmpDir, ".pi", "settings.json");
 			writeFileSync(settingsPath, "null");
 			const before = readFileSync(settingsPath, "utf-8");
 
 			expect(() =>
-				writeToolsetDefaults(
-					{ "toolset-state:x": { enabled: true } },
-					"project",
-				),
+				writeToolsetDefaults({ "toolset-state:x": { enabled: true } }, "project"),
 			).toThrow(/non-object settings.json/);
 
 			expect(readFileSync(settingsPath, "utf-8")).toBe(before);
 		});
 
-		it("W6b: clearToolsetDefaults throws on malformed JSON", () => {
+		it("clearToolsetDefaults throws on malformed JSON", () => {
 			const settingsPath = join(tmpDir, ".pi", "settings.json");
 			writeFileSync(settingsPath, "{not valid");
 			const before = readFileSync(settingsPath, "utf-8");
@@ -3342,7 +3321,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 			expect(readFileSync(settingsPath, "utf-8")).toBe(before);
 		});
 
-		it("W6b2: clearToolsetDefaults throws on non-object (array)", () => {
+		it("clearToolsetDefaults throws on non-object (array)", () => {
 			const settingsPath = join(tmpDir, ".pi", "settings.json");
 			writeFileSync(settingsPath, "[]");
 			const before = readFileSync(settingsPath, "utf-8");
@@ -3354,14 +3333,13 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 			expect(readFileSync(settingsPath, "utf-8")).toBe(before);
 		});
 
-		it("W6b3: clearToolsetDefaults returns null for missing file", () => {
+		it("clearToolsetDefaults returns null for missing file", () => {
 			// No .pi/settings.json written — file doesn't exist
 			expect(clearToolsetDefaults("project")).toBeNull();
 		});
 	});
 
-	// W7 — top-level-key preservation (disk)
-	describe("W7: top-level-key preservation (disk)", () => {
+	describe("top-level-key preservation (disk)", () => {
 		let tmpDir: string;
 		let origCwd: string;
 
@@ -3398,13 +3376,10 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 			setSettingsOverrideForTests({});
 		});
 
-		it("W7: write preserves provider, theme, existing td entries; adds new entry", () => {
+		it("write preserves provider, theme, existing td entries; adds new entry", () => {
 			const settingsPath = join(tmpDir, ".pi", "settings.json");
 
-			writeToolsetDefaults(
-				{ "toolset-state:new": { enabled: true } },
-				"project",
-			);
+			writeToolsetDefaults({ "toolset-state:new": { enabled: true } }, "project");
 
 			const raw = JSON.parse(readFileSync(settingsPath, "utf-8"));
 			expect(raw.provider).toBe("mistral");
@@ -3417,7 +3392,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 			});
 		});
 
-		it("W7b: clearToolsetDefaults removes the wrapper key, preserves other keys", () => {
+		it("clearToolsetDefaults removes the wrapper key, preserves other keys", () => {
 			const settingsPath = join(tmpDir, ".pi", "settings.json");
 
 			const result = clearToolsetDefaults("project");
@@ -3429,7 +3404,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 			expect(raw.toolsetDefaults).toBeUndefined();
 		});
 
-		it("W7c: clearToolsetDefaults returns null when no toolsetDefaults key", () => {
+		it("clearToolsetDefaults returns null when no toolsetDefaults key", () => {
 			// Remove the key first
 			clearToolsetDefaults("project");
 			expect(clearToolsetDefaults("project")).toBeNull();
@@ -3442,11 +3417,11 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 		});
 	});
 
-	// W8 — no-op writes skip disk reformat (don't rewrite a hand-edited file
+	// No-op writes skip disk reformat (don't rewrite a hand-edited file
 	// when the values are already what's being written). Observable: the
 	// writer serializes with JSON.stringify(_, null, 2), so a skip preserves
 	// our compact seed bytes while a real write would reformat to indented.
-	describe("W8: no-op writes skip disk reformat", () => {
+	describe("no-op writes skip disk reformat", () => {
 		let tmpDir: string;
 		let origCwd: string;
 
@@ -3466,7 +3441,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 			setSettingsOverrideForTests({});
 		});
 
-		it("W8a: writeToolsetDefaults with unchanged values does not rewrite", () => {
+		it("writeToolsetDefaults with unchanged values does not rewrite", () => {
 			const settingsPath = join(tmpDir, ".pi", "settings.json");
 			// Compact seed (writer would emit 2-space indented + trailing \n)
 			const seed = '{"toolsetDefaults":{"toolset-state:x":{"enabled":true}}}';
@@ -3477,7 +3452,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 			expect(readFileSync(settingsPath, "utf-8")).toBe(seed);
 		});
 
-		it("W8b: writeToolsetDefaults with {} entries does not rewrite", () => {
+		it("writeToolsetDefaults with {} entries does not rewrite", () => {
 			const settingsPath = join(tmpDir, ".pi", "settings.json");
 			const seed = '{"toolsetDefaults":{"toolset-state:x":{"enabled":true}}}';
 			writeFileSync(settingsPath, seed);
@@ -3487,18 +3462,16 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 			expect(readFileSync(settingsPath, "utf-8")).toBe(seed);
 		});
 
-		it("W8d: a real change still rewrites (sanity for W8a observable)", () => {
+		it("a real change still rewrites (sanity for the compact-seed observable)", () => {
 			const settingsPath = join(tmpDir, ".pi", "settings.json");
 			const seed = '{"toolsetDefaults":{"toolset-state:x":{"enabled":true}}}';
 			writeFileSync(settingsPath, seed);
 
-			writeToolsetDefaults(
-				{ "toolset-state:x": { enabled: false } },
-				"project",
-			);
+			writeToolsetDefaults({ "toolset-state:x": { enabled: false } }, "project");
 
 			// A real change must reformat — proves the compact-seed observable
-			// actually detects writes (else W8a would pass for the wrong reason)
+			// actually detects writes (else the compact-seed check would pass
+			// for the wrong reason)
 			expect(readFileSync(settingsPath, "utf-8")).not.toBe(seed);
 			const raw = JSON.parse(readFileSync(settingsPath, "utf-8"));
 			expect(raw.toolsetDefaults["toolset-state:x"]).toEqual({
@@ -3513,7 +3486,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 // ===================================================================
 
 describe("Restore — settings.json defaults tier", () => {
-	it("S1: settings default on fresh session — settings false beats spec.defaultEnabled true", () => {
+	it("settings default on fresh session — settings false beats spec.defaultEnabled true", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		setSettingsOverrideForTests({
@@ -3527,7 +3500,7 @@ describe("Restore — settings.json defaults tier", () => {
 		expect(mock.getActiveTools()).not.toContain("tool-a");
 	});
 
-	it("S2: chat-branch entry beats settings default (tier 1 > tier 2)", () => {
+	it("chat-branch entry beats settings default (tier 1 > tier 2)", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		mock.appendEntry("toolset-state:test.toolset", { enabled: true });
@@ -3542,7 +3515,7 @@ describe("Restore — settings.json defaults tier", () => {
 		expect(mock.getActiveTools()).toContain("tool-a");
 	});
 
-	it("S3: settings absent → packaged default (tier 3 unchanged)", () => {
+	it("settings absent → packaged default (tier 3 unchanged)", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		setSettingsOverrideForTests({});
@@ -3554,7 +3527,7 @@ describe("Restore — settings.json defaults tier", () => {
 		expect(mock.getActiveTools()).not.toContain("tool-a");
 	});
 
-	it("S4: settings honored in inclusion mode — pinned true restores on", () => {
+	it("settings honored in inclusion mode — pinned true restores on", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		setSettingsOverrideForTests({
@@ -3569,7 +3542,7 @@ describe("Restore — settings.json defaults tier", () => {
 		expect(mock.getActiveTools()).toContain("tool-a");
 	});
 
-	it("S5: settings pinned false in inclusion stays off", () => {
+	it("settings pinned false in inclusion stays off", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		setSettingsOverrideForTests({
@@ -3584,7 +3557,7 @@ describe("Restore — settings.json defaults tier", () => {
 		expect(mock.getActiveTools()).not.toContain("tool-a");
 	});
 
-	it("S6: unpinned in inclusion falls to false regardless of defaultEnabled", () => {
+	it("unpinned in inclusion falls to false regardless of defaultEnabled", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		setSettingsOverrideForTests({});
@@ -3597,7 +3570,7 @@ describe("Restore — settings.json defaults tier", () => {
 		expect(mock.getActiveTools()).not.toContain("tool-a");
 	});
 
-	it("S7: null-tombstoned branch entry falls through to settings pin", () => {
+	it("null-tombstoned branch entry falls through to settings pin", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		setSettingsOverrideForTests({
@@ -3620,13 +3593,13 @@ describe("Restore — settings.json defaults tier", () => {
 // ===================================================================
 
 describe("getEffectiveDefault", () => {
-	it("G1: snapshot overrides spec.defaultEnabled", () => {
+	it("snapshot overrides spec.defaultEnabled", () => {
 		const spec = makeSpec({ defaultEnabled: true });
 		const snapshot = { "toolset-state:test.toolset": { enabled: false } };
 		expect(getEffectiveDefault(spec, snapshot)).toBe(false);
 	});
 
-	it("G2: falls back to spec.defaultEnabled ?? true", () => {
+	it("falls back to spec.defaultEnabled ?? true", () => {
 		const spec = makeSpec({ defaultEnabled: false });
 		expect(getEffectiveDefault(spec, {})).toBe(false);
 
@@ -3634,7 +3607,7 @@ describe("getEffectiveDefault", () => {
 		expect(getEffectiveDefault(specNoDefault, {})).toBe(true);
 	});
 
-	it("G3: reads disk when no snapshot passed", () => {
+	it("reads disk when no snapshot passed", () => {
 		setSettingsOverrideForTests({
 			"toolset-state:test.toolset": { enabled: false },
 		});
@@ -3652,7 +3625,7 @@ describe("getEffectiveDefault", () => {
 // ===================================================================
 
 describe("Null-tombstone — toolset restore", () => {
-	it("AT1: null tombstone after real entry falls through to settings/packaged", () => {
+	it("null tombstone after real entry falls through to settings/packaged", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		defineToolset(
@@ -3670,7 +3643,7 @@ describe("Null-tombstone — toolset restore", () => {
 		expect(mock.getActiveTools()).not.toContain("tool-a");
 	});
 
-	it("AT2: real entry without tombstone restores true (regression guard)", () => {
+	it("real entry without tombstone restores true (regression guard)", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		defineToolset(
@@ -3685,7 +3658,7 @@ describe("Null-tombstone — toolset restore", () => {
 		expect(mock.getActiveTools()).toContain("tool-a");
 	});
 
-	it("AT3: only a null tombstone (no prior real entry) falls through", () => {
+	it("only a null tombstone (no prior real entry) falls through", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		defineToolset(
@@ -3701,7 +3674,7 @@ describe("Null-tombstone — toolset restore", () => {
 		expect(mock.getActiveTools()).toContain("tool-a");
 	});
 
-	it("AT4: live toggle after tombstone supersedes it (last-writer-wins)", () => {
+	it("live toggle after tombstone supersedes it (last-writer-wins)", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		defineToolset(
@@ -3718,7 +3691,7 @@ describe("Null-tombstone — toolset restore", () => {
 		expect(mock.getActiveTools()).toContain("tool-a");
 	});
 
-	it("AT5: malformed last entry (no enabled field) falls through", () => {
+	it("malformed last entry (no enabled field) falls through", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		defineToolset(
@@ -3735,7 +3708,7 @@ describe("Null-tombstone — toolset restore", () => {
 		expect(mock.getActiveTools()).not.toContain("tool-a");
 	});
 
-	it("AT6: companion-mirror write across a tombstone in the same pass is visible", () => {
+	it("companion-mirror write across a tombstone in the same pass is visible", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "base-tool", description: "" });
 		mock.registerTool({ name: "comp-tool", description: "" });
@@ -3796,7 +3769,7 @@ describe("Tombstone helpers", () => {
 	const branchOf = (mock: MockPI) =>
 		mock.createContext().sessionManager.getBranch();
 
-	it("BT1: clearToolsetEntry appends null when last entry is non-null", () => {
+	it("clearToolsetEntry appends null when last entry is non-null", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
@@ -3809,7 +3782,7 @@ describe("Tombstone helpers", () => {
 		expect(entries[1]!.data).toBeNull();
 	});
 
-	it("BT2: clearToolsetEntry no-ops when last entry already cleared", () => {
+	it("clearToolsetEntry no-ops when last entry already cleared", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
@@ -3822,7 +3795,7 @@ describe("Tombstone helpers", () => {
 		expect(mock.getEntries("toolset-state:test.toolset")).toHaveLength(2);
 	});
 
-	it("BT3: clearToolsetEntry no-ops when key has no prior entry", () => {
+	it("clearToolsetEntry no-ops when key has no prior entry", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
@@ -3833,7 +3806,7 @@ describe("Tombstone helpers", () => {
 		expect(mock.getEntries("toolset-state:test.toolset")).toHaveLength(0);
 	});
 
-	it("BT4: clearAllToolsetEntries tombstones only toolsets with prior entries", () => {
+	it("clearAllToolsetEntries tombstones only toolsets with prior entries", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		mock.registerTool({ name: "tool-b", description: "" });
@@ -3864,7 +3837,7 @@ describe("Tombstone helpers", () => {
 		expect(mock.getEntries("toolset-state:b")).toHaveLength(0);
 	});
 
-	it("BT5: consecutive clearAllToolsetEntries write zero new tombstones", () => {
+	it("consecutive clearAllToolsetEntries write zero new tombstones", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
@@ -3877,7 +3850,7 @@ describe("Tombstone helpers", () => {
 		expect(mock.getEntries("toolset-state:test.toolset")).toHaveLength(2);
 	});
 
-	it("BT6: tombstone then restore falls through to settings pin", () => {
+	it("tombstone then restore falls through to settings pin", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		defineToolset(
@@ -3902,7 +3875,7 @@ describe("Tombstone helpers", () => {
 // ===================================================================
 
 describe("applyToolsetEnabled", () => {
-	it("E1: applies state and emits changed, no appendEntry", () => {
+	it("applies state and emits changed, no appendEntry", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		const spec = makeSpec({ names: new Set(["tool-a"]) });
@@ -3921,7 +3894,7 @@ describe("applyToolsetEnabled", () => {
 		expect(mock.getEntries("toolset-state:test.toolset")).toHaveLength(0);
 	});
 
-	it("E2: applyToolsetEnabled(false) deactivates without persisting", () => {
+	it("applyToolsetEnabled(false) deactivates without persisting", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		mock.setActiveTools(["tool-a"]);
@@ -3938,7 +3911,7 @@ describe("applyToolsetEnabled", () => {
 		expect(mock.getEntries("toolset-state:test.toolset")).toHaveLength(0);
 	});
 
-	it("E3: emits member fanout when emitMemberEvents is set", () => {
+	it("emits member fanout when emitMemberEvents is set", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		const spec = makeSpec({

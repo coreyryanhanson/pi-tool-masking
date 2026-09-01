@@ -13,7 +13,7 @@ import {
 // Parent publishes `{ v: 1, pid, boot, state }` into
 // PI_TOOLMASKING_LIVE_STATE on tool_call + session_start/session_tree; a
 // fresh child consumes it at restore (read-and-delete) as a tier above
-// settings defaults. See env-passthrough-plan.md.
+// settings defaults.
 // ---------------------------------------------------------------------------
 
 const LIVE_STATE_ENV = "PI_TOOLMASKING_LIVE_STATE";

@@ -150,7 +150,7 @@ function getModuleState(): ModuleState {
 // Publishes the parent's live toolset state into `PI_TOOLMASKING_LIVE_STATE`
 // (inherited by any spawned child process via the default parent env) and
 // consumes it on the child side as a resolution tier above settings
-// defaults. See env-passthrough-plan.md. Consumer-only contract: only this
+// defaults. Consumer-only contract: only this
 // library writes the var; booleans only (env vars are a dump vector).
 
 const LIVE_STATE_ENV = "PI_TOOLMASKING_LIVE_STATE";
