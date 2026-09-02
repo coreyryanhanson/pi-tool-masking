@@ -118,8 +118,7 @@ function collectMaskEvents(mock: MockPI): () => { type: string; id: string }[] {
 // env-passthrough suite's save/restore discipline, plus a sweep of the
 // CHILD_POLICY_WARNED_KEY dedup flag (same precedent as cleanRegistry's
 // DEPRECATION_WARNED_KEY delete): without it the invalid-value warn
-// assertion would
-// be order-dependent rather than testing the warn behavior.
+// assertion would be order-dependent rather than testing the warn behavior.
 let savedDeferVar: string | undefined;
 
 beforeEach(() => {
