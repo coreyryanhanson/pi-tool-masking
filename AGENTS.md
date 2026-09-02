@@ -37,7 +37,7 @@ Vitest with **globals on** (`describe`/`it`/`expect` available without import;
 `types: ["node", "vitest/globals"]`). `testTimeout: 15_000`.
 
 Tests live in `__tests__/` (`core.test.ts`, `registry-convergence.test.ts`, `custom-entry.test.ts`,
-`child-policy-defer.test.ts`).
+`child-policy-defer.test.ts`, and shared `helpers.ts`).
 They use a custom `MockPI` class (`__tests__/mock-pi.ts`) implementing a
 subset of `ExtensionAPI` (`setActiveTools`, `getActiveTools`, `getAllTools`,
 `registerTool`, `appendEntry`, `on`, `events`, `sessionManager.getBranch()`).
@@ -49,9 +49,8 @@ mode.
 
 ## CI
 
-`.github/workflows/test.yml` runs `npm ci && npm test` on PRs and pushes to
-`main` (Node `lts/*`). **Typecheck is not in CI** — only the publish gate
-runs it.
+`.github/workflows/test.yml` runs `npm ci && npm test && npx tsc --noEmit`
+on PRs and pushes to `main` (Node `lts/*`) — typecheck runs in CI too.
 
 ## Release
 
@@ -84,8 +83,8 @@ they do NOT test, commit, tag, or publish.
 | `readToolsetDefaults(scope)` / `readMergedToolsetDefaults()` | Read `toolsetDefaults` from one scope / merged global+project |
 | `writeToolsetDefaults(entries, scope)` / `clearToolsetDefaults(scope)` | Mutate / clear `toolsetDefaults` settings |
 | `getEffectiveDefault(spec, snapshot?)` | Resolve a toolset's effective default through mode + settings tiers |
-| `MalformedSettingsError` | Thrown by reader/writer on unparseable settings JSON |
-| `parseToolsetDefaults(json)` | Validate/parse raw `toolsetDefaults` JSON (throws `MalformedSettingsError`) |
+| `MalformedSettingsError` | Thrown by the settings writer on unparseable settings JSON (readers never throw) |
+| `parseToolsetDefaults(json)` | Validate/parse raw `toolsetDefaults` JSON (throws `MalformedSettingsError` on invalid input) |
 | `lastCustomEntry<T>(branch, customType)` | Newest custom entry matching `customType`, narrowed through the `"custom"` discriminator so callers get typed `.data` without per-site `any` casts |
 | `TOOLSET_EVENTS` | `changed`, `restored` |
 
