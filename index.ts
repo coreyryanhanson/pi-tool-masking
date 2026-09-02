@@ -805,10 +805,10 @@ class ToolsetImpl implements Toolset {
 // ---------------------------------------------------------------------------
 
 export function defineToolset(pi: ExtensionAPI, spec: ToolsetSpec): Toolset {
-	if (!spec.id || spec.id.trim() === "") {
+	if (typeof spec.id !== "string" || spec.id.trim() === "") {
 		throw new Error("[pi-tool-masking] spec.id must be a non-empty string");
 	}
-	if (!spec.persistKey || spec.persistKey.trim() === "") {
+	if (typeof spec.persistKey !== "string" || spec.persistKey.trim() === "") {
 		throw new Error(
 			"[pi-tool-masking] spec.persistKey must be a non-empty string",
 		);

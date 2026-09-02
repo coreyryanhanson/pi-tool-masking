@@ -49,9 +49,8 @@ mode.
 
 ## CI
 
-`.github/workflows/test.yml` runs `npm ci && npm test` on PRs and pushes to
-`main` (Node `lts/*`). **Typecheck is not in CI** — only the publish gate
-runs it.
+`.github/workflows/test.yml` runs `npm ci && npm test && npx tsc --noEmit`
+on PRs and pushes to `main` (Node `lts/*`) — typecheck runs in CI too.
 
 ## Release
 
