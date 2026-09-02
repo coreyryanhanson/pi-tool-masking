@@ -27,8 +27,9 @@ function cleanRegistry(): void {
 	delete (globalThis as any)[REGISTRY_KEY];
 	delete (globalThis as any)[RESTORE_EVENT_KEY];
 	delete (globalThis as any)[MODULE_STATE_KEY];
-	delete (globalThis as any)["__piToolMaskingBootId"];
-	delete process.env["PI_TOOLMASKING_LIVE_STATE"];
+	// Deferring-child residue: a foreign-pid var left by a defer test would
+	// make a later restore silently defer and skip masking.
+	delete process.env["PI_TOOLMASKING_DEFER"];
 }
 
 beforeEach(() => {

@@ -4,30 +4,37 @@
 
 ### Added
 
-- **Subagent inheritance (env mirror):** a fresh child session spawned by
-  any subagent plugin now inherits the parent's live toolset state instead
-  of re-resolving from `toolsetDefaults`. The parent mirrors every
-  registered toolset's live state into `PI_TOOLMASKING_LIVE_STATE`
-  (`{ v: 1, pid, boot, state }`, booleans only) — re-snapshotted on every
-  `tool_call` and at the end of restore (post-consume, so grandchildren
-  inherit post-restore state), delta-gated against the current env value.
-  A fresh child reads-and-deletes the var at the top of its first restore
-  (before the allowlist short-circuit, so allowlist-mode children consume
-  too) and holds the map on `globalThis` so both restore and the
-  `before_agent_start` re-assert resolve through it — the re-assert cannot
-  strip the inherited mask one turn later. Precedence: chat-branch entry →
-  env mirror → settings pin → mode floor → packaged default, so a valid
-  foreign mirror outranks settings pins; mirror-resolved toolsets emit
-  `restored`. An identity guard (pid + per-process boot id on
-  `globalThis`, `/reload`-stable) ignores stale self-mirrors after same-process
-  session switches (`/new`), which also clears the consumed map
-  (`"startup"` and `"reload"` reasons keep it). Envelope violations
-  (corrupt JSON, bad shape, unknown version, >64KB) fail closed — one log
-  line, var deleted, settings resolve. `session_shutdown` deletes the
-  standing mirror. `PI_TOOLMASKING_NO_INHERIT` opts the consumer out (and
-  propagates to grandchildren by design). README documents the
-  consumer-only env contract, precedence, limitations, and retirement
-  condition (a pi-core spawn/inherit-state mechanism).
+- **`piToolMasking.childPolicy` settings key** (`"defer" | "settings"`,
+  top-level key, read global → project with project winning per scope —
+  scalar, no spread-merge). Controls how pi-tool-masking behaves in
+  subagent child sessions. At the top of every restore the process manages
+  a static pid-tagged env var, `PI_TOOLMASKING_DEFER` (value = publisher
+  pid, no per-toolset payload): a defer-policy parent publishes it when
+  absent; a child inheriting a foreign-pid var defers — it skips the entire
+  restore (branch entries, settings pins, mode resolution) and the per-turn
+  `before_agent_start` re-assert, emitting no mask events, and leaves the
+  var untouched (env inheritance delivers it to grandchildren; republishing
+  the child's own pid would flip it to enforcing at its next same-process
+  restore). A `"settings"` policy deletes the var and masks normally —
+  subtree-effective, so the opt-out stops propagation to grandchildren
+  (a default-defer grandchild publishes its own var). Malformed settings
+  JSON is treated as absent; an invalid value (e.g. `"banana"`) warns once
+  per process and is treated as absent; the reader never throws.
+
+### Changed
+
+- **Defer-by-default in subagent children.** With the key absent, spawned
+  `pi` children no longer enforce `toolsetDefaults` pins or replay their own
+  chat-branch entries — the spawner owns the child's tools (subagent plugins
+  configure child tool sets explicitly via per-agent frontmatter, and
+  global settings pins were silently stripping those tools). The library's
+  "defaults apply" promise is parent-scoped: `toolsetDefaults` govern the
+  sessions where masking runs, not children whose spawner explicitly
+  configured their tools. Set `"piToolMasking": { "childPolicy":
+  "settings" }` to restore enforcement in children. README documents the
+  semantics and prominent caveats (descendant leakage including
+  bash-spawned `pi`, masking is context hygiene not a security boundary,
+  pid recycling fails safe, env-scrubbing spawners drop the channel).
 
 ## [1.2.3] - 2026-08-04
 

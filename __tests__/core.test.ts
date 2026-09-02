@@ -45,8 +45,25 @@ function cleanRegistry(): void {
 	delete (globalThis as any)[RESTORE_EVENT_KEY];
 	delete (globalThis as any)[MODULE_STATE_KEY];
 	delete (globalThis as any)[DEPRECATION_WARNED_KEY];
-	delete (globalThis as any)["__piToolMaskingBootId"];
-	delete process.env["PI_TOOLMASKING_LIVE_STATE"];
+	// Deferring-child residue: a foreign-pid var left by a defer test would
+	// make a later restore silently defer and skip masking.
+	delete process.env["PI_TOOLMASKING_DEFER"];
+}
+
+/**
+ * Local wrapper keeping the historical flat defaults shape at call sites:
+ * wraps the map into the per-scope seam shape
+ * (`{ global: { toolsetDefaults }, project: {} }`). `null` passes through
+ * (seam off).
+ */
+function setDefaultsOverride(
+	defaults: Record<string, { enabled: boolean }> | null,
+): void {
+	setSettingsOverrideForTests(
+		defaults === null
+			? null
+			: { global: { toolsetDefaults: defaults }, project: {} },
+	);
 }
 
 function makeSpec(
@@ -71,11 +88,11 @@ function makeSpec(
 
 beforeEach(() => {
 	cleanRegistry();
-	setSettingsOverrideForTests({});
+	setDefaultsOverride({});
 });
 
 afterEach(() => {
-	setSettingsOverrideForTests(null);
+	setDefaultsOverride(null);
 	setSettingsWriterOverrideForTests(null);
 });
 
@@ -1179,7 +1196,7 @@ describe("Allowlist resolution mode", () => {
 		// Stale branch entry (bypassed) and settings pin (bypassed) must both lose
 		// to the set-level allowlist override.
 		mock.appendEntry("k:b", { enabled: true });
-		setSettingsOverrideForTests({ "k:c": { enabled: true } });
+		setDefaultsOverride({ "k:c": { enabled: true } });
 
 		setDefaultResolutionMode(pi, "allowlist", ["a"]);
 		// Real pi activates every extension tool at startup, THEN restore runs.
@@ -1703,7 +1720,7 @@ describe("before_agent_start disabled-leak re-assert", () => {
 
 		// Tier 2: settings pin `enabled: false` flips the toolset off with no
 		// branch entry (packaged default-on fallback would say on).
-		setSettingsOverrideForTests({
+		setDefaultsOverride({
 			"toolset-state:test.toolset": { enabled: false },
 		});
 		mock.fireLifecycleEvent("session_start");
@@ -1723,7 +1740,7 @@ describe("before_agent_start disabled-leak re-assert", () => {
 
 		// Tier 1 beats tier 2: an explicit branch entry `enabled: true` flips
 		// it back on — effectively on, so re-assert does not force-remove.
-		setSettingsOverrideForTests({});
+		setDefaultsOverride({});
 		ts.enable(pi);
 		expect(pi.getActiveTools()).toEqual(["tool-a", "tool-b"]);
 		changedSpy.mockClear();
@@ -3043,25 +3060,24 @@ describe("parseToolsetDefaults", () => {
 // ===================================================================
 
 describe("readMergedToolsetDefaults / readToolsetDefaults", () => {
-	it("returns the override verbatim when set", () => {
-		setSettingsOverrideForTests({ "k:a": { enabled: false } });
+	it("returns the override verbatim when set (global scope only)", () => {
+		setDefaultsOverride({ "k:a": { enabled: false } });
 		expect(readMergedToolsetDefaults()).toEqual({ "k:a": { enabled: false } });
 		expect(readToolsetDefaults("global")).toEqual({
 			"k:a": { enabled: false },
 		});
-		expect(readToolsetDefaults("project")).toEqual({
-			"k:a": { enabled: false },
-		});
+		// Per-scope attribution: the wrapper pins only the global scope.
+		expect(readToolsetDefaults("project")).toEqual({});
 	});
 
 	it("returns {} when override is empty", () => {
-		setSettingsOverrideForTests({});
+		setDefaultsOverride({});
 		expect(readMergedToolsetDefaults()).toEqual({});
 	});
 
 	it("returns a copy, not the override object itself", () => {
 		const seed = { "k:a": { enabled: true } };
-		setSettingsOverrideForTests(seed);
+		setDefaultsOverride(seed);
 		const out = readMergedToolsetDefaults();
 		expect(out).toEqual(seed);
 		expect(out).not.toBe(seed);
@@ -3151,7 +3167,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 			project: {},
 		};
 		setSettingsWriterOverrideForTests(writerState);
-		setSettingsOverrideForTests({ "toolset-state:reader": { enabled: false } });
+		setDefaultsOverride({ "toolset-state:reader": { enabled: false } });
 		try {
 			// Reader returns the reader override, not writer-captured state
 			const merged = readMergedToolsetDefaults();
@@ -3159,7 +3175,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 			expect(merged["toolset-state:writer"]).toBeUndefined();
 		} finally {
 			setSettingsWriterOverrideForTests(null);
-			setSettingsOverrideForTests({});
+			setDefaultsOverride({});
 		}
 	});
 
@@ -3171,7 +3187,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 
 		beforeEach(() => {
 			setSettingsWriterOverrideForTests(null);
-			setSettingsOverrideForTests(null);
+			setDefaultsOverride(null);
 
 			tmpDir = mkdtempSync(join(tmpdir(), "pi-tool-masking-roundtrip-"));
 			agentDir = join(tmpDir, "agent");
@@ -3191,7 +3207,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 				process.env.PI_CODING_AGENT_DIR = origAgentDir;
 			}
 			setSettingsWriterOverrideForTests(null);
-			setSettingsOverrideForTests({});
+			setDefaultsOverride({});
 		});
 
 		it("write→readMergedToolsetDefaults round-trip (project overrides global)", () => {
@@ -3260,7 +3276,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 		beforeEach(() => {
 			// Clear both overrides so reads and writes hit disk
 			setSettingsWriterOverrideForTests(null);
-			setSettingsOverrideForTests(null);
+			setDefaultsOverride(null);
 
 			tmpDir = mkdtempSync(join(tmpdir(), "pi-tool-masking-writer-"));
 			mkdirSync(join(tmpDir, ".pi"), { recursive: true });
@@ -3271,7 +3287,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 		afterEach(() => {
 			process.chdir(origCwd);
 			setSettingsWriterOverrideForTests(null);
-			setSettingsOverrideForTests({});
+			setDefaultsOverride({});
 		});
 
 		it("writeToolsetDefaults throws on malformed JSON", () => {
@@ -3347,7 +3363,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 
 		beforeEach(() => {
 			setSettingsWriterOverrideForTests(null);
-			setSettingsOverrideForTests(null);
+			setDefaultsOverride(null);
 
 			tmpDir = mkdtempSync(join(tmpdir(), "pi-tool-masking-writer-"));
 			mkdirSync(join(tmpDir, ".pi"), { recursive: true });
@@ -3375,7 +3391,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 		afterEach(() => {
 			process.chdir(origCwd);
 			setSettingsWriterOverrideForTests(null);
-			setSettingsOverrideForTests({});
+			setDefaultsOverride({});
 		});
 
 		it("write preserves provider, theme, existing td entries; adds new entry", () => {
@@ -3429,7 +3445,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 
 		beforeEach(() => {
 			setSettingsWriterOverrideForTests(null);
-			setSettingsOverrideForTests(null);
+			setDefaultsOverride(null);
 
 			tmpDir = mkdtempSync(join(tmpdir(), "pi-tool-masking-writer-"));
 			mkdirSync(join(tmpDir, ".pi"), { recursive: true });
@@ -3440,7 +3456,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 		afterEach(() => {
 			process.chdir(origCwd);
 			setSettingsWriterOverrideForTests(null);
-			setSettingsOverrideForTests({});
+			setDefaultsOverride({});
 		});
 
 		it("writeToolsetDefaults with unchanged values does not rewrite", () => {
@@ -3491,7 +3507,7 @@ describe("Restore — settings.json defaults tier", () => {
 	it("settings default on fresh session — settings false beats spec.defaultEnabled true", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
-		setSettingsOverrideForTests({
+		setDefaultsOverride({
 			"toolset-state:test.toolset": { enabled: false },
 		});
 		defineToolset(
@@ -3506,7 +3522,7 @@ describe("Restore — settings.json defaults tier", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		mock.appendEntry("toolset-state:test.toolset", { enabled: true });
-		setSettingsOverrideForTests({
+		setDefaultsOverride({
 			"toolset-state:test.toolset": { enabled: false },
 		});
 		defineToolset(
@@ -3520,7 +3536,7 @@ describe("Restore — settings.json defaults tier", () => {
 	it("settings absent → packaged default (tier 3 unchanged)", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
-		setSettingsOverrideForTests({});
+		setDefaultsOverride({});
 		defineToolset(
 			pi,
 			makeSpec({ names: new Set(["tool-a"]), defaultEnabled: false }),
@@ -3532,7 +3548,7 @@ describe("Restore — settings.json defaults tier", () => {
 	it("settings honored in inclusion mode — pinned true restores on", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
-		setSettingsOverrideForTests({
+		setDefaultsOverride({
 			"toolset-state:test.toolset": { enabled: true },
 		});
 		defineToolset(
@@ -3547,7 +3563,7 @@ describe("Restore — settings.json defaults tier", () => {
 	it("settings pinned false in inclusion stays off", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
-		setSettingsOverrideForTests({
+		setDefaultsOverride({
 			"toolset-state:test.toolset": { enabled: false },
 		});
 		defineToolset(
@@ -3562,7 +3578,7 @@ describe("Restore — settings.json defaults tier", () => {
 	it("unpinned in inclusion falls to false regardless of defaultEnabled", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
-		setSettingsOverrideForTests({});
+		setDefaultsOverride({});
 		defineToolset(
 			pi,
 			makeSpec({ names: new Set(["tool-a"]), defaultEnabled: true }),
@@ -3575,7 +3591,7 @@ describe("Restore — settings.json defaults tier", () => {
 	it("null-tombstoned branch entry falls through to settings pin", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
-		setSettingsOverrideForTests({
+		setDefaultsOverride({
 			"toolset-state:test.toolset": { enabled: false },
 		});
 		defineToolset(
@@ -3610,14 +3626,14 @@ describe("getEffectiveDefault", () => {
 	});
 
 	it("reads disk when no snapshot passed", () => {
-		setSettingsOverrideForTests({
+		setDefaultsOverride({
 			"toolset-state:test.toolset": { enabled: false },
 		});
 		try {
 			const spec = makeSpec({ defaultEnabled: true });
 			expect(getEffectiveDefault(spec)).toBe(false);
 		} finally {
-			setSettingsOverrideForTests({});
+			setDefaultsOverride({});
 		}
 	});
 });
@@ -3859,7 +3875,7 @@ describe("Tombstone helpers", () => {
 			pi,
 			makeSpec({ names: new Set(["tool-a"]), defaultEnabled: true }),
 		);
-		setSettingsOverrideForTests({
+		setDefaultsOverride({
 			"toolset-state:test.toolset": { enabled: false },
 		});
 		mock.appendEntry("toolset-state:test.toolset", { enabled: true });
