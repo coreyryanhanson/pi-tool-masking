@@ -73,24 +73,12 @@ function compareVersions(a, b) {
 	return 0;
 }
 
-function shellQuote(value) {
-	return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
+// Stages tracked modifications only. The clean-tree check at the top means
+// the only dirty files are ones this script wrote (package.json,
+// package-lock.json, CHANGELOG.md); a future step that creates a NEW file
+// that must be committed has to add it explicitly.
 function stageChangedFiles() {
-	const output = run("git ls-files -m -o -d --exclude-standard", {
-		silent: true,
-	});
-	const paths = [
-		...new Set(
-			(output || "")
-				.split("\n")
-				.map((line) => line.trim())
-				.filter(Boolean),
-		),
-	];
-	if (paths.length === 0) return;
-	run(`git add -- ${paths.map(shellQuote).join(" ")}`);
+	run("git add -u");
 }
 
 function bumpOrSetVersion(target) {
@@ -172,13 +160,13 @@ if (status?.trim()) {
 console.log("  Working directory clean\n");
 
 console.log("Checking [Unreleased] section...");
-if (!hasUnreleasedEntries()) {
+if (hasUnreleasedEntries()) {
+	console.log("  The [Unreleased] section has entries\n");
+} else {
 	console.log("  Warning: the [Unreleased] section is empty.");
 	console.log(
 		"  Proceeding — this is valid for a no-user-visible-change lockstep bump.\n",
 	);
-} else {
-	console.log("  The [Unreleased] section has entries\n");
 }
 
 console.log("Running test suite...");
