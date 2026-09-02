@@ -110,12 +110,14 @@ const DEPRECATION_WARNED_KEY = "__piToolMaskingDeprecationWarned";
  * — no payload, no per-toolset data. Set by a defer-policy parent at
  * restore, inherited by spawned children via the default parent env. */
 const DEFER_ENV = "PI_TOOLMASKING_DEFER";
-/** Foreign-var check only — an absent var or our OWN pid both mean "enforce"
- * here; presence-only would defer the parent's own restore/re-assert. Shared
- * by doRestore and onBeforeAgentStart so the two can never drift. */
+/** Foreign-var check only — an absent, EMPTY, or our OWN pid var all mean
+ * "enforce" here; presence-only would defer the parent's own restore/re-assert.
+ * Empty value is garbage no legitimate producer writes (publish always stores a pid):
+ * fail CLOSED (enforce), consistent with the library's malformed-input policy.
+ * Shared by doRestore and onBeforeAgentStart so the two can never drift. */
 const isForeignDeferVar = (): boolean => {
 	const v = process.env[DEFER_ENV];
-	return v !== undefined && v !== String(process.pid);
+	return v !== undefined && v !== "" && v !== String(process.pid);
 };
 /** GlobalThis flag key deduping the invalid-childPolicy-value warn, once per
  * process (same pattern as DEPRECATION_WARNED_KEY — survives /reload). */
@@ -279,7 +281,10 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		const deferring = policy === "defer" && isForeignDeferVar();
 
 		if (policy === "defer") {
-			if (deferVar === undefined) {
+			// Absent OR EMPTY both publish: an empty value is garbage no
+			// producer writes, not a deliberate foreign defer tag — overwrite it
+			// with our own pid and enforce. Keeps both checks in lockstep.
+			if (deferVar === undefined || deferVar === "") {
 				// Top-level parent: publish once per restore. A foreign var is left
 				// UNTOUCHED (no republish) — overwriting it with our own pid would
 				// stop us deferring at the next restore (/new, /resume, session_tree

@@ -86,12 +86,6 @@ export class MockPI implements Partial<ExtensionAPI> {
 		return [...this._entries];
 	}
 
-	/** Clear all recorded entries (for test isolation). */
-	clearEntries(): void {
-		this._entries = [];
-		this._sessionEntries = [];
-	}
-
 	// --- Events ---
 
 	on(event: any, handler: any): void {
@@ -144,11 +138,6 @@ export class MockPI implements Partial<ExtensionAPI> {
 		for (const h of handlers) {
 			h(eventObj, ctx);
 		}
-	}
-
-	/** Direct emit for tests that need to simulate events. */
-	emit(channel: string, data: unknown): void {
-		this._eventEmitter.emit(channel, data);
 	}
 
 	// --- Session context ---

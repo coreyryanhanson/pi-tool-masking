@@ -293,6 +293,25 @@ describe("publish + policy", () => {
 		expect(process.env[DEFER_ENV]).toBe(String(process.pid));
 	});
 
+	it("empty-string var is garbage, not a foreign defer tag — publishes own pid and enforces", () => {
+		const { mock, pi } = createEnv();
+		setupTwoToolsets(mock, pi);
+		settings({ pinWebOff: true });
+		// Empty var: no producer writes it, so it must NOT be treated as a
+		// foreign defer tag (silent permanent defer). Publish over it and mask.
+		process.env[DEFER_ENV] = "";
+		mock.setActiveTools(["web-search", "web-fetch", "search-web"]);
+
+		mock.fireLifecycleEvent("session_start", {
+			type: "session_start",
+			reason: "startup",
+		});
+
+		expect(process.env[DEFER_ENV]).toBe(String(process.pid));
+		// web pinned off by settings, search stays on (packaged default).
+		expect(mock.getActiveTools()).toEqual(["search-web"]);
+	});
+
 	it("default (key absent) is defer — publishes; a foreign var defers", () => {
 		const { mock, pi } = createEnv();
 		setupTwoToolsets(mock, pi);
