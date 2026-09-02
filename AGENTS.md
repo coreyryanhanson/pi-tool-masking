@@ -36,11 +36,16 @@ fail otherwise.
 Vitest with **globals on** (`describe`/`it`/`expect` available without import;
 `types: ["node", "vitest/globals"]`). `testTimeout: 15_000`.
 
-Tests live in `__tests__/` (`core.test.ts`, `registry-convergence.test.ts`, `custom-entry.test.ts`).
+Tests live in `__tests__/` (`core.test.ts`, `registry-convergence.test.ts`, `custom-entry.test.ts`,
+`child-policy-defer.test.ts`).
 They use a custom `MockPI` class (`__tests__/mock-pi.ts`) implementing a
-subset of `ExtensionAPI` (`setActiveTools`, `getActiveTools`, `appendEntry`,
-`on`, `events`, `sessionManager.getBranch()`). No external services, no
-fixtures, no snapshots.
+subset of `ExtensionAPI` (`setActiveTools`, `getActiveTools`, `getAllTools`,
+`registerTool`, `appendEntry`, `on`, `events`, `sessionManager.getBranch()`).
+No external services, no fixtures, no snapshots. The child-policy-defer tests
+must save/restore `process.env` and delete the `globalThis` registry keys and
+the invalid-childPolicy warn-dedup flag in `beforeEach` — process-global state
+is the feature under test, so leakage between tests there is a real failure
+mode.
 
 ## CI
 
@@ -80,6 +85,7 @@ they do NOT test, commit, tag, or publish.
 | `writeToolsetDefaults(entries, scope)` / `clearToolsetDefaults(scope)` | Mutate / clear `toolsetDefaults` settings |
 | `getEffectiveDefault(spec, snapshot?)` | Resolve a toolset's effective default through mode + settings tiers |
 | `MalformedSettingsError` | Thrown by reader/writer on unparseable settings JSON |
+| `parseToolsetDefaults(json)` | Validate/parse raw `toolsetDefaults` JSON (throws `MalformedSettingsError`) |
 | `lastCustomEntry<T>(branch, customType)` | Newest custom entry matching `customType`, narrowed through the `"custom"` discriminator so callers get typed `.data` without per-site `any` casts |
 | `TOOLSET_EVENTS` | `changed`, `restored` |
 
@@ -110,3 +116,21 @@ they do NOT test, commit, tag, or publish.
   dependents. Cycle detection at toggle time.
 - `emitMemberEvents`: opt into per-member fan-out events for per-tool UI
   updates.
+- **Subagent inheritance (child-policy defer):** `piToolMasking.childPolicy`
+  in settings (`"defer" | "settings"`, default `"defer"`, project wins per
+  scope, scalar read — never spread-merge) controls behavior in spawned
+  child sessions. At the top of `doRestore` (before the allowlist
+  short-circuit) the process reads the policy and manages
+  `PI_TOOLMASKING_DEFER` (value = publisher pid, a static tag, no per-
+  toolset payload): defer policy + absent var → publish; defer policy +
+  foreign var → skip the ENTIRE restore (both tiers — branch entries must
+  not apply either) and leave the var untouched (no republish — overwriting
+  with own pid would flip the child to enforcing at its next same-process
+  restore: session_tree, /new, /resume); `"settings"` → delete the var and
+  mask normally (subtree-effective). The `before_agent_start` dispatcher
+  checks the foreign-var condition (foreign-var only, not presence-only —
+  the parent must keep its own re-assert) before both re-assert paths. No
+  per-`tool_call` work, no delta gating, and deliberately no
+  `session_shutdown` cleanup (deleting the var at shutdown would flip a
+  deferring child to enforcing at its next restore — the republish trap;
+  pid recycling fails safe). Deferring children emit no mask events.

@@ -137,11 +137,11 @@ A toolset's fresh-session default is no longer locked to its packaged `spec.defa
 
 Restore resolves each toolset's default in this order (first hit wins):
 
-1. **Chat-branch entry** — the last `appendEntry(persistKey, …)` on this branch. A `null` tombstone (see [`clearToolsetEntry`](#tombstone-helpers)) falls through to tier 2.
+1. **Chat-branch entry** — the last `appendEntry(persistKey, …)` on this branch. A `null` tombstone (see [`clearToolsetEntry`](#tombstone-helpers)) falls through to the tiers below.
 2. **Settings pin** — `toolsetDefaults[persistKey].enabled`, merged global → project (project wins per entry). Mode-agnostic.
 3. **Packaged default** — `spec.defaultEnabled ?? true`, filtered by resolution mode for unpinned toolsets only.
 
-Settings pins are honored in all three modes, mirroring how chat-branch entries are honored — only unpinned toolsets consult mode for the floor.
+Settings pins are honored in exclusion mode, mirroring how chat-branch entries are honored — only unpinned toolsets consult mode for the floor. While allowlist mode is active, pins and branch entries are bypassed: the active set is exactly the allowlist members.
 
 ### `readMergedToolsetDefaults()`
 
@@ -163,9 +163,40 @@ Remove the `toolsetDefaults` wrapper key entirely from one scope, preserving eve
 
 Resolve a toolset's effective fresh-session default: settings tier (2) then packaged `spec.defaultEnabled ?? true` (3). **Ignores resolution mode** — callers needing mode-aware behavior must consult `getDefaultResolutionMode()` themselves. Pass an explicit `snapshot` (from `readMergedToolsetDefaults()`) when looping over multiple toolsets; omit it for a one-off (it performs its own read).
 
+## Subagent inheritance (child policy defer)
+
+Fresh child sessions spawned by subagent plugins re-resolve toolset state from settings — the parent's interactive toggles are chat-branch entries and don't cross the process boundary, and settings defaults are global. A child whose spawner explicitly configured its tool set (pi-subagents `tools:` frontmatter, per-agent config) would silently lose settings-pinned-off toolsets: the mask beats the spawner's explicit tool request.
+
+This library's default is to **defer to the spawner**: the parent publishes a static pid tag into the process environment (the one channel every spawn path already shares), and any `pi` child that inherits it skips masking entirely for its session.
+
+### The `piToolMasking.childPolicy` setting
+
+Top-level key in pi-core settings (global `~/.pi/agent/settings.json` or project `.pi/settings.json`; project wins). Read once per restore, never on the per-turn path. Malformed settings JSON is treated as absent; an invalid value (e.g. `"banana"`) warns once per process and is treated as absent. The reader never throws.
+
+```json
+{ "piToolMasking": { "childPolicy": "defer" } }
+```
+
+| Value | Behavior at each restore |
+|---|---|
+| `"defer"` (default) | If `PI_TOOLMASKING_DEFER` is absent, publish it (value = own pid — a top-level parent). If it carries a **foreign** pid, defer: the entire restore is skipped (branch entries, settings pins, mode resolution — both tiers) and the per-turn `before_agent_start` re-assert is a no-op. The var is left **untouched** — env inheritance already delivers the parent's pid to grandchildren, and republishing the child's own pid would flip it to enforcing at its next restore (`/new`, `/resume`, `session_tree`). |
+| `"settings"` | Opt out: delete the var and mask normally. Subtree-effective — a `"settings"` child of a `"defer"` parent un-defers itself and stops propagation to grandchildren (a default-defer grandchild of *it* publishes its own var). |
+
+The var is a **static pid tag**, not live state — no payload, no per-toolset data, no per-`tool_call` publishing. The parent never defers against its own tag (the pid check is stable across `/new` and `/reload`, which stay in-process). A deferring child emits no `restored`/`changed` events — the mask took no action, so there is nothing to notify about.
+
+The semantics: **the spawner owns the child's tools.** Subagent plugins configure their children's tool sets explicitly; the parent's live toggles and context-hygiene pins are about the parent's session, not the child's.
+
+### Caveats — read before relying on defaults
+
+- **The library's "defaults apply" promise is parent-scoped.** With default-defer, `toolsetDefaults` pins are NOT enforced in subagent children whose frontmatter requests those tools — `toolsetDefaults` govern the sessions where masking runs, not children whose spawner explicitly configured their tools. This is deliberate, not a bug. Set `"piToolMasking": { "childPolicy": "settings" }` to restore enforcement in children.
+- **Any descendant `pi` below a defer parent defers — including bash-spawned ones.** The var cannot distinguish a subagent child from any other descendant process: a `pi` launched from a bash subshell under a defer parent comes up on packaged defaults, and tools pinned off for context hygiene will be active there. Masking is **context hygiene, not a security boundary** — pi runs with full system access by design (no sandbox, no popups). If a workflow needs pins enforced, set `"childPolicy": "settings"` globally: it covers descendants on the same machine.
+- **Pid recycling fails safe.** A stale var whose pid was recycled reads as self → masking applies (enforcement), never silent defer.
+- **A spawner that scrubs child env (`env: {}`) drops the channel** — the child silently falls back to enforcing defaults. This is the "why isn't defer working for plugin X" case.
+- External-CLI runners (codex-exec etc.) are out of scope — a different runtime; this library isn't loaded there.
+
 ## Tombstone helpers
 
-Within pi-core's append-only `SessionManager`, a toolset's chat-branch entry can't be deleted — but a `null` tombstone appended after the last entry makes `doRestore` fall through to the settings tier so settings re-assert. Tombstones are dedup'd (no-op when the last entry is already cleared) and never written for never-toggled toolsets. A later manual toggle appends after the tombstone and supersedes it.
+Within pi-core's append-only `SessionManager`, a toolset's chat-branch entry can't be deleted — but a `null` tombstone appended after the last entry makes `doRestore` fall through to settings, so settings re-assert. Tombstones are dedup'd (no-op when the last entry is already cleared) and never written for never-toggled toolsets. A later manual toggle appends after the tombstone and supersedes it.
 
 ### `clearToolsetEntry(pi, persistKey, branch)`
 
@@ -343,6 +374,7 @@ ids with a stable namespace (<product-family>.<subset>, e.g. "foo.web").
 - **Defaults tiers:** each toolset's restore default resolves chat-branch entry → `toolsetDefaults` settings pin → packaged `spec.defaultEnabled`, filtered by resolution mode for unpinned toolsets only. Settings pins are read fresh from disk on each restore.
 - **Null-tombstone-aware restore:** a `null` last branch entry (written by `clearToolsetEntry`) falls through to the settings tier instead of any stale prior entry; mode resolution is likewise null-tombstone-aware (`branchMode ?? "exclusion"`). Tombstones aren't sticky — a later toggle supersedes them.
 - **Events:** a live toggle emits only when state actually changes (no-op toggles are suppressed); restore always emits, so side-effect owners stay in sync across reloads and tree navigations.
+- **Child-policy defer:** the top of every restore reads `piToolMasking.childPolicy` (default `"defer"`) and manages a static pid-tagged env var (`PI_TOOLMASKING_DEFER`): a defer-policy parent publishes it when absent, a foreign-pid var makes restore and the per-turn re-assert no-op (deferring to the spawner), and a `"settings"` policy deletes the var and masks normally. See [Subagent inheritance](#subagent-inheritance-child-policy-defer).
 
 ---
 

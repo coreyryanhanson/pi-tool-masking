@@ -1,6 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { describe, it, expect } from "vitest";
 import { MockPI } from "./mock-pi.js";
+import { cleanRegistry, REGISTRY_KEY } from "./helpers.js";
 
 // ---------------------------------------------------------------------------
 // GlobalThis registry convergence tests
@@ -17,16 +18,6 @@ import { MockPI } from "./mock-pi.js";
 function createEnv(): { mock: MockPI; pi: ExtensionAPI } {
 	const mock = new MockPI();
 	return { mock, pi: mock as unknown as ExtensionAPI };
-}
-
-const REGISTRY_KEY = "__piToolMaskingRegistry";
-const RESTORE_EVENT_KEY = "__piToolMaskingLastRestoreEvent";
-const MODULE_STATE_KEY = "__piToolMaskingModuleState";
-
-function cleanRegistry(): void {
-	delete (globalThis as any)[REGISTRY_KEY];
-	delete (globalThis as any)[RESTORE_EVENT_KEY];
-	delete (globalThis as any)[MODULE_STATE_KEY];
 }
 
 beforeEach(() => {
@@ -60,10 +51,7 @@ describe("GlobalThis registry convergence", () => {
 		const { mock: m2, pi: p2 } = createEnv();
 		m2.registerTool({ name: "from-mod2", description: "" });
 
-		const registryPre = (globalThis as any)[REGISTRY_KEY] as Map<
-			string,
-			unknown
-		>;
+		const registryPre = (globalThis as any)[REGISTRY_KEY] as Map<string, unknown>;
 		expect(registryPre.has("mod1.test")).toBe(true);
 
 		// mod2 registers its own toolset — both co-exist

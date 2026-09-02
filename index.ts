@@ -106,6 +106,23 @@ const MODULE_KEY = "__piToolMaskingModuleState";
 const MODE_PERSIST_KEY = "toolset-resolution-mode";
 const DEPRECATION_WARNED_KEY = "__piToolMaskingDeprecationWarned";
 
+/** Child-defer signal: value is the publisher's pid (string). Static pid tag
+ * — no payload, no per-toolset data. Set by a defer-policy parent at
+ * restore, inherited by spawned children via the default parent env. */
+const DEFER_ENV = "PI_TOOLMASKING_DEFER";
+/** Foreign-var check only — an absent, EMPTY, or our OWN pid var all mean
+ * "enforce" here; presence-only would defer the parent's own restore/re-assert.
+ * Empty value is garbage no legitimate producer writes (publish always stores a pid):
+ * fail CLOSED (enforce), consistent with the library's malformed-input policy.
+ * Shared by doRestore and onBeforeAgentStart so the two can never drift. */
+const isForeignDeferVar = (): boolean => {
+	const v = process.env[DEFER_ENV];
+	return v !== undefined && v !== "" && v !== String(process.pid);
+};
+/** GlobalThis flag key deduping the invalid-childPolicy-value warn, once per
+ * process (same pattern as DEPRECATION_WARNED_KEY — survives /reload). */
+const CHILD_POLICY_WARNED_KEY = "__piToolMaskingChildPolicyWarned";
+
 const INCLUSION_DEPRECATED_MESSAGE =
 	'[pi-tool-masking] "inclusion" resolution mode is deprecated since 1.2.0 ' +
 	'and will be removed in a coming 1.x minor; use "allowlist" for focus suppression.';
@@ -134,6 +151,14 @@ function getModuleState(): ModuleState {
 		};
 	}
 	return (globalThis as any)[MODULE_KEY] as ModuleState;
+}
+
+// ---------------------------------------------------------------------------
+// Registered tool names — hoisted scan shared by mask/re-assert/apply paths
+// ---------------------------------------------------------------------------
+
+function getRegisteredNames(pi: ExtensionAPI): Set<string> {
+	return new Set(pi.getAllTools().map((t) => t.name));
 }
 
 // ---------------------------------------------------------------------------
@@ -175,8 +200,8 @@ function computeAllowlistDesired(
 
 /**
  * Resolve a toolset's effective enabled state through the same tier chain
- * restore applies per toolset: chat-branch entry → settings pin → mode
- * floor → packaged `defaultEnabled`.
+ * restore applies per toolset: chat-branch entry → settings pin → mode floor
+ * → packaged `defaultEnabled`.
  *
  * A pinned settings entry is explicit user intent and participates in BOTH
  * modes — mirroring how the chat-branch tier (also user intent) is honored
@@ -238,6 +263,51 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		(globalThis as any)[RESTORE_EVENT_KEY] = event;
 
 		const registry = getRegistry();
+		const ms = getModuleState();
+
+		// ---- Child-policy defer: read + publish/consume ----
+		// MUST run at the TOP, before the allowlist short-circuit: the allowlist
+		// branch returns below without reaching the settings read, so a policy
+		// read placed after mode resolution would make allowlist-mode parents
+		// never publish (children fall back to enforcing — fail-closed but wrong).
+		// The var is a static pid tag; no per-tool_call work, no delta gating.
+		const policy = readChildPolicy();
+		const deferVar = process.env[DEFER_ENV];
+		// Snapshot the defer decision BEFORE any publish side effect (own policy
+		// is authoritative, so the snapshot includes it). Load-bearing rules are
+		// publish-only-when-absent and foreign-leave-untouched below, not this
+		// ordering — a child inherits the PARENT's pid, which is foreign to it,
+		// so no ordering of our reads/writes can flip that.
+		const deferring = policy === "defer" && isForeignDeferVar();
+
+		if (policy === "defer") {
+			// Absent OR EMPTY both publish: an empty value is garbage no
+			// producer writes, not a deliberate foreign defer tag — overwrite it
+			// with our own pid and enforce. Keeps both checks in lockstep.
+			if (deferVar === undefined || deferVar === "") {
+				// Top-level parent: publish once per restore. A foreign var is left
+				// UNTOUCHED (no republish) — overwriting it with our own pid would
+				// stop us deferring at the next restore (/new, /resume, session_tree
+				// all stay in-process), silently flipping to enforcing mid-session.
+				// Env inheritance already delivers the parent's pid to grandchildren.
+				process.env[DEFER_ENV] = String(process.pid);
+			}
+		} else {
+			// Opt-out ("settings"): delete an inherited var so the un-defer is
+			// subtree-effective — a default-defer grandchild of this child starts
+			// clean and publishes its own var.
+			delete process.env[DEFER_ENV];
+		}
+
+		if (deferring) {
+			// Child deferring to its spawner: skip EVERYTHING — mode resolution,
+			// the allowlist short-circuit, and the per-toolset loop (both the
+			// settings tier AND the branch tier — our own branch entries must not
+			// apply either). No restored/changed events. Module state keeps its
+			// pre-restore values; harmless, because nothing acts on them under
+			// defer (the defer check precedes the dispatcher branch).
+			return;
+		}
 
 		// Re-read durable resolution mode before per-toolset fallback.
 		// setDefaultResolutionMode persists this bit; a fresh process defaults
@@ -280,7 +350,6 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 			(["inclusion", "exclusion", "allowlist"] as const).includes(branchMode)
 				? branchMode
 				: "exclusion";
-		const ms = getModuleState();
 		ms.defaultResolutionMode = mode;
 		// Deprecation: resolving a branch mode entry to "inclusion" is the
 		// deprecated path (fires on /reload of a session that last set
@@ -315,7 +384,7 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 			// toolset) is kept as-is — `setActiveTools` is a full replacement, so we
 			// must not rebuild the set from only allowlist members.
 			const current = pi.getActiveTools();
-			const registered = new Set(pi.getAllTools().map((t) => t.name));
+			const registered = getRegisteredNames(pi);
 			const desired = computeAllowlistDesired(
 				allowArr,
 				current,
@@ -395,15 +464,12 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		const registry = getRegistry();
 		const current = pi.getActiveTools();
 		const currentSet = new Set(current);
-		const registered = new Set(pi.getAllTools().map((t) => t.name));
+		const registered = getRegisteredNames(pi);
 		const next = computeAllowlistDesired(allow, current, registered, registry);
 		// Delta gate — no-op unless the active set actually changed. `next`/`current`
 		// may share a length while differing (a leak removed AND a member re-added),
 		// so compare length AND that every desired tool is already current.
-		if (
-			next.length === current.length &&
-			next.every((n) => currentSet.has(n))
-		) {
+		if (next.length === current.length && next.every((n) => currentSet.has(n))) {
 			return;
 		}
 		pi.setActiveTools(next);
@@ -422,10 +488,8 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 				if (names.some((n) => nextSet.has(n) && !currentSet.has(n))) {
 					_emitToolsetEvents(entry.spec, pi, TOOLSET_EVENTS.changed, true);
 				}
-			} else {
-				if (names.some((n) => currentSet.has(n) && !nextSet.has(n))) {
-					_emitToolsetEvents(entry.spec, pi, TOOLSET_EVENTS.changed, false);
-				}
+			} else if (names.some((n) => currentSet.has(n) && !nextSet.has(n))) {
+				_emitToolsetEvents(entry.spec, pi, TOOLSET_EVENTS.changed, false);
 			}
 		}
 	};
@@ -477,10 +541,7 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		// a filter of `current`, so equal length already implies equality; the
 		// containment check is kept to mirror reassertAllowlist's gate.
 		const currentSet = new Set(current);
-		if (
-			next.length === current.length &&
-			next.every((n) => currentSet.has(n))
-		) {
+		if (next.length === current.length && next.every((n) => currentSet.has(n))) {
 			return;
 		}
 		pi.setActiveTools(next);
@@ -498,15 +559,23 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		}
 	};
 
-	// Single dispatcher: branch on mode, NOT a second `pi.on` registration —
-	// the suite asserts `handlerCount("before_agent_start") === 1`. One
-	// registration, two mode-shaped re-asserters behind it.
+	// Single dispatcher: branch on defer + mode, NOT a second `pi.on`
+	// registration — the suite asserts `handlerCount("before_agent_start") ===
+	// 1`. One registration, the defer guard and two mode-shaped re-asserters
+	// behind it.
 	const onBeforeAgentStart = (event: unknown, ctx: ExtensionContext): void => {
+		// Deferring child: no re-assert at all — the spawner owns the child's
+		// tools for the session, on BOTH dispatch paths (a resumed child branch
+		// could carry an allowlist mask; the dispatcher placement guarantees it
+		// is guarded rather than hoping fresh branches carry no mode entries).
+		// Never reads settings here, so deferring children shed the per-turn IO.
+		if (isForeignDeferVar()) return;
+
 		const ms = getModuleState();
-		if (ms.activeAllowlist !== undefined) {
-			reassertAllowlist(ms.activeAllowlist);
-		} else {
+		if (ms.activeAllowlist === undefined) {
 			reassertDisabled(event, ctx);
+		} else {
+			reassertAllowlist(ms.activeAllowlist);
 		}
 	};
 
@@ -536,9 +605,10 @@ function _emitToolsetEvents(
 	pi.events.emit(eventType, { id: spec.id, enabled });
 
 	if (spec.emitMemberEvents) {
+		const registered = getRegisteredNames(pi);
 		for (const name of spec.names) {
 			// Only emit for names that are actually registered tools
-			if (!pi.getAllTools().some((t) => t.name === name)) continue;
+			if (!registered.has(name)) continue;
 			pi.events.emit(eventType, {
 				id: spec.id,
 				enabled,
@@ -578,9 +648,8 @@ export function lastCustomEntry<T>(
 
 function _applyEnable(spec: ToolsetSpec, pi: ExtensionAPI): void {
 	const current = new Set(pi.getActiveTools());
-	const registeredNames = [...spec.names].filter((n) =>
-		pi.getAllTools().some((t) => t.name === n),
-	);
+	const registered = getRegisteredNames(pi);
+	const registeredNames = [...spec.names].filter((n) => registered.has(n));
 
 	if (registeredNames.every((n) => current.has(n))) return;
 
@@ -616,9 +685,8 @@ function _applyRestoreToolset(
 	enabled: boolean,
 	isPersistedEntry: boolean,
 ): void {
-	const registeredNames = [...spec.names].filter((n) =>
-		pi.getAllTools().some((t) => t.name === n),
-	);
+	const registered = getRegisteredNames(pi);
+	const registeredNames = [...spec.names].filter((n) => registered.has(n));
 
 	if (enabled) {
 		const current = new Set(pi.getActiveTools());
@@ -945,10 +1013,7 @@ export function clearToolsetEntry(
 	persistKey: string,
 	branch: readonly SessionEntry[],
 ): void {
-	const last = lastCustomEntry<{ enabled?: boolean } | null>(
-		branch,
-		persistKey,
-	);
+	const last = lastCustomEntry<{ enabled?: boolean } | null>(branch, persistKey);
 	const data = last?.data;
 	// No prior entry, a tombstoned last entry (data null), or a last entry
 	// without an `enabled` field → already effectively cleared, skip.
@@ -1003,32 +1068,61 @@ function settingsPath(scope: "global" | "project"): string {
 }
 
 /**
+ * Parsed settings.json at the read boundary — a plain JSON object, or an
+ * empty object on missing/unreadable/malformed file (never-throw policy;
+ * non-object parses recover to `{}` before crossing the boundary).
+ */
+type ParsedSettings = Record<string, unknown>;
+
+/**
  * Read one scope's settings.json as a parsed object, or `{}` on any
  * read/parse failure (never-throw policy — a malformed file contributes
  * `{}` to the merge; only mutators throw `MalformedSettingsError`).
  */
-function readSettingsJsonSafe(scope: "global" | "project"): unknown {
+function readSettingsJsonSafe(scope: "global" | "project"): ParsedSettings {
 	const path = settingsPath(scope);
 	try {
 		if (!existsSync(path)) return {};
-		return JSON.parse(readFileSync(path, "utf-8"));
+		const parsed: unknown = JSON.parse(readFileSync(path, "utf-8"));
+		if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+			return parsed as ParsedSettings;
+		}
+		return {};
 	} catch {
 		return {};
 	}
 }
 
-let _settingsOverride: ToolsetDefaultsMap | null = null;
+let _settingsOverride: {
+	global: ParsedSettings | undefined;
+	project: ParsedSettings | undefined;
+} | null = null;
 
 /**
- * Inject a snapshot of toolset defaults for tests. Pass `null` to restore
- * the disk-read path. Production code never calls this.
+ * Inject full parsed settings objects (per scope) for tests. Pass `null` to
+ * restore the disk-read path. One seam feeds all three readers
+ * (`readMergedToolsetDefaults`, `readToolsetDefaults`, `readChildPolicy`),
+ * so a test cannot desync them. Production code never calls this.
  *
  * @internal
  */
 export function setSettingsOverrideForTests(
-	defaults: ToolsetDefaultsMap | null,
+	override: {
+		global: ParsedSettings | undefined;
+		project: ParsedSettings | undefined;
+	} | null,
 ): void {
-	_settingsOverride = defaults;
+	_settingsOverride = override;
+}
+
+function readScopeSettings(scope: "global" | "project"): ParsedSettings {
+	if (_settingsOverride !== null) {
+		// Seam active: an absent scope entry means "this scope is {}" — never a
+		// disk read (the seam exists precisely to keep tests off the developer's
+		// real settings files).
+		return _settingsOverride[scope] ?? {};
+	}
+	return readSettingsJsonSafe(scope);
 }
 
 /**
@@ -1071,9 +1165,6 @@ export function parseToolsetDefaults(json: unknown): ToolsetDefaultsMap {
  * (not flattened) — call sites unwrap with `?.enabled`. Project overrides
  * global per entry.
  *
- * When `setSettingsOverrideForTests` has set an override, returns that
- * override verbatim instead of reading disk.
- *
  * @public — exported for snapshot-in usage (read once per loop
  * and pass to `getEffectiveDefault`).
  *
@@ -1083,10 +1174,9 @@ export function parseToolsetDefaults(json: unknown): ToolsetDefaultsMap {
  * breaks. Upgrade path: a pi-core settings-path registry, if one ever appears.
  */
 export function readMergedToolsetDefaults(): ToolsetDefaultsMap {
-	if (_settingsOverride !== null) return { ..._settingsOverride };
 	return {
-		...parseToolsetDefaults(readSettingsJsonSafe("global")),
-		...parseToolsetDefaults(readSettingsJsonSafe("project")),
+		...parseToolsetDefaults(readScopeSettings("global")),
+		...parseToolsetDefaults(readScopeSettings("project")),
 	};
 }
 
@@ -1096,9 +1186,9 @@ export function readMergedToolsetDefaults(): ToolsetDefaultsMap {
  * Returns the raw `toolsetDefaults` block parsed from that scope's file,
  * without merging. Missing/unreadable/malformed files return `{}`.
  *
- * When `setSettingsOverrideForTests` has set an override, returns that
- * override for both scopes (test mode approximation — attribution tests
- * must use the writer seam + disk round-trip).
+ * When `setSettingsOverrideForTests` has set an override, returns only this
+ * scope's slice (`parseToolsetDefaults(override[scope])`, `{}` when the
+ * scope is absent) — per-scope attribution, not a both-scopes copy.
  *
  * @public — exported for a `defaults show`-style command that needs
  * per-scope attribution.
@@ -1106,8 +1196,61 @@ export function readMergedToolsetDefaults(): ToolsetDefaultsMap {
 export function readToolsetDefaults(
 	scope: "global" | "project",
 ): ToolsetDefaultsMap {
-	if (_settingsOverride !== null) return { ..._settingsOverride };
-	return parseToolsetDefaults(readSettingsJsonSafe(scope));
+	return parseToolsetDefaults(readScopeSettings(scope));
+}
+
+/** Valid values for `piToolMasking.childPolicy`. */
+type ChildPolicy = "defer" | "settings";
+
+/**
+ * Read `piToolMasking.childPolicy` from settings (global, then project).
+ *
+ * Precedence is SCALAR, per scope, project wins: each scope's parsed
+ * settings object is read separately — the objects are never spread-merged,
+ * or a project `"piToolMasking": {}` would silently drop a global
+ * `childPolicy`.
+ *
+ * Never throws: malformed/unreadable settings JSON contributes `{}` for that
+ * scope (safe-reader policy — the same file already breaks every
+ * `toolsetDefaults` pin, and a throw from a `session_start` handler would
+ * break restore over a file problem unrelated to childPolicy). A
+ * present-but-invalid value (e.g. `"banana"`) is a config typo worth
+ * surfacing: warns once per process (globalThis-flag dedup) and is treated
+ * as absent. Key absent entirely → default `"defer"`.
+ *
+ * Read once per restore — the per-turn re-assert path never calls this.
+ *
+ * @internal
+ */
+function readChildPolicy(): ChildPolicy {
+	const read = (
+		scope: "global" | "project",
+	): Record<string, unknown> | undefined => {
+		const pim = readScopeSettings(scope)["piToolMasking"];
+		if (!pim || typeof pim !== "object" || Array.isArray(pim)) return undefined;
+		return pim as Record<string, unknown>;
+	};
+	// Project wins per scope. An invalid value is treated as ABSENT for its
+	// scope (warn + fall through), not as "defer" — a project typo must not
+	// override a valid global policy.
+	const resolve = (raw: unknown): ChildPolicy | undefined => {
+		if (raw === undefined) return undefined;
+		if (raw === "defer" || raw === "settings") return raw;
+		if (!(globalThis as any)[CHILD_POLICY_WARNED_KEY]) {
+			(globalThis as any)[CHILD_POLICY_WARNED_KEY] = true;
+			console.warn(
+				`[pi-tool-masking] Invalid piToolMasking.childPolicy: ${JSON.stringify(
+					raw,
+				)} — must be "defer" or "settings"; treating as absent.`,
+			);
+		}
+		return undefined;
+	};
+	return (
+		resolve(read("project")?.["childPolicy"]) ??
+		resolve(read("global")?.["childPolicy"]) ??
+		"defer"
+	);
 }
 
 /**
@@ -1195,11 +1338,7 @@ function mutateSettingsJson(
 		if (existsSync(path)) {
 			const raw = readFileSync(path, "utf-8");
 			const parsed = JSON.parse(raw);
-			if (
-				typeof parsed !== "object" ||
-				parsed === null ||
-				Array.isArray(parsed)
-			) {
+			if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
 				throw new MalformedSettingsError(
 					`[pi-tool-masking] Refusing to overwrite non-object settings.json at ` +
 						`${path}. The file contains ${

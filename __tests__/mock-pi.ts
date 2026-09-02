@@ -86,12 +86,6 @@ export class MockPI implements Partial<ExtensionAPI> {
 		return [...this._entries];
 	}
 
-	/** Clear all recorded entries (for test isolation). */
-	clearEntries(): void {
-		this._entries = [];
-		this._sessionEntries = [];
-	}
-
 	// --- Events ---
 
 	on(event: any, handler: any): void {
@@ -129,21 +123,21 @@ export class MockPI implements Partial<ExtensionAPI> {
 		return this._handlers.get(event)?.length ?? 0;
 	}
 
-	/** Fire a lifecycle event (session_start, session_tree) to registered handlers. */
-	fireLifecycleEvent(event: string): void {
+	/**
+	 * Fire a lifecycle event (session_start, session_tree) to registered
+	 * handlers. `payload` is merged into the single event object — e.g.
+	 * `{ type: "session_start", reason: "startup" }` — matching the real
+	 * runner's event shape (e.g. `SessionStartEvent`).
+	 */
+	fireLifecycleEvent(event: string, payload?: Record<string, unknown>): void {
 		const handlers = this._handlers.get(event) ?? [];
 		const ctx = this.createContext();
 		// Create ONE event object — the real runner passes the same reference
 		// to every extension's handler (event-identity dedup).
-		const eventObj = {};
+		const eventObj = { ...payload };
 		for (const h of handlers) {
 			h(eventObj, ctx);
 		}
-	}
-
-	/** Direct emit for tests that need to simulate events. */
-	emit(channel: string, data: unknown): void {
-		this._eventEmitter.emit(channel, data);
 	}
 
 	// --- Session context ---
