@@ -25,6 +25,7 @@ import {
 	applyToolsetEnabled,
 	type RegistryEntry,
 } from "../index.js";
+import { cleanRegistry, REGISTRY_KEY } from "./helpers.js";
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -33,21 +34,6 @@ import {
 function createEnv(): { mock: MockPI; pi: ExtensionAPI } {
 	const mock = new MockPI();
 	return { mock, pi: mock as unknown as ExtensionAPI };
-}
-
-const REGISTRY_KEY = "__piToolMaskingRegistry";
-const RESTORE_EVENT_KEY = "__piToolMaskingLastRestoreEvent";
-const MODULE_STATE_KEY = "__piToolMaskingModuleState";
-const DEPRECATION_WARNED_KEY = "__piToolMaskingDeprecationWarned";
-
-function cleanRegistry(): void {
-	delete (globalThis as any)[REGISTRY_KEY];
-	delete (globalThis as any)[RESTORE_EVENT_KEY];
-	delete (globalThis as any)[MODULE_STATE_KEY];
-	delete (globalThis as any)[DEPRECATION_WARNED_KEY];
-	// Deferring-child residue: a foreign-pid var left by a defer test would
-	// make a later restore silently defer and skip masking.
-	delete process.env["PI_TOOLMASKING_DEFER"];
 }
 
 /**

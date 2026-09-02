@@ -6,6 +6,7 @@ import {
 	TOOLSET_EVENTS,
 	setSettingsOverrideForTests,
 } from "../index.js";
+import { cleanGlobalKeys, cleanRegistry } from "./helpers.js";
 
 // ---------------------------------------------------------------------------
 // Child-policy defer — piToolMasking.childPolicy + PI_TOOLMASKING_DEFER
@@ -19,10 +20,7 @@ import {
 // ---------------------------------------------------------------------------
 
 const DEFER_ENV = "PI_TOOLMASKING_DEFER";
-const REGISTRY_KEY = "__piToolMaskingRegistry";
-const RESTORE_EVENT_KEY = "__piToolMaskingLastRestoreEvent";
 const MODULE_STATE_KEY = "__piToolMaskingModuleState";
-const CHILD_POLICY_WARNED_KEY = "__piToolMaskingChildPolicyWarned";
 const FOREIGN_PID = String(process.pid + 12345);
 const MODE_PERSIST_KEY = "toolset-resolution-mode";
 
@@ -125,12 +123,8 @@ function collectMaskEvents(mock: MockPI): () => { type: string; id: string }[] {
 let savedDeferVar: string | undefined;
 
 beforeEach(() => {
-	delete (globalThis as any)[REGISTRY_KEY];
-	delete (globalThis as any)[RESTORE_EVENT_KEY];
-	delete (globalThis as any)[MODULE_STATE_KEY];
-	delete (globalThis as any)[CHILD_POLICY_WARNED_KEY];
 	savedDeferVar = process.env[DEFER_ENV];
-	delete process.env[DEFER_ENV];
+	cleanRegistry();
 	setSettingsOverrideForTests({ global: {}, project: {} });
 });
 
@@ -139,10 +133,7 @@ afterEach(() => {
 	if (savedDeferVar === undefined) delete process.env[DEFER_ENV];
 	else process.env[DEFER_ENV] = savedDeferVar;
 	vi.restoreAllMocks();
-	delete (globalThis as any)[REGISTRY_KEY];
-	delete (globalThis as any)[RESTORE_EVENT_KEY];
-	delete (globalThis as any)[MODULE_STATE_KEY];
-	delete (globalThis as any)[CHILD_POLICY_WARNED_KEY];
+	cleanGlobalKeys();
 });
 
 // ===================================================================
@@ -193,6 +184,34 @@ describe("defer at restore", () => {
 			"web-fetch",
 			"search-web",
 		]);
+	});
+
+	it("deferring child skips the allowlist restore branch — branch mode entry not applied", () => {
+		const { mock, pi } = createEnv();
+		setupTwoToolsets(mock, pi);
+		// A resumed child branch could carry an allowlist mode entry; without
+		// defer, restore would strip everything outside ["lean.search"]. Under
+		// defer the whole restore returns early — spawner's tools survive and
+		// no mask events fire.
+		mock.appendEntry(MODE_PERSIST_KEY, {
+			mode: "allowlist",
+			allowlist: ["lean.search"],
+		});
+		mock.setActiveTools(["web-search", "web-fetch", "search-web"]);
+		process.env[DEFER_ENV] = FOREIGN_PID;
+		const events = collectMaskEvents(mock);
+
+		mock.fireLifecycleEvent("session_start", {
+			type: "session_start",
+			reason: "startup",
+		});
+
+		expect(mock.getActiveTools()).toEqual([
+			"web-search",
+			"web-fetch",
+			"search-web",
+		]);
+		expect(events()).toEqual([]);
 	});
 });
 
@@ -284,9 +303,7 @@ describe("publish + policy", () => {
 		expect(process.env[DEFER_ENV]).toBe(String(process.pid));
 
 		// Fresh rig with a foreign var: default-defer child defers.
-		delete (globalThis as any)[REGISTRY_KEY];
-		delete (globalThis as any)[RESTORE_EVENT_KEY];
-		delete (globalThis as any)[MODULE_STATE_KEY];
+		cleanGlobalKeys();
 		const child = createEnv();
 		setupTwoToolsets(child.mock, child.pi);
 		settings({ pinWebOff: true });
