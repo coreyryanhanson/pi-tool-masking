@@ -142,41 +142,14 @@ export class MockPI implements Partial<ExtensionAPI> {
 
 	// --- Session context ---
 
-	/** Minimal context for event handlers that need ctx.sessionManager.getBranch(). */
+	/** Minimal context: the library only ever reads ctx.sessionManager.getBranch().
+	 *  ponytail: add stub fields here if index.ts starts touching more ctx surface. */
 	createContext(): ExtensionContext {
 		return {
 			sessionManager: {
 				getBranch: () => [...this._sessionEntries],
-				getCwd: () => "/mock",
-				getSessionDir: () => "/mock/sessions",
-				getSessionId: () => "mock-session-id",
-				getSessionFile: () => undefined,
-				getLeafId: () => null,
-				getLeafEntry: () => undefined,
-				getEntry: (_id: string) => undefined,
-				getLabel: (_id: string) => undefined,
-				getHeader: () => null,
-				getEntries: () => [...this._sessionEntries],
-				getTree: () => [],
-				getSessionName: () => undefined,
-			} as any,
-			ui: {} as any,
-			mode: "tui",
-			hasUI: false,
-			cwd: "/mock",
-			modelRegistry: {} as any,
-			model: undefined,
-			scopedModels: [],
-			isIdle: () => true,
-			isProjectTrusted: () => false,
-			signal: undefined,
-			abort: () => {},
-			hasPendingMessages: () => false,
-			shutdown: () => {},
-			getContextUsage: () => undefined,
-			compact: () => {},
-			getSystemPrompt: () => "",
-		};
+			},
+		} as unknown as ExtensionContext;
 	}
 }
 
