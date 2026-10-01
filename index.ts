@@ -776,7 +776,12 @@ function _applyRestoreToolset(
 		// an unregistered spec member active in the list must be removed on
 		// restore just like a manual disable would.
 		const filtered = current.filter((n) => !spec.names.has(n));
-		pi.setActiveTools(filtered);
+		// Pure-removal filter: equal length implies zero names removed, so the
+		// write would hand pi back its own active list (a redundant system-prompt
+		// rebuild). Mirrors the `toAdd.length > 0` guard in the enabled branch.
+		if (filtered.length !== current.length) {
+			pi.setActiveTools(filtered);
+		}
 	}
 
 	// Always emit regardless of state (always-emit invariant)
