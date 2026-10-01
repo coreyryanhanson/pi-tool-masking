@@ -8,7 +8,6 @@ const GLOBAL_KEYS = [
 	"__piToolMaskingRegistry",
 	"__piToolMaskingLastRestoreEvent",
 	"__piToolMaskingModuleState",
-	"__piToolMaskingDeprecationWarned",
 	"__piToolMaskingChildPolicyWarned",
 ] as const;
 

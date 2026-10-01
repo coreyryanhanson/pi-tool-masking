@@ -136,17 +136,43 @@ function getModuleState(): ModuleState {
 // Registered tool names — hoisted scan shared by mask/re-assert/apply paths
 // ---------------------------------------------------------------------------
 
-function getRegisteredNames(pi: ExtensionAPI): Set<string> {
-	return new Set(pi.getAllTools().map((t) => t.name));
+/** One getAllTools() pass collecting both the registered names and the
+ *  actuatable subset. Registered = present in the tool registry; actuatable
+ *  = registered ∧ not `hidden`-exposure (pi's setActiveTools silently drops
+ *  hidden names, so they can never be active). Pre-0.99 pi has no `exposure`
+ *  field — absent reads as actuatable, i.e. exactly the pre-fix behaviour.
+ *  The read keeps a defensive cast even under the ^0.99 devDependency: this
+ *  library ships raw TS source, so every consumer's tsc compiles it against
+ *  THEIR installed pi types, and pre-0.99 types have no `exposure` (TS2339
+ *  on a plain read). */
+function scanToolNames(pi: ExtensionAPI): {
+	registered: Set<string>;
+	actuatable: Set<string>;
+} {
+	const registered = new Set<string>();
+	const actuatable = new Set<string>();
+	for (const tool of pi.getAllTools()) {
+		registered.add(tool.name);
+		if ((tool as { exposure?: string }).exposure === "hidden") continue;
+		actuatable.add(tool.name);
+	}
+	return { registered, actuatable };
+}
+
+/** Registered tool names pi can actuate: present in the registry and not
+ *  `hidden`-exposure. One getAllTools() pass — same cost as the old scan. */
+function getActuatableNames(pi: ExtensionAPI): Set<string> {
+	return scanToolNames(pi).actuatable;
 }
 
 // ---------------------------------------------------------------------------
 // Compute the desired active-tool list under allowlist mode
 // ---------------------------------------------------------------------------
 // current − (non-allowlisted members) + (allowlist members), restricted to
-// registered tools. Mirrored by doRestore's allowlist branch and
+// actuatable tools. Mirrored by doRestore's allowlist branch and
 // reassertAllowlist so the two NEVER drift on the mask definition. The
-// `registered` filter keeps spec names that aren't registered tools out of
+// `registered` filter (fed `getActuatableNames` by both call sites) keeps
+// spec names pi can't actuate — unregistered or `hidden`-exposure — out of
 // the replacement set (parity with `_applyRestoreToolset`'s per-name filter).
 function computeAllowlistDesired(
 	allowlist: readonly string[],
@@ -174,6 +200,38 @@ function computeAllowlistDesired(
 }
 
 // ---------------------------------------------------------------------------
+// Persisted resolution state — one branch read shared by restore and the
+// exported resolver, so the two can never drift on what the persisted mode is
+// ---------------------------------------------------------------------------
+
+/** Persisted resolution state from the branch's LAST mode entry. Unrecognized
+ *  mode values (e.g. a legacy pre-2.0.0 persisted entry) fall through to
+ *  `"exclusion"` silently — the entry is ignored, not migrated. A mode entry
+ *  claiming `"allowlist"` with no usable array is corruption: recovered to an
+ *  EMPTY allowlist (fail closed), not to `"exclusion"` (fail open) —
+ *  "everything on" is the wrong recovery for a masking library, and an empty
+ *  allowlist keeps mode + array consistent. Write-time validation is the
+ *  asymmetric mirror: `setDefaultResolutionMode` rejects an empty array as a
+ *  likely mistake; restore-time recovers it as the safe recovery. */
+function readBranchModeState(branch: readonly SessionEntry[]): {
+	mode: DefaultResolutionMode;
+	allowlist: string[];
+} {
+	const last = lastCustomEntry<
+		{
+			// persisted data — legacy branches may carry unrecognized mode values
+			mode?: string;
+			allowlist?: string[];
+		} | null
+	>(branch, MODE_PERSIST_KEY);
+	const rawAllowlist = last?.data?.allowlist;
+	return {
+		mode: last?.data?.mode === "allowlist" ? "allowlist" : "exclusion",
+		allowlist: Array.isArray(rawAllowlist) ? rawAllowlist : [],
+	};
+}
+
+// ---------------------------------------------------------------------------
 // Effective-enabled resolution — shared by restore and the turn re-assert
 // ---------------------------------------------------------------------------
 
@@ -181,6 +239,21 @@ function computeAllowlistDesired(
  * Resolve a toolset's effective enabled state through the same tier chain
  * restore applies per toolset: chat-branch entry → settings pin → packaged
  * `defaultEnabled ?? true`.
+ *
+ * **Allowlist-aware:** when the branch's last mode entry says
+ * `"allowlist"`, the set-level override is authoritative — the resolver
+ * answers `allowlist.includes(spec.id)` and per-toolset branch entries and
+ * settings pins are bypassed (the same rule as restore's allowlist
+ * short-circuit), so a suppressed toolset resolves `false` instead of
+ * falling through the tier chain to `defaultEnabled ?? true` while the
+ * mask is suppressing it. The mode is read from the passed `branch`, not
+ * module state: a consumer whose handler runs before masking's restore in
+ * a fresh process would otherwise see an unpopulated mirror and report a
+ * suppressed toolset ON — the exact failure this export exists to prevent.
+ * Under allowlist mode, `persistedEntry` still reports branch-entry
+ * existence; only external callers can observe that combination (restore
+ * and the turn re-assert short-circuit before reaching the resolver in
+ * allowlist mode).
  *
  * `settingsDefaults` is the on-disk shape
  * `Record<persistKey, { enabled: boolean }>` (see `readMergedToolsetDefaults`);
@@ -193,8 +266,15 @@ function computeAllowlistDesired(
  * `restored` vs `changed` emit; the turn-boundary re-assert only needs
  * `.enabled`. Shared by both so the two can never drift on what
  * "effectively off" means.
+ *
+ * @public — the consumer rule: display and toggle-gating read intent via
+ * `effectiveEnabled(spec, branch, readMergedToolsetDefaults())` (`branch`
+ * from `ctx.sessionManager.getBranch()` inside a handler) so an inert
+ * toolset (members hidden or not yet connected) shows its persisted state
+ * and an "off" toggle is honored rather than refused; read `.enabled` only.
+ * `isEnabled()` stays the observation read — see the README.
  */
-function effectiveEnabled(
+export function effectiveEnabled(
 	spec: ToolsetSpec,
 	branch: readonly SessionEntry[],
 	settingsDefaults: ToolsetDefaultsMap,
@@ -203,6 +283,13 @@ function effectiveEnabled(
 		branch,
 		spec.persistKey,
 	);
+	const { mode, allowlist } = readBranchModeState(branch);
+	if (mode === "allowlist") {
+		return {
+			enabled: allowlist.includes(spec.id),
+			persistedEntry: typeof lastEntry?.data?.enabled === "boolean",
+		};
+	}
 	const enabled = lastEntry?.data?.enabled;
 	if (typeof enabled === "boolean") {
 		return { enabled, persistedEntry: true };
@@ -284,41 +371,13 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		// setDefaultResolutionMode persists this bit; a fresh process defaults
 		// to "exclusion" until the persisted entry is replayed here. Mode
 		// entries are from a prior session (not written during this restore), so
-		// a single read here is sufficient. Null-tombstone-aware: read the LAST
-		// mode entry regardless of `data` (a `null` tombstone is the most recent
-		// mode fact and must beat a stale prior entry, falling through to
-		// "exclusion"); there is no settings fallback for mode — no mode
-		// settings tier exists, so mode resolution is `branchMode ?? "exclusion"`.
-		const lastModeEntry = lastCustomEntry<{
-			// persisted data — legacy branches may carry unrecognized mode values
-			mode?: string;
-			allowlist?: string[];
-		} | null>(ctx.sessionManager.getBranch(), MODE_PERSIST_KEY);
-		const branchMode = lastModeEntry?.data?.mode;
-		const branchAllowlist = lastModeEntry?.data?.allowlist;
-		// Fail closed: a branch entry claiming "allowlist" with no usable array
-		// is corruption (write-time validation prevents it, but branch files are
-		// hand-editable). Recover to an EMPTY allowlist, not to "exclusion":
-		//   (1) Respect the branch's mode claim. mode="allowlist" is a state
-		//       someone chose; silently rewriting it to "exclusion" (which
-		//       means "everything on" under default fallback) is a mode change
-		//       nobody made and fails OPEN — the wrong default for a masking
-		//       library. Empty allowlist = "nothing is on", the safe recovery.
-		//   (2) Keep mode + array consistent. mode=allowlist with
-		//       activeAllowlist=undefined is contradictory
-		//       (getDefaultResolutionMode() === "allowlist" while
-		//       getActiveAllowlist() === undefined). mode=allowlist with
-		//       activeAllowlist=[] is consistent and means "no member is allowed
-		//       on" — the same semantic as a populated allowlist whose members
-		//       are all unregistered.
-		// Asymmetric with `setDefaultResolutionMode`: write-time rejects an
-		// empty array as a likely mistake (e.g. deleting the last member and
-		// forgetting to switch modes); restore-time recovers a missing/non-array
-		// to [] as the safe recovery. Write-time validates intent; restore-time
-		// picks the safe recovery.
-		const allowArr = Array.isArray(branchAllowlist) ? branchAllowlist : [];
-		const mode: DefaultResolutionMode =
-			branchMode === "allowlist" ? "allowlist" : "exclusion";
+		// a single read here is sufficient. The read + normalization + fail-
+		// closed allowlist recovery live in `readBranchModeState` — the same
+		// helper the exported `effectiveEnabled` uses, so restore and the
+		// resolver cannot drift on what the persisted mode is.
+		const { mode, allowlist: allowArr } = readBranchModeState(
+			ctx.sessionManager.getBranch(),
+		);
 		ms.defaultResolutionMode = mode;
 		// Mirror the allowlist into module state so the parameterless
 		// `getActiveAllowlist()` can read it — branch is the source of truth,
@@ -349,7 +408,7 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 			// toolset) is kept as-is — `setActiveTools` is a full replacement, so we
 			// must not rebuild the set from only allowlist members.
 			const current = pi.getActiveTools();
-			const registered = getRegisteredNames(pi);
+			const registered = getActuatableNames(pi);
 			const desired = computeAllowlistDesired(
 				allowArr,
 				current,
@@ -428,7 +487,7 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		const registry = getRegistry();
 		const current = pi.getActiveTools();
 		const currentSet = new Set(current);
-		const registered = getRegisteredNames(pi);
+		const registered = getActuatableNames(pi);
 		const next = computeAllowlistDesired(allow, current, registered, registry);
 		// Delta gate — no-op unless the active set actually changed. `next`/`current`
 		// may share a length while differing (a leak removed AND a member re-added),
@@ -567,10 +626,12 @@ function _emitToolsetEvents(
 	pi.events.emit(eventType, { id: spec.id, enabled });
 
 	if (spec.emitMemberEvents) {
-		const registered = getRegisteredNames(pi);
+		// Skip non-actuatable names — a hidden member can never be active, so
+		// a per-member event for it would be the same phantom the loop already
+		// avoids for unregistered names.
+		const actuatable = getActuatableNames(pi);
 		for (const name of spec.names) {
-			// Only emit for names that are actually registered tools
-			if (!registered.has(name)) continue;
+			if (!actuatable.has(name)) continue;
 			pi.events.emit(eventType, {
 				id: spec.id,
 				enabled,
@@ -609,14 +670,34 @@ export function lastCustomEntry<T>(
 // ---------------------------------------------------------------------------
 
 function _applyEnable(spec: ToolsetSpec, pi: ExtensionAPI): void {
-	const current = new Set(pi.getActiveTools());
-	const registered = getRegisteredNames(pi);
+	// One scan collecting BOTH sets: the witness gate tests the REGISTERED
+	// set; the union filters through the ACTUATABLE set. (Explicit-toggle
+	// path, not per-turn, so the single pass is fine.)
+	const { registered, actuatable } = scanToolNames(pi);
 	const registeredNames = [...spec.names].filter((n) => registered.has(n));
+	const current = new Set(pi.getActiveTools());
 
-	if (registeredNames.every((n) => current.has(n))) return;
+	// Witness gate — a no-op requires the ON state to be fully witnessed:
+	// every member registered AND every member active. `[].every()` is
+	// vacuously true, so the length test is load-bearing: without it the gate
+	// early-returns on a partially-registered toolset (server not connected
+	// yet) and deletes the sole intent write, force-removing every turn for a
+	// defaultEnabled: false toolset once its members appear. An inert toolset
+	// (members all hidden) is likewise never witnessed on: it persists intent
+	// and emits while issuing no loadout write.
+	const witnessedOn =
+		registeredNames.length === spec.names.size &&
+		registeredNames.every((n) => current.has(n));
+	if (witnessedOn) return;
 
-	const next = [...new Set([...current, ...registeredNames])];
-	pi.setActiveTools(next);
+	// Adding filters through the actuatable set — a hidden member can never
+	// be active, so handing it to setActiveTools is a silent drop.
+	const toAdd = registeredNames.filter(
+		(n) => actuatable.has(n) && !current.has(n),
+	);
+	if (toAdd.length > 0) {
+		pi.setActiveTools([...new Set([...current, ...toAdd])]);
+	}
 	pi.appendEntry(spec.persistKey, { enabled: true });
 	_emitToolsetEvents(spec, pi, TOOLSET_EVENTS.changed, true);
 }
@@ -627,11 +708,32 @@ function _applyEnable(spec: ToolsetSpec, pi: ExtensionAPI): void {
 
 function _applyDisable(spec: ToolsetSpec, pi: ExtensionAPI): void {
 	const current = pi.getActiveTools();
+	// Removal filters by raw spec.names — a stale-but-active member must be
+	// removed even if it is no longer registered (or is hidden, which can
+	// never be active and so removes nothing). Only the ADDING direction
+	// filters through the actuatable set.
 	const filtered = current.filter((n) => !spec.names.has(n));
 
-	if (filtered.length === current.length) return;
+	if (filtered.length !== current.length) {
+		pi.setActiveTools(filtered);
+		pi.appendEntry(spec.persistKey, { enabled: false });
+		_emitToolsetEvents(spec, pi, TOOLSET_EVENTS.changed, false);
+		return;
+	}
 
-	pi.setActiveTools(filtered);
+	// Nothing to remove. Early-return only when the OFF state is fully
+	// WITNESSED: every member registered and actuatable, so absence of
+	// activity actually proves the intent is applied. The old purely
+	// observational gate was vacuously satisfied by an inert toolset
+	// (members all hidden, or server not yet connected) and silently dropped
+	// the user's "off" — the toolset resolved back ON when the server
+	// connected. The gate costs one getAllTools() pass, and only on this
+	// no-removal path; for a fully-registered toolset it collapses to the
+	// old behaviour bit-for-bit. Empty names is vacuously witnessed (0 === 0)
+	// and still no-ops.
+	const actuatable = getActuatableNames(pi);
+	const actuatableNames = [...spec.names].filter((n) => actuatable.has(n));
+	if (actuatableNames.length === spec.names.size) return;
 	pi.appendEntry(spec.persistKey, { enabled: false });
 	_emitToolsetEvents(spec, pi, TOOLSET_EVENTS.changed, false);
 }
@@ -639,6 +741,14 @@ function _applyDisable(spec: ToolsetSpec, pi: ExtensionAPI): void {
 // ---------------------------------------------------------------------------
 // Restore-specific apply: applies state without persisting, always emits
 // isPersistedEntry=true → restored event, false → changed event
+//
+// Inert toolsets (non-empty spec, zero actuatable members — members still
+// `hidden`, or the server not yet connected): `enabled` is applied as far as
+// it can be (empty toAdd / no removals) while the emit still fires. An inert
+// toolset announces `enabled: true`/`enabled: false` while declaring
+// nothing, and `isEnabled()` stays false until actuatable members exist.
+// Persistence never comes from this path — only explicit
+// `enable()`/`disable()` write branch entries.
 // ---------------------------------------------------------------------------
 
 function _applyRestoreToolset(
@@ -647,16 +757,22 @@ function _applyRestoreToolset(
 	enabled: boolean,
 	isPersistedEntry: boolean,
 ): void {
-	const registered = getRegisteredNames(pi);
-	const registeredNames = [...spec.names].filter((n) => registered.has(n));
-
 	if (enabled) {
+		// Adding filters through the actuatable set — same rule as
+		// _applyEnable (a hidden member can never be active). The toAdd guard
+		// skips the redundant full-loadout write + system-prompt rebuild when
+		// next === current.
 		const current = new Set(pi.getActiveTools());
-		const next = [...new Set([...current, ...registeredNames])];
-		pi.setActiveTools(next);
+		const actuatable = getActuatableNames(pi);
+		const toAdd = [...spec.names].filter(
+			(n) => actuatable.has(n) && !current.has(n),
+		);
+		if (toAdd.length > 0) {
+			pi.setActiveTools([...new Set([...current, ...toAdd])]);
+		}
 	} else {
 		const current = pi.getActiveTools();
-		// Use spec.names.has(n) (not registeredNames) to match _applyDisable —
+		// Use spec.names.has(n) (NOT the actuatable set) to match _applyDisable —
 		// an unregistered spec member active in the list must be removed on
 		// restore just like a manual disable would.
 		const filtered = current.filter((n) => !spec.names.has(n));
@@ -998,6 +1114,14 @@ export function clearAllToolsetEntries(
  * `TOOLSET_EVENTS.changed` — **without** writing a branch entry. The
  * live-apply half of a settings restore: pull the toolset to its
  * settings/packaged default without persisting a chat-branch pin.
+ *
+ * Inert toolset rule: for a non-empty toolset with zero actuatable members
+ * (members still `hidden`, or its server not yet connected), the apply is a
+ * no-op (nothing can be added or removed) but the `changed` event still
+ * fires — the toolset announces `enabled: true`/`enabled: false` while
+ * declaring nothing, and `isEnabled()` stays false until actuatable members
+ * exist. This path never persists; only explicit `enable()`/`disable()`
+ * write branch entries.
  */
 export function applyToolsetEnabled(
 	pi: ExtensionAPI,

@@ -21,9 +21,16 @@ import type {
  *
  * Does NOT expose a readEntry method (none exists on ExtensionAPI).
  */
+/** Widened ToolInfo fixture: `exposure` optional (0.99 types require the
+ *  field on ToolInfo; the mock must be able to represent its ABSENCE so the
+ *  "missing exposure reproduces current behaviour" tests stay honest). */
+type MockToolInfo = Omit<ToolInfo, "exposure"> & { exposure?: string };
+
 export class MockPI implements Partial<ExtensionAPI> {
 	private _activeTools: string[] = [];
-	private _tools: ToolInfo[] = [];
+	private _tools: MockToolInfo[] = [];
+	/** Full setActiveTools call history (raw arguments). */
+	private _setActiveCalls: string[][] = [];
 	private _entries: CustomEntryRecord[] = [];
 	private _sessionEntries: SessionEntry[] = [];
 	private _eventEmitter = new EventEmitter();
@@ -35,11 +42,13 @@ export class MockPI implements Partial<ExtensionAPI> {
 	registerTool(
 		info: Pick<ToolInfo, "name" | "description"> & {
 			sourceInfo?: ToolInfo["sourceInfo"];
+			exposure?: string;
 		},
 	): void {
-		// 0.99 ToolInfo requires `exposure`; the assertion defers the semantic
-		// decision (stored/propagated vs absent) to the exposure rework.
-		const tool = {
+		// `exposure` is stored only when provided — NO default. With a default
+		// the field is never absent and the "missing exposure reproduces current
+		// behaviour" tests become tautological.
+		const tool: MockToolInfo = {
 			name: info.name,
 			description: info.description ?? "",
 			parameters: undefined as any,
@@ -49,16 +58,37 @@ export class MockPI implements Partial<ExtensionAPI> {
 				scope: "user",
 				origin: "top-level",
 			},
-		} as ToolInfo;
-		this._tools.push(tool);
+			...(info.exposure ? { exposure: info.exposure } : {}),
+		};
+		// Replace any existing same-name entry — real pi rebuilds a
+		// name→definition map on refresh, so re-registering a name replaces it
+		// (e.g. an MCP server re-registering a dropped tool as `hidden`).
+		const i = this._tools.findIndex((t) => t.name === info.name);
+		if (i >= 0) this._tools[i] = tool;
+		else this._tools.push(tool);
 	}
 
+	// Widened fixture type under a required-`exposure` ToolInfo return.
 	getAllTools(): ToolInfo[] {
-		return [...this._tools];
+		return [...this._tools] as unknown as ToolInfo[];
 	}
 
 	setActiveTools(toolNames: string[]): void {
-		this._activeTools = [...toolNames];
+		// Record the RAW arguments before filtering — the per-turn tests assert
+		// that the library never hands a hidden name over in the first place.
+		this._setActiveCalls.push([...toolNames]);
+		// Mirror pi's filter: hidden-exposure names are silently dropped from
+		// the active set.
+		this._activeTools = toolNames.filter((n) => {
+			const t = this._tools.find((tool) => tool.name === n);
+			return !t || t.exposure !== "hidden";
+		});
+	}
+
+	/** Full call history (raw arguments, pre-filter) — `getActiveTools()` state
+	 *  alone cannot show a redundant identical-list rewrite. */
+	getSetActiveCalls(): string[][] {
+		return this._setActiveCalls.map((c) => [...c]);
 	}
 
 	getActiveTools(): string[] {
