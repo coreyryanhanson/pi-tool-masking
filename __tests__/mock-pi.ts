@@ -37,7 +37,9 @@ export class MockPI implements Partial<ExtensionAPI> {
 			sourceInfo?: ToolInfo["sourceInfo"];
 		},
 	): void {
-		const tool: ToolInfo = {
+		// 0.99 ToolInfo requires `exposure`; the assertion defers the semantic
+		// decision (stored/propagated vs absent) to the exposure rework.
+		const tool = {
 			name: info.name,
 			description: info.description ?? "",
 			parameters: undefined as any,
@@ -47,7 +49,7 @@ export class MockPI implements Partial<ExtensionAPI> {
 				scope: "user",
 				origin: "top-level",
 			},
-		};
+		} as ToolInfo;
 		this._tools.push(tool);
 	}
 
@@ -88,12 +90,18 @@ export class MockPI implements Partial<ExtensionAPI> {
 
 	// --- Events ---
 
-	on(event: any, handler: any): void {
+	on(event: any, handler: any): () => void {
 		const key = String(event);
 		if (!this._handlers.has(key)) {
 			this._handlers.set(key, []);
 		}
 		this._handlers.get(key)!.push(handler);
+		return () => {
+			const list = this._handlers.get(key);
+			if (!list) return;
+			const i = list.indexOf(handler);
+			if (i >= 0) list.splice(i, 1);
+		};
 	}
 
 	get events(): EventBus {

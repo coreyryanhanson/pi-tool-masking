@@ -108,9 +108,14 @@ they do NOT test, commit, tag, or publish.
   restore path so the two never drift. Restore/re-assert handlers install
   once per `pi` instance (WeakSet guard) rather than once per toolset.
   Residual: runs at this extension's load-order position — a
-  force-add reconciler on a later-loading extension re-adds after us; a
-  fully-robust fix needs a pi-core masking primitive at the
-  `setActiveTools` boundary.
+  force-add reconciler on a later-loading extension re-adds after us, and
+  pi core itself re-adds every `--tools`/`allowedToolNames` name on every
+  tool-registry refresh (per-`registerTool` since pi 0.99,
+  `agent-session.ts:3488-3494`), so a forced name that is also a member of
+  an off/suppressed toolset oscillates — pi re-adds at refresh, the
+  re-assert removes at the next `before_agent_start` — bounded at one
+  write per side per turn. A fully-robust fix needs a pi-core masking
+  primitive at the `setActiveTools` boundary.
 - `requires` cascade: enable cascades to deps, disable cascades to
   dependents. Cycle detection at toggle time.
 - `emitMemberEvents`: opt into per-member fan-out events for per-tool UI
