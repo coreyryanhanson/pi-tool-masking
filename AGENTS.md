@@ -74,7 +74,7 @@ they do NOT test, commit, tag, or publish.
 | Export | Notes |
 |---|---|
 | `defineToolset(pi, spec)` | Idempotent re-registration by `spec.id` |
-| `setDefaultResolutionMode(pi, mode, allowlist?)` | `"exclusion"` (default), `"inclusion"` (deprecated since 1.2.0), or `"allowlist"` (requires `allowlist: string[]`) |
+| `setDefaultResolutionMode(pi, mode, allowlist?)` | `"exclusion"` (default) or `"allowlist"` (requires `allowlist: string[]`) |
 | `getDefaultResolutionMode()` | Read current mode (no `pi` argument) |
 | `getActiveAllowlist()` | Copy-on-read mirror of the active allowlist, or `undefined` when not in allowlist mode |
 | `getRegisteredToolsets()` | Pure registry read — no `pi` argument needed |

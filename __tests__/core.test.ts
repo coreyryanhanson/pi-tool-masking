@@ -1022,12 +1022,6 @@ describe("Default resolution mode", () => {
 		expect(getDefaultResolutionMode()).toBe("exclusion");
 	});
 
-	it("set and get inclusion mode", () => {
-		const { pi } = createEnv();
-		setDefaultResolutionMode(pi, "inclusion");
-		expect(getDefaultResolutionMode()).toBe("inclusion");
-	});
-
 	it("set and get exclusion mode", () => {
 		const { pi } = createEnv();
 		setDefaultResolutionMode(pi, "exclusion");
@@ -1036,109 +1030,27 @@ describe("Default resolution mode", () => {
 
 	it("mode persists in globalThis shared state across calls", () => {
 		const { pi } = createEnv();
-		setDefaultResolutionMode(pi, "inclusion");
-		expect(getDefaultResolutionMode()).toBe("inclusion");
+		setDefaultResolutionMode(pi, "allowlist", ["some.web"]);
+		expect(getDefaultResolutionMode()).toBe("allowlist");
 		setDefaultResolutionMode(pi, "exclusion");
 		expect(getDefaultResolutionMode()).toBe("exclusion");
 	});
 
 	it("setDefaultResolutionMode appends a durable mode entry", () => {
 		const { mock, pi } = createEnv();
-		setDefaultResolutionMode(pi, "inclusion");
+		setDefaultResolutionMode(pi, "exclusion");
 		const entries = mock.getEntries("toolset-resolution-mode");
 		expect(entries).toHaveLength(1);
-		expect(entries[0]?.data).toEqual({ mode: "inclusion" });
+		expect(entries[0]?.data).toEqual({ mode: "exclusion" });
 	});
 
 	it("throws for invalid mode", () => {
 		const { pi } = createEnv();
 		expect(() => (setDefaultResolutionMode as any)(pi, "invalid")).toThrow(
-			'[pi-tool-masking] Invalid defaultResolutionMode: "invalid". Must be "exclusion", "inclusion", or "allowlist".',
+			'[pi-tool-masking] Invalid defaultResolutionMode: "invalid". Must be "exclusion" or "allowlist".',
 		);
 	});
 });
-
-// ===================================================================
-// Inclusion deprecation — runtime warning
-// ===================================================================
-
-describe("Inclusion mode deprecation warning", () => {
-	it('setDefaultResolutionMode("inclusion") warns once; suppressed on repeat', () => {
-		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-		const { pi } = createEnv();
-		setDefaultResolutionMode(pi, "inclusion");
-		setDefaultResolutionMode(pi, "inclusion");
-		setDefaultResolutionMode(pi, "exclusion");
-		expect(warnSpy).toHaveBeenCalledTimes(1);
-		expect(warnSpy).toHaveBeenCalledWith(
-			expect.stringContaining(
-				'"inclusion" resolution mode is deprecated since 1.2.0',
-			),
-		);
-		warnSpy.mockRestore();
-	});
-
-	it('doRestore resolving an "inclusion" branch mode entry warns once; suppressed on repeat', () => {
-		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-		const { mock, pi } = createEnv();
-		// Handler registration happens via defineToolset; the branch carries a
-		// legacy "inclusion" mode entry (written before the upgrade).
-		defineToolset(pi, makeSpec());
-		mock.appendEntry("toolset-resolution-mode", { mode: "inclusion" });
-		mock.fireLifecycleEvent("session_start");
-		mock.fireLifecycleEvent("session_start");
-		expect(getDefaultResolutionMode()).toBe("inclusion"); // still resolved
-		expect(warnSpy).toHaveBeenCalledTimes(1);
-		expect(warnSpy).toHaveBeenCalledWith(
-			expect.stringContaining(
-				'"inclusion" resolution mode is deprecated since 1.2.0',
-			),
-		);
-		warnSpy.mockRestore();
-	});
-});
-
-// ===================================================================
-// Resolution mode persistence — survives quit/resume
-// ===================================================================
-
-describe("Resolution mode persistence — survives quit/resume", () => {
-	it("inclusion mode persisted on process 1 restores on a fresh process; unknown toolset defaults off", () => {
-		// Process 1: focus sets inclusion mode (appends MODE_PERSIST_KEY entry)
-		const { mock: mock1, pi: pi1 } = createEnv();
-		setDefaultResolutionMode(pi1, "inclusion");
-		expect(getDefaultResolutionMode()).toBe("inclusion");
-		expect(mock1.getEntries("toolset-resolution-mode")).toHaveLength(1);
-
-		// Simulate quit: fresh globalThis — in-memory mode reverts to exclusion
-		cleanRegistry();
-
-		// Process 2: resume — new MockPI sharing globalThis. Its branch is
-		// seeded with the persisted mode entry (as the session manager would
-		// load it from disk on resume).
-		const { mock: mock2, pi: pi2 } = createEnv();
-		mock2.registerTool({ name: "tool-a", description: "" });
-		mock2.appendEntry("toolset-resolution-mode", { mode: "inclusion" });
-		// A toolset registered post-focus with no persisted {enabled} entry.
-		// defaultEnabled: true would turn it ON in exclusion mode — the drift
-		// bug. Inclusion mode must hold it OFF.
-		defineToolset(
-			pi2,
-			makeSpec({ names: new Set(["tool-a"]), defaultEnabled: true }),
-		);
-
-		// Fresh process: in-memory mode is still exclusion until restore runs
-		expect(getDefaultResolutionMode()).toBe("exclusion");
-
-		mock2.fireLifecycleEvent("session_start");
-
-		// Restore replayed the persisted mode entry BEFORE per-toolset fallback,
-		// so inclusion holds and the unknown toolset restores off.
-		expect(getDefaultResolutionMode()).toBe("inclusion");
-		expect(mock2.getActiveTools()).not.toContain("tool-a");
-	});
-});
-
 // ===================================================================
 // Allowlist resolution mode
 // ===================================================================
@@ -1457,26 +1369,6 @@ describe("Allowlist resolution mode", () => {
 		expect(getActiveAllowlist()).toBeUndefined();
 		expect(mock.getActiveTools()).toEqual(["tool-a"]);
 	});
-
-	it("getActiveAllowlist() is undefined under inclusion", () => {
-		const { mock, pi } = createEnv();
-		mock.registerTool({ name: "tool-a", description: "" });
-		// A toolset must exist — defineToolset registers the restore handler.
-		defineToolset(
-			pi,
-			makeSpec({
-				id: "a",
-				persistKey: "k:a",
-				names: new Set(["tool-a"]),
-			}),
-		);
-		mock.appendEntry("toolset-resolution-mode", { mode: "inclusion" });
-
-		mock.fireLifecycleEvent("session_start");
-
-		expect(getDefaultResolutionMode()).toBe("inclusion");
-		expect(getActiveAllowlist()).toBeUndefined();
-	});
 });
 
 // ===================================================================
@@ -1625,7 +1517,7 @@ describe("before_agent_start allowlist re-assert", () => {
 });
 
 // ===================================================================
-// before_agent_start disabled-leak re-assert (exclusion/inclusion)
+// before_agent_start disabled-leak re-assert (exclusion)
 // ===================================================================
 
 describe("before_agent_start disabled-leak re-assert", () => {
@@ -2480,41 +2372,6 @@ describe("Restore — no entry (default fallback)", () => {
 		expect(mock.getActiveTools()).not.toContain("tool-a");
 	});
 
-	it("inclusion mode → defaults off regardless of defaultEnabled", () => {
-		const { mock, pi } = createEnv();
-		mock.registerTool({ name: "tool-a", description: "" });
-		setDefaultResolutionMode(pi, "inclusion");
-		defineToolset(
-			pi,
-			makeSpec({ names: new Set(["tool-a"]), defaultEnabled: true }),
-		);
-		mock.fireLifecycleEvent("session_start");
-		expect(mock.getActiveTools()).not.toContain("tool-a");
-	});
-
-	it("inclusion mode emits changed (not restored) and does not persist", () => {
-		const { mock, pi } = createEnv();
-		mock.registerTool({ name: "tool-a", description: "" });
-		setDefaultResolutionMode(pi, "inclusion");
-		defineToolset(
-			pi,
-			makeSpec({ names: new Set(["tool-a"]), defaultEnabled: true }),
-		);
-		const entryCountBefore = mock.getEntries().length;
-		const emitSpy = vi.spyOn(mock.events, "emit");
-		mock.fireLifecycleEvent("session_start");
-		const changedCalls = emitSpy.mock.calls.filter(
-			([c]) => c === TOOLSET_EVENTS.changed,
-		);
-		expect(changedCalls.length).toBeGreaterThanOrEqual(1);
-		const restoredCalls = emitSpy.mock.calls.filter(
-			([c]) => c === TOOLSET_EVENTS.restored,
-		);
-		expect(restoredCalls.length).toBe(0);
-		expect(mock.getEntries().length).toBe(entryCountBefore);
-		emitSpy.mockRestore();
-	});
-
 	it("no-entry restore does not call appendEntry (entry count unchanged)", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
@@ -2925,35 +2782,6 @@ describe("Restore independence — does not cascade", () => {
 // ===================================================================
 
 describe("Default-resolution mode — entry vs no-entry", () => {
-	it("toolset A (with entry) B (no entry): mode affects B but not A", () => {
-		const { mock, pi } = createEnv();
-		mock.registerTool({ name: "a-tool", description: "" });
-		mock.registerTool({ name: "b-tool", description: "" });
-		const tsA = defineToolset(
-			pi,
-			makeSpec({
-				id: "A",
-				persistKey: "k:A",
-				names: new Set(["a-tool"]),
-				defaultEnabled: false,
-			}),
-		);
-		defineToolset(
-			pi,
-			makeSpec({
-				id: "B",
-				persistKey: "k:B",
-				names: new Set(["b-tool"]),
-				defaultEnabled: true,
-			}),
-		);
-		tsA.enable(pi);
-		setDefaultResolutionMode(pi, "inclusion");
-		mock.fireLifecycleEvent("session_start");
-		expect(mock.getActiveTools()).toContain("a-tool");
-		expect(mock.getActiveTools()).not.toContain("b-tool");
-	});
-
 	it("exclusion mode: B (no entry, defaultEnabled: true) defaults on", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "b-tool", description: "" });
@@ -3531,7 +3359,7 @@ describe("Restore — settings.json defaults tier", () => {
 		expect(mock.getActiveTools()).not.toContain("tool-a");
 	});
 
-	it("settings honored in inclusion mode — pinned true restores on", () => {
+	it("settings pinned true restores on", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		setDefaultsOverride({
@@ -3541,37 +3369,8 @@ describe("Restore — settings.json defaults tier", () => {
 			pi,
 			makeSpec({ names: new Set(["tool-a"]), defaultEnabled: true }),
 		);
-		setDefaultResolutionMode(pi, "inclusion");
 		mock.fireLifecycleEvent("session_start");
 		expect(mock.getActiveTools()).toContain("tool-a");
-	});
-
-	it("settings pinned false in inclusion stays off", () => {
-		const { mock, pi } = createEnv();
-		mock.registerTool({ name: "tool-a", description: "" });
-		setDefaultsOverride({
-			"toolset-state:test.toolset": { enabled: false },
-		});
-		defineToolset(
-			pi,
-			makeSpec({ names: new Set(["tool-a"]), defaultEnabled: true }),
-		);
-		setDefaultResolutionMode(pi, "inclusion");
-		mock.fireLifecycleEvent("session_start");
-		expect(mock.getActiveTools()).not.toContain("tool-a");
-	});
-
-	it("unpinned in inclusion falls to false regardless of defaultEnabled", () => {
-		const { mock, pi } = createEnv();
-		mock.registerTool({ name: "tool-a", description: "" });
-		setDefaultsOverride({});
-		defineToolset(
-			pi,
-			makeSpec({ names: new Set(["tool-a"]), defaultEnabled: true }),
-		);
-		setDefaultResolutionMode(pi, "inclusion");
-		mock.fireLifecycleEvent("session_start");
-		expect(mock.getActiveTools()).not.toContain("tool-a");
 	});
 
 	it("null-tombstoned branch entry falls through to settings pin", () => {

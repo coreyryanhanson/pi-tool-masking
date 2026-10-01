@@ -48,15 +48,8 @@ export interface ToolsetChangedEvent {
 
 /**
  * How toolsets with no persisted branch entry resolve on restore.
- *
- * @deprecated The `"inclusion"` member is deprecated since 1.2.0 — use
- * `"allowlist"` for focus-style suppression (a finite, branch-persisted set
- * whose complement is computed at restore), or `"exclusion"` for the
- * default-on floor. `"inclusion"` still works (with a one-time runtime
- * warning) through the deprecation window; it is scheduled for removal in a
- * near-term 1.x minor.
  */
-export type DefaultResolutionMode = "exclusion" | "inclusion" | "allowlist";
+export type DefaultResolutionMode = "exclusion" | "allowlist";
 
 // ---------------------------------------------------------------------------
 // Change notification — event names
@@ -104,7 +97,6 @@ function getRegistry(): Registry {
 
 const MODULE_KEY = "__piToolMaskingModuleState";
 const MODE_PERSIST_KEY = "toolset-resolution-mode";
-const DEPRECATION_WARNED_KEY = "__piToolMaskingDeprecationWarned";
 
 /** Child-defer signal: value is the publisher's pid (string). Static pid tag
  * — no payload, no per-toolset data. Set by a defer-policy parent at
@@ -120,21 +112,8 @@ const isForeignDeferVar = (): boolean => {
 	return v !== undefined && v !== "" && v !== String(process.pid);
 };
 /** GlobalThis flag key deduping the invalid-childPolicy-value warn, once per
- * process (same pattern as DEPRECATION_WARNED_KEY — survives /reload). */
+ * process (lives on globalThis — survives /reload). */
 const CHILD_POLICY_WARNED_KEY = "__piToolMaskingChildPolicyWarned";
-
-const INCLUSION_DEPRECATED_MESSAGE =
-	'[pi-tool-masking] "inclusion" resolution mode is deprecated since 1.2.0 ' +
-	'and will be removed in a coming 1.x minor; use "allowlist" for focus suppression.';
-
-// Once-per-process dedup for the inclusion deprecation warning. Lives on
-// globalThis (like the registry and module state) so a /reload, which
-// re-evals modules in the same process, does not re-warn.
-function warnInclusionDeprecation(): void {
-	if ((globalThis as any)[DEPRECATION_WARNED_KEY]) return;
-	(globalThis as any)[DEPRECATION_WARNED_KEY] = true;
-	console.warn(INCLUSION_DEPRECATED_MESSAGE);
-}
 
 interface ModuleState {
 	defaultResolutionMode: DefaultResolutionMode;
@@ -200,13 +179,9 @@ function computeAllowlistDesired(
 
 /**
  * Resolve a toolset's effective enabled state through the same tier chain
- * restore applies per toolset: chat-branch entry → settings pin → mode floor
- * → packaged `defaultEnabled`.
+ * restore applies per toolset: chat-branch entry → settings pin → packaged
+ * `defaultEnabled ?? true`.
  *
- * A pinned settings entry is explicit user intent and participates in BOTH
- * modes — mirroring how the chat-branch tier (also user intent) is honored
- * in inclusion. Only unpinned toolsets consult mode for the floor
- * (exclusion → `defaultEnabled ?? true`, inclusion → false).
  * `settingsDefaults` is the on-disk shape
  * `Record<persistKey, { enabled: boolean }>` (see `readMergedToolsetDefaults`);
  * the pin is the wrapped object, unwrapped via `?.enabled`. A null
@@ -214,7 +189,7 @@ function computeAllowlistDesired(
  * no entry at all.
  *
  * `persistedEntry` reports whether the value came from a chat-branch entry
- * (vs settings/mode-floor/packaged fallback) — restore uses it to pick the
+ * (vs settings/packaged fallback) — restore uses it to pick the
  * `restored` vs `changed` emit; the turn-boundary re-assert only needs
  * `.enabled`. Shared by both so the two can never drift on what
  * "effectively off" means.
@@ -223,7 +198,6 @@ function effectiveEnabled(
 	spec: ToolsetSpec,
 	branch: readonly SessionEntry[],
 	settingsDefaults: ToolsetDefaultsMap,
-	mode: DefaultResolutionMode,
 ): { enabled: boolean; persistedEntry: boolean } {
 	const lastEntry = lastCustomEntry<{ enabled?: boolean } | null>(
 		branch,
@@ -234,13 +208,10 @@ function effectiveEnabled(
 		return { enabled, persistedEntry: true };
 	}
 	const settingsEnabled = settingsDefaults[spec.persistKey]?.enabled;
-	const fallback = spec.defaultEnabled ?? true;
 	const resolved =
 		typeof settingsEnabled === "boolean"
 			? settingsEnabled
-			: mode === "inclusion"
-				? false
-				: fallback;
+			: (spec.defaultEnabled ?? true);
 	return { enabled: resolved, persistedEntry: false };
 }
 
@@ -319,7 +290,8 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		// "exclusion"); there is no settings fallback for mode — no mode
 		// settings tier exists, so mode resolution is `branchMode ?? "exclusion"`.
 		const lastModeEntry = lastCustomEntry<{
-			mode?: DefaultResolutionMode;
+			// persisted data — legacy branches may carry unrecognized mode values
+			mode?: string;
 			allowlist?: string[];
 		} | null>(ctx.sessionManager.getBranch(), MODE_PERSIST_KEY);
 		const branchMode = lastModeEntry?.data?.mode;
@@ -346,15 +318,8 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		// picks the safe recovery.
 		const allowArr = Array.isArray(branchAllowlist) ? branchAllowlist : [];
 		const mode: DefaultResolutionMode =
-			branchMode !== undefined &&
-			(["inclusion", "exclusion", "allowlist"] as const).includes(branchMode)
-				? branchMode
-				: "exclusion";
+			branchMode === "allowlist" ? "allowlist" : "exclusion";
 		ms.defaultResolutionMode = mode;
-		// Deprecation: resolving a branch mode entry to "inclusion" is the
-		// deprecated path (fires on /reload of a session that last set
-		// inclusion). warnInclusionDeprecation dedups once per process.
-		if (mode === "inclusion") warnInclusionDeprecation();
 		// Mirror the allowlist into module state so the parameterless
 		// `getActiveAllowlist()` can read it — branch is the source of truth,
 		// module state is the live mirror (same pattern as
@@ -434,8 +399,8 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 			// Fresh read per toolset so companion-mirror writes during this
 			// pass are visible to later toolsets. The `b.data != null` filter
 			// is dropped: a null (tombstoned) last entry means "cleared →
-			// fall through to settings → mode floor → packaged" and must beat
-			// a stale prior entry instead of being invisible. The tier chain
+			// fall through to settings → packaged" and must beat a stale prior
+			// entry instead of being invisible. The tier chain
 			// itself lives in `effectiveEnabled` — shared with the
 			// turn-boundary re-assert so the two can never drift.
 			const branchNow = ctx.sessionManager.getBranch();
@@ -443,7 +408,6 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 				spec,
 				branchNow,
 				settingsDefaults,
-				mode,
 			);
 			_applyRestoreToolset(spec, pi, enabled, persistedEntry);
 		}
@@ -494,8 +458,8 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		}
 	};
 
-	// Non-allowlist modes (exclusion — the default — and the deprecated
-	// inclusion): the DISABLED set is a hard constraint — `enabled: false`
+	// Non-allowlist mode (exclusion — the default): the DISABLED set is a
+	// hard constraint — `enabled: false`
 	// means "these tools must be off". Between restore events, a raw
 	// `pi.setActiveTools` call from another extension's reconciler punches
 	// straight through a disabled toolset and the force-add survives into
@@ -519,7 +483,6 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		// Read settings + branch once per turn; same tier chain as restore.
 		const settingsDefaults = readMergedToolsetDefaults();
 		const branch = ctx.sessionManager.getBranch();
-		const mode = ms.defaultResolutionMode;
 
 		// Suppress set = union of names over toolsets whose effective state
 		// is off.
@@ -529,7 +492,6 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 				entry.spec,
 				branch,
 				settingsDefaults,
-				mode,
 			);
 			if (!enabled) {
 				for (const n of entry.spec.names) suppress.add(n);
@@ -888,22 +850,15 @@ export function defineToolset(pi: ExtensionAPI, spec: ToolsetSpec): Toolset {
  * - `"allowlist"` (ids): only the listed toolset ids are on, everything else
  *   off — the finite, branch-persisted focus constraint, resilient to
  *   toolsets installed after the mode was set. Requires a non-empty array.
- * - `"inclusion"`: all unknown toolsets default off.
- *
- * @deprecated The `"inclusion"` mode is deprecated since 1.2.0 — use
- * `"allowlist"` for focus-style suppression (or `"exclusion"` for the
- * default-on floor). Setting `"inclusion"` emits a one-time runtime warning;
- * it is scheduled for removal in a near-term 1.x minor.
  */
 export function setDefaultResolutionMode(
 	pi: ExtensionAPI,
 	mode: DefaultResolutionMode,
 	allowlist?: string[],
 ): void {
-	if (mode === "inclusion") warnInclusionDeprecation();
-	if (mode !== "exclusion" && mode !== "inclusion" && mode !== "allowlist") {
+	if (mode !== "exclusion" && mode !== "allowlist") {
 		throw new Error(
-			`[pi-tool-masking] Invalid defaultResolutionMode: "${mode}". Must be "exclusion", "inclusion", or "allowlist".`,
+			`[pi-tool-masking] Invalid defaultResolutionMode: "${mode}". Must be "exclusion" or "allowlist".`,
 		);
 	}
 	// Write-time validation (asymmetric with restore): an allowlist mode with
@@ -923,8 +878,8 @@ export function setDefaultResolutionMode(
 	const ms = getModuleState();
 	ms.defaultResolutionMode = mode;
 	// Mirror into module state so `getActiveAllowlist()` stays consistent with
-	// the branch without a `sessionManager` dependency. Existing exclusion /
-	// inclusion entries persist `{ mode }` only (unchanged shape);
+	// the branch without a `sessionManager` dependency. Exclusion entries
+	// persist `{ mode }` only (unchanged shape);
 	// `.activeAllowlist` is undefined for non-allowlist modes. Copy the
 	// caller's array — the branch snapshots on append, but module state holds
 	// the live reference; a caller mutating the array post-call would
@@ -954,7 +909,7 @@ export function getDefaultResolutionMode(): DefaultResolutionMode {
  * of truth; module state is the live mirror.
  *
  * **Event-type divergence by mode (restore contract):** under
- * exclusion/inclusion, the per-toolset restore loop emits `restored` for
+ * exclusion, the per-toolset restore loop emits `restored` for
  * toolsets with a branch entry and `changed` for default-fallback toolsets
  * (no branch entry). Under allowlist, restore emits `restored` for **every**
  * registered toolset — the whole pass is a branch replay of the

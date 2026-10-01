@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Removed
+
+- **The `"inclusion"` resolution mode** — the `DefaultResolutionMode` union
+  member, its `setDefaultResolutionMode` acceptance, and the resolver mode
+  floor. `"allowlist"` is the focus-style substitute (a finite,
+  branch-persisted set resilient to toolsets installed later). Legacy
+  sessions carrying `{ mode: "inclusion" }` branch entries restore as
+  `"exclusion"` — the entry is ignored, not migrated, so previously-
+  suppressed unpinned toolsets come back at the default-on floor (the same
+  default every fresh session starts from). No error is raised at restore.
+
 ## [1.3.0] - 2026-09-02
 
 ### Added

@@ -91,12 +91,11 @@ Register a toolset and receive a `Toolset` handle (`enable`, `disable`, `isEnabl
 
 ### `setDefaultResolutionMode(pi, mode, allowlist?)`
 
-Switch how toolsets with no persisted state resolve on restore. Three modes:
+Switch how toolsets with no persisted state resolve on restore. Two modes:
 
 | Mode | Behavior on restore (no persisted entry) |
 |---|---|
 | `"exclusion"` (default) | Toolsets default **on** if `defaultEnabled` is true, **off** otherwise |
-| `"inclusion"` (@deprecated since 1.2.0) | All unknown toolsets default **off** — a weaker, unbounded floor. Use `"allowlist"` instead for focus-style "only these tools" suppression |
 | `"allowlist"` | Only the listed toolset ids are **on**, everything else **off** — a finite, branch-persisted set whose complement is computed at restore, resilient to toolsets installed later. Pass the array as the third argument: `setDefaultResolutionMode(pi, "allowlist", ["my-plugin.web"])` |
 
 ### `getDefaultResolutionMode()`
@@ -126,7 +125,7 @@ Return a read-only snapshot of every registered toolset (`{ spec, toolset }`). N
 | `Toolset` | Handle returned by `defineToolset` |
 | `ToolsetChangedEvent` | Shape of events emitted by `TOOLSET_EVENTS` |
 | `RegistryEntry` | `{ spec: ToolsetSpec; toolset: Toolset }` — a single registered toolset |
-| `DefaultResolutionMode` | `"exclusion" \| "inclusion" \| "allowlist"` |
+| `DefaultResolutionMode` | `"exclusion" \| "allowlist"` |
 | `MalformedSettingsError` | Thrown by `writeToolsetDefaults` / `clearToolsetDefaults` when settings.json is corrupt or non-object (never silently overwritten). Catch with `instanceof`. |
 
 ---
@@ -298,8 +297,6 @@ import { setDefaultResolutionMode, getRegisteredToolsets } from "pi-tool-masking
 
 // Enter focus: allowlist mode keeps only the listed toolsets on — restore
 // applies it on the next /reload, and the loop below applies it live.
-// "inclusion" (deprecated) cannot guarantee this: a toolset installed after
-// focus leaks on, because the set of "on" toolsets was never recorded.
 setDefaultResolutionMode(pi, "allowlist", ["my-plugin.web"]);
 
 // Apply live: enable only the allowlisted toolsets
@@ -370,8 +367,8 @@ ids with a stable namespace (<product-family>.<subset>, e.g. "foo.web").
 
 - **Registration:** `defineToolset` stores the spec and handle in a global registry (shared across module instances, so multiple extensions see the same toolsets).
 - **Persistence:** each toolset writes `{ enabled }` entries under its `persistKey` on the session branch. On `session_start` or `session_tree`, the library re-reads the branch and applies the last persisted state.
-- **Default resolution:** a `toolset-resolution-mode` entry on the branch controls how toolsets with no persisted state resolve on restore — `exclusion` (on/off by `defaultEnabled`), `inclusion` (deprecated unbounded floor), or `allowlist` (a finite branch-persisted array whose complement is computed at restore). Set by `setDefaultResolutionMode`, persists across reloads.
-- **Defaults tiers:** each toolset's restore default resolves chat-branch entry → `toolsetDefaults` settings pin → packaged `spec.defaultEnabled`, filtered by resolution mode for unpinned toolsets only. Settings pins are read fresh from disk on each restore.
+- **Default resolution:** a `toolset-resolution-mode` entry on the branch controls how toolsets with no persisted state resolve on restore — `exclusion` (on/off by `defaultEnabled`) or `allowlist` (a finite branch-persisted array whose complement is computed at restore). Set by `setDefaultResolutionMode`, persists across reloads.
+- **Defaults tiers:** each toolset's restore default resolves chat-branch entry → `toolsetDefaults` settings pin → packaged `spec.defaultEnabled`. Settings pins are read fresh from disk on each restore.
 - **Null-tombstone-aware restore:** a `null` last branch entry (written by `clearToolsetEntry`) falls through to the settings tier instead of any stale prior entry; mode resolution is likewise null-tombstone-aware (`branchMode ?? "exclusion"`). Tombstones aren't sticky — a later toggle supersedes them.
 - **Events:** a live toggle emits only when state actually changes (no-op toggles are suppressed); restore always emits, so side-effect owners stay in sync across reloads and tree navigations.
 - **Child-policy defer:** the top of every restore reads `piToolMasking.childPolicy` (default `"defer"`) and manages a static pid-tagged env var (`PI_TOOLMASKING_DEFER`): a defer-policy parent publishes it when absent, a foreign-pid var makes restore and the per-turn re-assert no-op (deferring to the spawner), and a `"settings"` policy deletes the var and masks normally. See [Subagent inheritance](#subagent-inheritance-child-policy-defer).
