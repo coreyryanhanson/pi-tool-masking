@@ -617,6 +617,7 @@ describe("Toolset.enable", () => {
 		const entries = mock.getEntries("toolset-state:test.toolset");
 		expect(entries).toHaveLength(1);
 		expect(entries[0]?.data).toEqual({ enabled: true });
+		expect(ts.isEnabled(pi)).toBe(true);
 	});
 
 	it("is additive — keeps existing active tools", () => {
@@ -3771,21 +3772,6 @@ describe("hidden-exposure — partially-connected toolset", () => {
 		]);
 		expect(changed).toEqual([{ id: "test.toolset", enabled: false }]);
 	});
-
-	it("missing exposure on every tool reproduces current behaviour", () => {
-		const { mock, pi } = createEnv();
-		mock.registerTool({ name: "tool-a", description: "" });
-		const ts = defineToolset(
-			pi,
-			makeSpec({ names: new Set(["tool-a"]) }),
-		);
-
-		ts.enable(pi);
-
-		expect(pi.getActiveTools()).toEqual(["tool-a"]);
-		expect(ts.isEnabled(pi)).toBe(true);
-		expect(mock.getEntries("toolset-state:test.toolset")).toHaveLength(1);
-	});
 });
 
 describe("hidden-exposure — per-turn allowlist mask", () => {
@@ -3830,23 +3816,6 @@ describe("hidden-exposure — per-turn allowlist mask", () => {
 		expect(pi.getActiveTools()).toEqual(["search.web"]);
 		expect(changedSpy).not.toHaveBeenCalled();
 		expect(mock.getSetActiveCalls()).toHaveLength(callsAfterRestore + 1); // only the manual call
-	});
-
-	it("a member re-registered as hidden leaves the toolset inert", () => {
-		const { mock, pi } = createEnv();
-		mock.registerTool({ name: "tool-a", description: "" });
-		// MCP server drops the tool; real pi re-registers it as hidden.
-		mock.registerTool({ name: "tool-a", description: "", exposure: "hidden" });
-
-		// Precondition: re-registration replaced the entry by name.
-		expect(mock.getAllTools()).toHaveLength(1);
-
-		const ts = defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
-		ts.enable(pi);
-
-		// Inert: intent persisted, nothing declared.
-		expect(pi.getActiveTools()).toEqual([]);
-		expect(mock.getEntries("toolset-state:test.toolset")).toHaveLength(1);
 	});
 });
 

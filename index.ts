@@ -243,12 +243,9 @@ function readBranchModeState(branch: readonly SessionEntry[]): {
  * mask is suppressing it. The mode is read from the passed `branch`, not
  * module state: a consumer whose handler runs before masking's restore in
  * a fresh process would otherwise see an unpopulated mirror and report a
- * suppressed toolset ON — the exact failure this export exists to prevent.
- * Under allowlist mode, `persistedEntry` keeps reporting the same thing —
- * whether the last branch entry carries a boolean `enabled` — even though
- * the resolved `enabled` value itself comes from the allowlist. Only
- * external callers can observe that combination (restore and the turn
- * re-assert short-circuit before reaching the resolver in allowlist mode).
+ * suppressed toolset ON. Only external callers can observe the allowlist
+ * branch (restore and the turn re-assert short-circuit before reaching the
+ * resolver in allowlist mode).
  *
  * `settingsDefaults` is the on-disk shape
  * `Record<persistKey, { enabled: boolean }>` (see `readMergedToolsetDefaults`);
@@ -275,17 +272,34 @@ export function effectiveEnabled(
 	branch: readonly SessionEntry[],
 	settingsDefaults: ToolsetDefaultsMap,
 ): { enabled: boolean; persistedEntry: boolean } {
-	const lastEntry = lastCustomEntry<{ enabled?: boolean } | null>(
-		branch,
-		spec.persistKey,
-	);
 	const { mode, allowlist } = readBranchModeState(branch);
 	if (mode === "allowlist") {
+		const lastEntry = lastCustomEntry<{ enabled?: boolean } | null>(
+			branch,
+			spec.persistKey,
+		);
 		return {
 			enabled: allowlist.includes(spec.id),
 			persistedEntry: typeof lastEntry?.data?.enabled === "boolean",
 		};
 	}
+	return resolveExclusionTier(spec, branch, settingsDefaults);
+}
+
+/** Exclusion tier chain: chat-branch entry → settings pin → packaged
+ *  `defaultEnabled ?? true`. Internal call sites (restore's per-toolset
+ *  loop, the exclusion re-assert) use this directly — mode is
+ *  loop-invariant and already resolved to exclusion at those sites, so
+ *  re-reading the branch mode entry per toolset would be wasted work. */
+function resolveExclusionTier(
+	spec: ToolsetSpec,
+	branch: readonly SessionEntry[],
+	settingsDefaults: ToolsetDefaultsMap,
+): { enabled: boolean; persistedEntry: boolean } {
+	const lastEntry = lastCustomEntry<{ enabled?: boolean } | null>(
+		branch,
+		spec.persistKey,
+	);
 	const enabled = lastEntry?.data?.enabled;
 	if (typeof enabled === "boolean") {
 		return { enabled, persistedEntry: true };
@@ -456,10 +470,12 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 			// is dropped: a null (tombstoned) last entry means "cleared →
 			// fall through to settings → packaged" and must beat a stale prior
 			// entry instead of being invisible. The tier chain
-			// itself lives in `effectiveEnabled` — shared with the
-			// turn-boundary re-assert so the two can never drift.
+			// itself lives in `resolveExclusionTier` — shared with the
+			// turn-boundary re-assert so the two can never drift. (Exclusion
+			// is already resolved above; the allowlist branch returns before
+			// this loop, so the per-toolset mode read would be wasted work.)
 			const branchNow = ctx.sessionManager.getBranch();
-			const { enabled, persistedEntry } = effectiveEnabled(
+			const { enabled, persistedEntry } = resolveExclusionTier(
 				spec,
 				branchNow,
 				settingsDefaults,
@@ -521,7 +537,7 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 	// the turn. This handler defends the LEAK direction at each turn:
 	// force-re-added tools of a toolset whose EFFECTIVE state is off are
 	// removed again. Effective state goes through the same tier chain
-	// restore uses (`effectiveEnabled`), so this can never disagree with
+	// restore uses (`resolveExclusionTier`), so this can never disagree with
 	// what restore would apply after a `/reload` — no turn-to-turn
 	// flip-flop. Leak-direction only: a default-on toolset is not a hard
 	// constraint — a missing default-on tool may have been intentionally
@@ -543,7 +559,10 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		// is off.
 		const suppress = new Set<string>();
 		for (const [, entry] of registry) {
-			const { enabled } = effectiveEnabled(
+			// Exclusion mode is established by the dispatcher (this function is
+			// only reached when `ms.activeAllowlist === undefined`), so the tier
+			// chain is used directly — no per-toolset mode re-read.
+			const { enabled } = resolveExclusionTier(
 				entry.spec,
 				branch,
 				settingsDefaults,

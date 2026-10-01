@@ -80,12 +80,12 @@ they do NOT test, commit, tag, or publish.
 | `getRegisteredToolsets()` | Pure registry read — no `pi` argument needed. The array is a copy but its entries are the live registry entries: `entry.spec.names = new Set(next)` is the runtime-membership mutation mechanism (data only — no actuation/persist/emit) |
 | `effectiveEnabled(spec, branch, defaults)` | Resolve a toolset's persisted intent through the same tiers restore does: allowlist override (mode read from the passed `branch`) → chat-branch entry → settings pin → `defaultEnabled ?? true`. `defaults` is a `readMergedToolsetDefaults()` snapshot. Returns `{ enabled, persistedEntry }` — display/toggle-gating read `.enabled`; `persistedEntry` is true only when the last branch entry carries a boolean `enabled` (tombstones/absent → false) |
 | `clearToolsetEntry(pi, persistKey, branch)` / `clearAllToolsetEntries(pi, branch)` | Write a null tombstone (single / all) so restore supersedes stale persisted state |
-| `applyToolsetEnabled(pi, spec, enabled)` | Apply a single toggle through the `requires` cascade — live-apply without writing a branch entry (used by tbox) |
+| `applyToolsetEnabled(pi, spec, enabled)` | Apply one toolset's state live without writing a branch entry (no cascade — call once per spec; used by tbox) |
 | `readToolsetDefaults(scope)` / `readMergedToolsetDefaults()` | Read `toolsetDefaults` from one scope / merged global+project |
 | `writeToolsetDefaults(entries, scope)` / `clearToolsetDefaults(scope)` | Mutate / clear `toolsetDefaults` settings |
 | `getEffectiveDefault(spec, snapshot?)` | Resolve a toolset's effective default through mode + settings tiers |
 | `MalformedSettingsError` | Thrown by the settings writer on unparseable settings JSON (readers never throw) |
-| `parseToolsetDefaults(json)` | Validate/parse raw `toolsetDefaults` JSON (throws `MalformedSettingsError` on invalid input) |
+| `parseToolsetDefaults(json)` | Lenient parse of raw `toolsetDefaults` JSON (`@internal`; returns `{}` and drops invalid entries, never throws) |
 | `lastCustomEntry<T>(branch, customType)` | Newest custom entry matching `customType`, narrowed through the `"custom"` discriminator so callers get typed `.data` without per-site `any` casts |
 | `TOOLSET_EVENTS` | `changed`, `restored` |
 
@@ -94,16 +94,19 @@ they do NOT test, commit, tag, or publish.
 ## Architecture notes
 
 - Registry lives on `globalThis` (`__piToolMaskingRegistry`) — survives
-  `/reload` across module instances. Module state and deprecation-warning
-  tracking are also on `globalThis`.
+  `/reload` across module instances. Module state and the
+  invalid-childPolicy warn-dedup flag are also on `globalThis`.
 - Persistence via `pi.appendEntry(persistKey, { enabled })` and
   `pi.sessionManager.getBranch()`. Restore triggers on `session_start` and
   `session_tree`; a per-event guard dedupes repeated restore events.
-- `before_agent_start` re-asserts the allowlist mask each turn, undoing
-  BOTH directions of mid-session drift by other extensions' reconcilers that
-  bypass the mask via `pi.setActiveTools` between restore events:
+- `before_agent_start` re-asserts the active mode's mask each turn.
+  In allowlist mode it undoes BOTH directions of mid-session drift by
+  other extensions' reconcilers that bypass the mask via
+  `pi.setActiveTools` between restore events:
   force-adds of non-allowlisted tools are removed and force-removals of
-  allowlisted members are restored. Emits `changed` for each affected
+  allowlisted members are restored. In exclusion mode it removes
+  force-re-added tools of toolsets whose effective state is off (leak
+  direction only, same tier chain as restore). Emits `changed` for each affected
   toolset; delta-gated to no-op when nothing drifted. The mask is computed
   from a single shared helper (`computeAllowlistDesired`) with the session
   restore path so the two never drift. Restore/re-assert handlers install
@@ -111,8 +114,8 @@ they do NOT test, commit, tag, or publish.
   Residual: runs at this extension's load-order position — a
   force-add reconciler on a later-loading extension re-adds after us, and
   pi core itself re-adds every `--tools`/`allowedToolNames` name on every
-  tool-registry refresh (per-`registerTool` since pi 0.99,
-  `agent-session.ts:3488-3494`), so a forced name that is also a member of
+  tool-registry refresh (per-`registerTool` since pi 0.99 — see pi's
+  `_refreshToolRegistry`), so a forced name that is also a member of
   an off/suppressed toolset oscillates — pi re-adds at refresh, the
   re-assert removes at the next `before_agent_start` — bounded at one
   write per side per turn. A fully-robust fix needs a pi-core masking
