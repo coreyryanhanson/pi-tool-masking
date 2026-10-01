@@ -260,7 +260,7 @@ Caveats:
 
 ## Hidden-exposure toolsets and inert state
 
-Pi 0.99 gives every tool an `exposure` (`direct | model-only | codemode | deferred | hidden`). `hidden` tools can never enter the active set, so the library's actuation and mask paths filter them out: a `hidden` member of a toolset is never handed to `setActiveTools`, does not appear in per-member events, and never triggers a redundant mask write on the per-turn re-assert. On pi < 0.99 (no `exposure` field) every registered name is actuatable — behaviour is unchanged.
+Pi 0.99 gives every tool an `exposure` (`direct | model-only | codemode | deferred | hidden`). `hidden` tools can never enter the active set, so the library's actuation and mask paths filter them out: a `hidden` member of a toolset is never handed to `setActiveTools` and never triggers a redundant mask write on the per-turn re-assert. On pi < 0.99 (no `exposure` field) every registered name is actuatable — behaviour is unchanged.
 
 **Inert toolsets — `enabled` means intent, not observation.** A non-empty toolset with zero actuatable members (members still `hidden`, or its MCP server not yet connected) cannot witness either state: a hidden member can never be active, and absence of activity proves nothing when nothing can be active. For such a toolset:
 
@@ -308,9 +308,6 @@ interface ToolsetSpec {
 
  /** IDs of toolsets that must be enabled for this one. */
  requires?: string[];
-
- /** When true, toggles emit one event per member in addition to the group event. */
- emitMemberEvents?: boolean;
 }
 ```
 
@@ -318,7 +315,6 @@ interface ToolsetSpec {
 
 - **`requires` cascade:** enabling a toolset automatically enables all its dependencies (recursively). Disabling a toolset automatically disables all dependents.
 - **Cycle detection:** circular `requires` relationships throw at toggle time.
-- **`emitMemberEvents`:** opt into per-member fan-out events so a per-tool UI updates without the manager re-deriving which members moved.
 
 ---
 
@@ -340,7 +336,6 @@ interface Toolset {
 interface ToolsetChangedEvent {
  id: string;        // Toolset id, e.g. "my-plugin.web"
  enabled: boolean;  // New state
- member?: string;   // Present only when emitMemberEvents is on — the specific tool that changed
 }
 ```
 

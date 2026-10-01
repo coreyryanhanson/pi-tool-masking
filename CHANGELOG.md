@@ -44,6 +44,13 @@
   `"exclusion"` — the entry is ignored, not migrated, so previously-
   suppressed unpinned toolsets come back at the default-on floor (the same
   default every fresh session starts from). No error is raised at restore.
+- **`emitMemberEvents` and the per-member event fan-out** — the
+  `ToolsetSpec.emitMemberEvents` flag and the optional `member` field on
+  `ToolsetChangedEvent`. No consumer ever set the flag (tbox's picker
+  explicitly deferred it as YAGNI); a toggle now emits exactly one event
+  per toolset, always. Consumers needing per-tool granularity can
+  subscribe to the group event and diff members via
+  `getRegisteredToolsets()`.
 
 ## [1.3.0] - 2026-09-02
 

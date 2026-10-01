@@ -60,7 +60,6 @@ function makeSpec(
 		names: Set<string>;
 		defaultEnabled: boolean;
 		requires: string[];
-		emitMemberEvents: boolean;
 		label: string;
 		description: string;
 	}> = {},
@@ -2506,7 +2505,7 @@ describe("Restore — event split changed vs restored", () => {
 		emitSpy.mockRestore();
 	});
 
-	it("restored event payload carries id and enabled (no member)", () => {
+	it("restored event payload carries id and enabled", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		const ts = defineToolset(
@@ -2526,126 +2525,6 @@ describe("Restore — event split changed vs restored", () => {
 		const payload = restoredCalls[0]?.[1] as any;
 		expect(payload.id).toBe("my.test");
 		expect(typeof payload.enabled).toBe("boolean");
-		expect(payload.member).toBeUndefined();
-		emitSpy.mockRestore();
-	});
-});
-
-// ===================================================================
-// emitMemberEvents
-// ===================================================================
-
-describe("emitMemberEvents", () => {
-	it("true produces N+1 events on enable (1 group + N members)", () => {
-		const { mock, pi } = createEnv();
-		mock.registerTool({ name: "a", description: "" });
-		mock.registerTool({ name: "b", description: "" });
-		const ts = defineToolset(
-			pi,
-			makeSpec({ names: new Set(["a", "b"]), emitMemberEvents: true }),
-		);
-		const emitSpy = vi.spyOn(mock.events, "emit");
-		ts.enable(pi);
-		const changedCalls = emitSpy.mock.calls.filter(
-			([c]) => c === TOOLSET_EVENTS.changed,
-		);
-		expect(changedCalls.length).toBe(3);
-		emitSpy.mockRestore();
-	});
-
-	it("false produces 1 group event on enable", () => {
-		const { mock, pi } = createEnv();
-		mock.registerTool({ name: "a", description: "" });
-		mock.registerTool({ name: "b", description: "" });
-		const ts = defineToolset(
-			pi,
-			makeSpec({ names: new Set(["a", "b"]), emitMemberEvents: false }),
-		);
-		const emitSpy = vi.spyOn(mock.events, "emit");
-		ts.enable(pi);
-		const changedCalls = emitSpy.mock.calls.filter(
-			([c]) => c === TOOLSET_EVENTS.changed,
-		);
-		expect(changedCalls.length).toBe(1);
-		emitSpy.mockRestore();
-	});
-
-	it("member events carry event.member set to the tool name", () => {
-		const { mock, pi } = createEnv();
-		mock.registerTool({ name: "a", description: "" });
-		mock.registerTool({ name: "b", description: "" });
-		const ts = defineToolset(
-			pi,
-			makeSpec({ names: new Set(["a", "b"]), emitMemberEvents: true }),
-		);
-		const emitSpy = vi.spyOn(mock.events, "emit");
-		ts.enable(pi);
-		const memberCalls = emitSpy.mock.calls
-			.filter(([c, d]) => c === TOOLSET_EVENTS.changed && (d as any).member)
-			.map(([, d]) => (d as any).member as string)
-			.sort();
-		expect(memberCalls).toEqual(["a", "b"]);
-		emitSpy.mockRestore();
-	});
-
-	it("group event still fires (with no member field) when emitMemberEvents is true", () => {
-		const { mock, pi } = createEnv();
-		mock.registerTool({ name: "a", description: "" });
-		mock.registerTool({ name: "b", description: "" });
-		const ts = defineToolset(
-			pi,
-			makeSpec({ names: new Set(["a", "b"]), emitMemberEvents: true }),
-		);
-		const emitSpy = vi.spyOn(mock.events, "emit");
-		ts.enable(pi);
-		const groupCalls = emitSpy.mock.calls.filter(
-			([c, d]) => c === TOOLSET_EVENTS.changed && !(d as any).member,
-		);
-		expect(groupCalls.length).toBe(1);
-		expect(groupCalls[0]?.[1]).toMatchObject({
-			id: "test.toolset",
-			enabled: true,
-		});
-		emitSpy.mockRestore();
-	});
-
-	it("member events also fire on disable", () => {
-		const { mock, pi } = createEnv();
-		mock.registerTool({ name: "a", description: "" });
-		mock.registerTool({ name: "b", description: "" });
-		const ts = defineToolset(
-			pi,
-			makeSpec({ names: new Set(["a", "b"]), emitMemberEvents: true }),
-		);
-		ts.enable(pi);
-		const emitSpy = vi.spyOn(mock.events, "emit");
-		ts.disable(pi);
-		const changedCalls = emitSpy.mock.calls.filter(
-			([c]) => c === TOOLSET_EVENTS.changed,
-		);
-		expect(changedCalls.length).toBe(3);
-		emitSpy.mockRestore();
-	});
-
-	it("member events fire on restore (for both changed and restored)", () => {
-		const { mock, pi } = createEnv();
-		mock.registerTool({ name: "a", description: "" });
-		mock.registerTool({ name: "b", description: "" });
-		const ts = defineToolset(
-			pi,
-			makeSpec({ names: new Set(["a", "b"]), emitMemberEvents: true }),
-		);
-		ts.enable(pi);
-		const emitSpy = vi.spyOn(mock.events, "emit");
-		mock.fireLifecycleEvent("session_start");
-		const restoredCalls = emitSpy.mock.calls.filter(
-			([c]) => c === TOOLSET_EVENTS.restored,
-		);
-		expect(restoredCalls.length).toBe(3);
-		const memberRestored = restoredCalls.filter(
-			([, d]) => (d as any).member != null,
-		);
-		expect(memberRestored.length).toBe(2);
 		emitSpy.mockRestore();
 	});
 });
@@ -3738,26 +3617,6 @@ describe("applyToolsetEnabled", () => {
 		expect(changed).toEqual([{ id: "test.toolset", enabled: false }]);
 		expect(mock.getEntries("toolset-state:test.toolset")).toHaveLength(0);
 	});
-
-	it("emits member fanout when emitMemberEvents is set", () => {
-		const { mock, pi } = createEnv();
-		mock.registerTool({ name: "tool-a", description: "" });
-		const spec = makeSpec({
-			names: new Set(["tool-a"]),
-			emitMemberEvents: true,
-		});
-		defineToolset(pi, spec);
-
-		const changed: any[] = [];
-		mock.events.on(TOOLSET_EVENTS.changed, (data: any) => changed.push(data));
-
-		applyToolsetEnabled(pi, spec, true);
-
-		expect(changed).toEqual([
-			{ id: "test.toolset", enabled: true },
-			{ id: "test.toolset", enabled: true, member: "tool-a" },
-		]);
-	});
 });
 
 // ===================================================================
@@ -3875,27 +3734,6 @@ describe("hidden-exposure — inert toolset (intent vs observation)", () => {
 		expect(changed).toEqual([{ id: "test.toolset", enabled: true }]);
 		expect(mock.getEntries("toolset-state:test.toolset")).toHaveLength(0);
 		expect(mock.getSetActiveCalls()).toHaveLength(0);
-	});
-
-	it("member fanout skips non-actuatable names", () => {
-		const { mock, pi } = createEnv();
-		mock.registerTool({ name: "tool-a", description: "" });
-		mock.registerTool({ name: "tool-b", description: "", exposure: "hidden" });
-		const spec = makeSpec({
-			names: new Set(["tool-a", "tool-b"]),
-			emitMemberEvents: true,
-		});
-		defineToolset(pi, spec);
-
-		const changed: any[] = [];
-		mock.events.on(TOOLSET_EVENTS.changed, (data: any) => changed.push(data));
-
-		applyToolsetEnabled(pi, spec, true);
-
-		expect(changed).toEqual([
-			{ id: "test.toolset", enabled: true },
-			{ id: "test.toolset", enabled: true, member: "tool-a" },
-		]);
 	});
 });
 

@@ -28,8 +28,6 @@ export interface ToolsetSpec {
 	defaultEnabled?: boolean;
 	/** Dependency: ids of toolsets that must be enabled for this one. */
 	requires?: string[];
-	/** When true, a group toggle additionally emits one `changed` event per member tool. Default false. */
-	emitMemberEvents?: boolean;
 }
 
 export interface Toolset {
@@ -42,8 +40,6 @@ export interface ToolsetChangedEvent {
 	/** Toolset id (e.g. "my-plugin.web"). Always set. */
 	id: string;
 	enabled: boolean;
-	/** Present only when emitMemberEvents is on and this is a per-member fanout event. */
-	member?: string;
 }
 
 /**
@@ -160,7 +156,7 @@ function scanToolNames(pi: ExtensionAPI): {
 }
 
 /** Registered tool names pi can actuate: present in the registry and not
- *  `hidden`-exposure. One getAllTools() pass — same cost as the old scan. */
+ *  `hidden`-exposure. */
 function getActuatableNames(pi: ExtensionAPI): Set<string> {
 	return scanToolNames(pi).actuatable;
 }
@@ -614,7 +610,7 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 }
 
 // ---------------------------------------------------------------------------
-// Event emission helper (group + optional member fanout)
+// Event emission helper
 // ---------------------------------------------------------------------------
 
 function _emitToolsetEvents(
@@ -624,21 +620,6 @@ function _emitToolsetEvents(
 	enabled: boolean,
 ): void {
 	pi.events.emit(eventType, { id: spec.id, enabled });
-
-	if (spec.emitMemberEvents) {
-		// Skip non-actuatable names — a hidden member can never be active, so
-		// a per-member event for it would be the same phantom the loop already
-		// avoids for unregistered names.
-		const actuatable = getActuatableNames(pi);
-		for (const name of spec.names) {
-			if (!actuatable.has(name)) continue;
-			pi.events.emit(eventType, {
-				id: spec.id,
-				enabled,
-				member: name,
-			});
-		}
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -723,15 +704,10 @@ function _applyDisable(spec: ToolsetSpec, pi: ExtensionAPI): void {
 
 	// Nothing to remove. Early-return only when the OFF state is fully
 	// WITNESSED: every member registered and actuatable, so absence of
-	// activity actually proves the intent is applied. The old purely
-	// observational gate was vacuously satisfied by an inert toolset
-	// (members all hidden, or server not yet connected) and silently dropped
-	// the user's "off" — the toolset resolved back ON when the server
-	// connected. The gate costs one getAllTools() pass, and only on this
-	// no-removal path; for a toolset whose members are all registered and
-	// actuatable it collapses to the old behaviour bit-for-bit. Empty names is
-	// vacuously witnessed (0 === 0)
-	// and still no-ops.
+	// activity actually proves the intent is applied. An inert or partially-
+	// registered toolset is never witnessed off — it persists the off entry
+	// and emits while issuing no loadout write. Empty names is vacuously
+	// witnessed (0 === 0) and still no-ops.
 	const actuatable = getActuatableNames(pi);
 	const actuatableNames = [...spec.names].filter((n) => actuatable.has(n));
 	if (actuatableNames.length === spec.names.size) return;
@@ -741,15 +717,9 @@ function _applyDisable(spec: ToolsetSpec, pi: ExtensionAPI): void {
 
 // ---------------------------------------------------------------------------
 // Restore-specific apply: applies state without persisting, always emits
-// isPersistedEntry=true → restored event, false → changed event
-//
-// Inert toolsets (non-empty spec, zero actuatable members — members still
-// `hidden`, or the server not yet connected): `enabled` is applied as far as
-// it can be (empty toAdd / no removals) while the emit still fires. An inert
-// toolset announces `enabled: true`/`enabled: false` while declaring
-// nothing, and `isEnabled()` stays false until actuatable members exist.
-// Persistence never comes from this path — only explicit
-// `enable()`/`disable()` write branch entries.
+// isPersistedEntry=true → restored event, false → changed event.
+// Inert toolsets apply `enabled` as far as they can (no loadout write) while
+// the emit still fires — see the README's hidden-exposure section.
 // ---------------------------------------------------------------------------
 
 function _applyRestoreToolset(

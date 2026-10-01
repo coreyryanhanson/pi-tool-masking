@@ -119,8 +119,6 @@ they do NOT test, commit, tag, or publish.
   primitive at the `setActiveTools` boundary.
 - `requires` cascade: enable cascades to deps, disable cascades to
   dependents. Cycle detection at toggle time.
-- `emitMemberEvents`: opt into per-member fan-out events for per-tool UI
-  updates.
 - **Subagent inheritance (child-policy defer):** `piToolMasking.childPolicy`
   in settings (`"defer" | "settings"`, default `"defer"`, project wins per
   scope, scalar read — never spread-merge) controls behavior in spawned
