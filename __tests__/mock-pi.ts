@@ -77,11 +77,11 @@ export class MockPI implements Partial<ExtensionAPI> {
 		// Record the RAW arguments before filtering — the per-turn tests assert
 		// that the library never hands a hidden name over in the first place.
 		this._setActiveCalls.push([...toolNames]);
-		// Mirror pi's filter: hidden-exposure names are silently dropped from
-		// the active set.
+		// Mirror pi's loadout filter: names absent from the registry and
+		// `hidden`-exposure names are both silently dropped from the active set.
 		this._activeTools = toolNames.filter((n) => {
 			const t = this._tools.find((tool) => tool.name === n);
-			return !t || t.exposure !== "hidden";
+			return t !== undefined && t.exposure !== "hidden";
 		});
 	}
 

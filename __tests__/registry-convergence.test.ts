@@ -119,27 +119,29 @@ describe("GlobalThis registry convergence", () => {
 			persistKey: "k:live.test",
 		});
 
-		const before = getRegisteredToolsets() as RegistryEntry[];
-		const entry = before.find((t: RegistryEntry) => t.spec.id === "live.test");
+		// The dynamic import specifier is non-literal, so the binding is `any`
+		// without an explicit type here.
+		const before: readonly RegistryEntry[] = getRegisteredToolsets();
+		const entry = before.find((t) => t.spec.id === "live.test");
 		expect(entry).toBeDefined();
 
 		// Raw mutation contract: assign a fresh Set on the live entry.
 		entry!.spec.names = new Set(["b"]);
 
-		const after = getRegisteredToolsets() as RegistryEntry[];
+		const after: readonly RegistryEntry[] = getRegisteredToolsets();
 		expect(
-			after.find((t: RegistryEntry) => t.spec.id === "live.test")?.spec.names,
+			after.find((t) => t.spec.id === "live.test")?.spec.names,
 		).toEqual(
 			new Set(["b"]),
 		);
 		// Same instance, no warn-and-replace.
 		expect(
-			after.find((t: RegistryEntry) => t.spec.id === "live.test")?.toolset,
+			after.find((t) => t.spec.id === "live.test")?.toolset,
 		).toBe(entry!.toolset);
 		// The array is a copy: elements are live entries (so the mutation is
 		// visible through `before` too) but the array itself is not shared.
 		expect(
-			before.find((t: RegistryEntry) => t.spec.id === "live.test")?.spec.names,
+			before.find((t) => t.spec.id === "live.test")?.spec.names,
 		).toEqual(
 			new Set(["b"]),
 		);

@@ -2306,31 +2306,29 @@ describe("Restore — persistence round-trip", () => {
 		expect(mock.getActiveTools()).toContain("tool-a");
 	});
 
-	it("restore disable removes unregistered spec members (matching _applyDisable)", () => {
+	it("restore disable removes spec members, preserves non-member tools (matching _applyDisable)", () => {
 		const { mock, pi } = createEnv();
-		// Spec names "unreg-tool" but it's never registered with registerTool
+		mock.registerTool({ name: "tool-a", description: "" });
+		mock.registerTool({ name: "tool-b", description: "" });
+		// Owned by no toolset — the library must not touch it.
+		mock.registerTool({ name: "outsider", description: "" });
 		const ts = defineToolset(
 			pi,
 			makeSpec({
-				id: "with-unreg",
-				persistKey: "k:with-unreg",
-				names: new Set(["tool-a", "unreg-tool"]),
+				id: "two-members",
+				persistKey: "k:two-members",
+				names: new Set(["tool-a", "tool-b"]),
 			}),
 		);
-		mock.registerTool({ name: "tool-a", description: "" });
 		ts.enable(pi);
-		// "unreg-tool" wasn't added (not registered), so manually inject it
-		// to simulate an externally-added tool matching a spec name
-		mock.setActiveTools(["tool-a", "unreg-tool"]);
+		mock.setActiveTools(["tool-a", "tool-b", "outsider"]);
+		expect(mock.getActiveTools()).toEqual(["tool-a", "tool-b", "outsider"]);
 
-		// Persist disabled and restore
-		mock.appendEntry("k:with-unreg", { enabled: false });
+		// Persist disabled and restore: spec members are removed, the rest kept.
+		mock.appendEntry("k:two-members", { enabled: false });
 		mock.fireLifecycleEvent("session_start");
 
-		// Both should be removed: tool-a (registered, removed by spec.names.has)
-		// and unreg-tool (unregistered, also removed by spec.names.has)
-		expect(mock.getActiveTools()).not.toContain("tool-a");
-		expect(mock.getActiveTools()).not.toContain("unreg-tool");
+		expect(mock.getActiveTools()).toEqual(["outsider"]);
 	});
 });
 
@@ -3972,12 +3970,13 @@ describe("hidden-exposure — per-turn allowlist mask", () => {
 		expect(mock.getSetActiveCalls()).toHaveLength(callsAfterRestore + 1); // only the manual call
 	});
 
-	it("re-registration replaces by name, so a dropped tool re-hides without duplicates", () => {
+	it("a member re-registered as hidden leaves the toolset inert", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		// MCP server drops the tool; real pi re-registers it as hidden.
 		mock.registerTool({ name: "tool-a", description: "", exposure: "hidden" });
 
+		// Precondition: re-registration replaced the entry by name.
 		expect(mock.getAllTools()).toHaveLength(1);
 
 		const ts = defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));

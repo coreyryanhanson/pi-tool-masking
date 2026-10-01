@@ -169,15 +169,13 @@ function getActuatableNames(pi: ExtensionAPI): Set<string> {
 // Compute the desired active-tool list under allowlist mode
 // ---------------------------------------------------------------------------
 // current − (non-allowlisted members) + (allowlist members), restricted to
-// actuatable tools. Mirrored by doRestore's allowlist branch and
-// reassertAllowlist so the two NEVER drift on the mask definition. The
-// `registered` filter (fed `getActuatableNames` by both call sites) keeps
-// spec names pi can't actuate — unregistered or `hidden`-exposure — out of
-// the replacement set (parity with `_applyRestoreToolset`'s per-name filter).
+// actuatable tools (registered and not `hidden`-exposure). Mirrored by
+// doRestore's allowlist branch and reassertAllowlist so the two NEVER drift on
+// the mask definition; both call sites pass `getActuatableNames`.
 function computeAllowlistDesired(
 	allowlist: readonly string[],
 	current: readonly string[],
-	registered: ReadonlySet<string>,
+	actuatable: ReadonlySet<string>,
 	registry: Registry,
 ): string[] {
 	const allow = new Set<string>(allowlist);
@@ -196,7 +194,7 @@ function computeAllowlistDesired(
 			for (const n of entry.spec.names) desired.add(n);
 		}
 	}
-	return [...desired].filter((n) => registered.has(n));
+	return [...desired].filter((n) => actuatable.has(n));
 }
 
 // ---------------------------------------------------------------------------
