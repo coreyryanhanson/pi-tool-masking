@@ -77,7 +77,8 @@ they do NOT test, commit, tag, or publish.
 | `setDefaultResolutionMode(pi, mode, allowlist?)` | `"exclusion"` (default) or `"allowlist"` (requires `allowlist: string[]`) |
 | `getDefaultResolutionMode()` | Read current mode (no `pi` argument) |
 | `getActiveAllowlist()` | Copy-on-read mirror of the active allowlist, or `undefined` when not in allowlist mode |
-| `getRegisteredToolsets()` | Pure registry read — no `pi` argument needed |
+| `getRegisteredToolsets()` | Pure registry read — no `pi` argument needed. The array is a copy but its entries are the live registry entries: `entry.spec.names = new Set(next)` is the runtime-membership mutation mechanism (data only — no actuation/persist/emit) |
+| `effectiveEnabled(spec, branch, defaults)` | Resolve a toolset's persisted intent through the same tiers restore does: allowlist override (mode read from the passed `branch`) → chat-branch entry → settings pin → `defaultEnabled ?? true`. `defaults` is a `readMergedToolsetDefaults()` snapshot. Returns `{ enabled, persistedEntry }` — display/toggle-gating read `.enabled`; `persistedEntry` is a branch-entry existence fact, not provenance |
 | `clearToolsetEntry(pi, persistKey, branch)` / `clearAllToolsetEntries(pi, branch)` | Write a null tombstone (single / all) so restore supersedes stale persisted state |
 | `applyToolsetEnabled(pi, spec, enabled)` | Apply a single toggle through the `requires` cascade — live-apply without writing a branch entry (used by tbox) |
 | `readToolsetDefaults(scope)` / `readMergedToolsetDefaults()` | Read `toolsetDefaults` from one scope / merged global+project |

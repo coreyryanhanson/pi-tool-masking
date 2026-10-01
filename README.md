@@ -108,7 +108,30 @@ Read the live allowlist array from module state. Returns the `string[]` when the
 
 ### `getRegisteredToolsets()`
 
-Return a read-only snapshot of every registered toolset (`{ spec, toolset }`). No `pi` argument needed — pure registry read.
+Return every registered toolset (`{ spec, toolset }`). The returned **array is a copy** (mutating the array cannot corrupt the registry), but each element is the **live registry entry** — mutating `entry.spec.names` (with a fresh `Set`) reaches the registry in place. That is the mechanism for [runtime membership changes](#runtime-membership-changes); see that section for the contract and its caveats. No `pi` argument needed — pure registry read.
+
+### `effectiveEnabled(spec, branch, defaults)`
+
+Resolve a toolset's current **persisted intent** — the tier chain restore resolves, as a pure function:
+
+```ts
+effectiveEnabled(spec, branch, readMergedToolsetDefaults())
+```
+
+| Parameter | Type | Notes |
+|---|---|---|
+| `spec` | `ToolsetSpec` | The toolset to resolve |
+| `branch` | Branch snapshot | `ctx.sessionManager.getBranch()` inside a handler |
+| `defaults` | `Record<persistKey, { enabled }>` | Required — pass a `readMergedToolsetDefaults()` snapshot (read once per loop to avoid re-reading disk per toolset) |
+
+Returns `{ enabled, persistedEntry }` — read `.enabled` for display and toggle-gating; `persistedEntry` reports only that a chat-branch entry exists for this toolset (a fact about the branch, not about which tier decided). Resolution order:
+
+1. **Allowlist mode** (read from the passed `branch`): returns `{ enabled: allow.includes(spec.id) }` — the set-level override is authoritative, branch entries and settings pins are bypassed, exactly as restore's allowlist short-circuit does.
+2. **Chat-branch entry** — the last `appendEntry(persistKey, …)` on this branch (`null` tombstone falls through).
+3. **Settings pin** — `toolsetDefaults[persistKey].enabled`.
+4. **Packaged default** — `spec.defaultEnabled ?? true`.
+
+This is what display surfaces and toggle-gating should read (see [Intent vs observation](#intent-vs-observation)). `getEffectiveDefault` differs: it resolves settings → packaged only, ignoring the branch and mode. There is no `mode` parameter — allowlist detection comes from the branch itself.
 
 ### `TOOLSET_EVENTS`
 
@@ -207,7 +230,59 @@ Tombstone every registered toolset's branch entry (dedup'd per toolset). Covers 
 
 ### `applyToolsetEnabled(pi, spec, enabled)`
 
-Apply a toolset's enabled state via `setActiveTools` and emit `TOOLSET_EVENTS.changed` **without** writing a branch entry — the live-apply half of a settings restore (pull a toolset to its settings/packaged default without persisting a chat-branch pin).
+Apply a toolset's enabled state via `setActiveTools` and emit `TOOLSET_EVENTS.changed` **without** writing a branch entry — the live-apply half of a settings restore (pull a toolset to its settings/packaged default without persisting a chat-branch pin). Like the restore path, it never persists: branch entries come solely from explicit `enable()`/`disable()` calls and their cascades. An inert toolset (see below) announces `enabled: true`/`enabled: false` through the event while declaring nothing.
+
+---
+
+## Runtime membership changes
+
+A dynamically-managed toolset's member set can change at runtime (an MCP server gaining or losing tools). There is no API for this — mutate the live registry entry returned by `getRegisteredToolsets()` directly:
+
+```ts
+const entry = getRegisteredToolsets().find((t) => t.spec.id === "my-tools");
+entry.spec.names = new Set(nextNames); // entries are live; this IS the mechanism
+```
+
+The `id`, `persistKey`, and registered `ToolsetImpl` instance are unchanged: handles you already hold keep working, no warn-and-replace fires, and persisted on/off state is unaffected. (Do **not** re-call `defineToolset` with a changed spec for the same `id` — that is treated as a code edit after `/reload`: it warns and replaces the registry entry, invalidating handles.)
+
+The contract is scoped to consumers that are the toolset's **membership authority** — toolsets whose spec exists only at runtime. A declared toolset's authority is its spec literal in source: change members by changing code and re-registering; `/reload` re-runs `defineToolset` with the fresh literal and would warn-and-replace any mutation.
+
+Caveats:
+
+- **Data, not action.** Assignment performs no actuation, persistence, or event. When pi manages membership (an MCP server gaining a `direct` tool), the set already matches the desired activation — pi activates declarable members on registration, so actuating would be a no-op. A disabled toolset's newly-added members are removed by the per-turn `before_agent_start` re-assert, which reads the updated `spec.names`. Callers wanting an immediate reconcile can call `applyToolsetEnabled(pi, spec, desired)`.
+- **Members pi does not activate on registration.** Activation on registration covers declarable members (`direct`/`model-only`) without `defaultActive: false`. Adding a non-declarable member (`codemode`/`deferred`/`hidden`) or a `defaultActive: false` member to an **on** toolset leaves it undeclared — no event, no self-heal — while `isEnabled()` still reports true. Call `applyToolsetEnabled` yourself after adding such members. Symmetrically, removing a name does not deactivate it: an on toolset can keep declaring a tool it no longer owns until pi itself de-registers or re-hides the tool. Note MCP's *default* exposure is `codemode`, so a toolset over a whole server's tools would include non-activating members.
+- **No overlap guard runs.** The name-overlap check is a `defineToolset` registration-time check; raw mutation bypasses it. Assign a **fresh `Set`** — never keep mutating a set after assigning it (no copy-on-store; a retained live reference bypasses even consumer-side discipline).
+- **`/reload` resets membership to the code-defined spec.** Persisted on/off state survives, membership does not — the consumer's next scan re-derives and re-applies runtime membership.
+- **An emptied toolset has dead toggles.** Assigning an empty `Set` is permitted, but `enable()`/`disable()` on a zero-member toolset are complete no-ops — a new "off" cannot be recorded while empty (disable before emptying, or after refilling). A prior branch entry survives emptying and repopulating revives actuation from persisted intent.
+- **No event fires.** The mutation is caller-initiated — the caller knows it changed membership and can re-render itself. What is *not* informed is any second-order consumer presenting the member set: nothing announces membership changes, so such consumers must re-read `spec.names` via `getRegisteredToolsets()` instead of caching it.
+
+---
+
+## Hidden-exposure toolsets and inert state
+
+Pi 0.99 gives every tool an `exposure` (`direct | model-only | codemode | deferred | hidden`). `hidden` tools can never enter the active set, so the library's actuation and mask paths filter them out: a `hidden` member of a toolset is never handed to `setActiveTools`, does not appear in per-member events, and never triggers a redundant mask write on the per-turn re-assert. On pi < 0.99 (no `exposure` field) every registered name is actuatable — behaviour is unchanged.
+
+**Inert toolsets — `enabled` means intent, not observation.** A non-empty toolset with zero actuatable members (members still `hidden`, or its MCP server not yet connected) cannot witness either state: a hidden member can never be active, and absence of activity proves nothing when nothing can be active. For such a toolset:
+
+- an explicit `enable()` persists the branch entry and emits `changed {enabled: true}` while issuing **no** `setActiveTools` call;
+- an explicit `disable()` persists the off entry and emits `changed {enabled: false}` the same way;
+- `isEnabled()` stays `false` in both directions until actuatable members exist.
+
+This is deliberate: the persisted entry is what makes the toolset spring to life (or stay suppressed) at the next restore event once members become actuatable. The same witness gates mean toggles on **partially-registered** toolsets (some members not yet registered) now persist intent and emit instead of silently no-oping. Only a zero-member toolset stays fully inert (dead toggles, above).
+
+### Intent vs observation
+
+Branch entries record *intent* ("this toolset should be on/off"); `isEnabled()` reports *observation* ("tools from this toolset are in the active set right now"). For an inert toolset the two diverge in both directions, so pick the right signal per use site:
+
+- **Display and toggle-gating read intent** — `effectiveEnabled(spec, branch, readMergedToolsetDefaults())` with `branch` from `ctx.sessionManager.getBranch()` inside a handler. An inert toolset shows its persisted state, and an "off" toggle is honored rather than refused. (Reading `isEnabled()` here renders an intent-on inert toolset as "off" and refuses the user's "off"; replaying the event stream is equally wrong — a `changed` event can announce `enabled: true` for a toolset that declares nothing.)
+- **"Is anything actually declared right now?" reads observation** — `isEnabled()`. Character counts and declaration-sensitive surfaces care about the active set, not the user's wish.
+- **Persisted defaults capture intent, never a mid-session `isEnabled()` snapshot** — capturing observation while a toolset is inert pins a temporary divergence as a permanent misconfiguration.
+
+### Exposure expectations
+
+Keep toolset member sets to `direct`/`model-only` exposure (pi activates those on registration). A `deferred`/`codemode` tool inside a toggled-**off** toolset is not reliably suppressed: `tool_search` still lists it and can load it mid-turn (the per-turn re-assert removes it again at the next turn boundary), and a `codemode` member stays script-callable while off — masking is context hygiene, not a reachability boundary. Toggle the toolset on instead of relying on either edge.
+
+---
 
 ## ToolsetSpec fields
 
@@ -370,7 +445,7 @@ ids with a stable namespace (<product-family>.<subset>, e.g. "foo.web").
 - **Default resolution:** a `toolset-resolution-mode` entry on the branch controls how toolsets with no persisted state resolve on restore — `exclusion` (on/off by `defaultEnabled`) or `allowlist` (a finite branch-persisted array whose complement is computed at restore). Set by `setDefaultResolutionMode`, persists across reloads.
 - **Defaults tiers:** each toolset's restore default resolves chat-branch entry → `toolsetDefaults` settings pin → packaged `spec.defaultEnabled`. Settings pins are read fresh from disk on each restore.
 - **Null-tombstone-aware restore:** a `null` last branch entry (written by `clearToolsetEntry`) falls through to the settings tier instead of any stale prior entry; mode resolution is likewise null-tombstone-aware (`branchMode ?? "exclusion"`). Tombstones aren't sticky — a later toggle supersedes them.
-- **Events:** a live toggle emits only when state actually changes (no-op toggles are suppressed); restore always emits, so side-effect owners stay in sync across reloads and tree navigations.
+- **Events:** a live toggle emits only when the on/off state is fully *witnessed* — every member registered and, for the new state, active (or absent) as observed. Toggles on inert or partially-registered toolsets deliberately persist intent and emit (see [Hidden-exposure toolsets and inert state](#hidden-exposure-toolsets-and-inert-state)); restore always emits, so side-effect owners stay in sync across reloads and tree navigations.
 - **Child-policy defer:** the top of every restore reads `piToolMasking.childPolicy` (default `"defer"`) and manages a static pid-tagged env var (`PI_TOOLMASKING_DEFER`): a defer-policy parent publishes it when absent, a foreign-pid var makes restore and the per-turn re-assert no-op (deferring to the spawner), and a `"settings"` policy deletes the var and masks normally. See [Subagent inheritance](#subagent-inheritance-child-policy-defer).
 
 ---

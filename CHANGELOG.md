@@ -2,6 +2,36 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`effectiveEnabled(spec, branch, defaults)`** — exported resolver for a
+  toolset's persisted intent: allowlist override (mode read from the passed
+  `branch`) → chat-branch entry → settings pin → `defaultEnabled ?? true`,
+  the same tier chain restore and the per-turn re-assert actuate on
+  (`defaults` is a `readMergedToolsetDefaults()` snapshot).
+  Returns `{ enabled, persistedEntry }` — display and toggle-gating read
+  `.enabled`; `persistedEntry` reports only that a chat-branch entry exists
+  for the toolset (a fact about the branch, not which tier decided). The
+  intended consumer rule: display and toggle-gating read intent (`effectiveEnabled`),
+  declaration-sensitive surfaces read observation (`isEnabled()`).
+
+### Changed
+
+- **`hidden`-exposure toolsets behave consistently (witness gates).**
+  Actuation paths (enable/disable/restore/allowlist mask) now filter
+  `hidden`-exposure members out of what they hand to `setActiveTools`, so a
+  toolset containing a `hidden` member no longer forces a redundant
+  `setActiveTools` write plus a spurious `changed` event once per turn,
+  forever. Toggles on *partially-registered* toolsets (some members not yet
+  registered, e.g. an MCP server not yet connected) now **persist intent
+  and emit** instead of silently no-oping — the enabling direction writes
+  the branch entry and emits `changed {enabled: true}`, the disabling
+  direction the mirror image — while issuing no loadout write when nothing
+  can be actuated. `isEnabled()` remains observational and stays `false`
+  until actuatable members exist; branch entries record intent, not
+  observation. Fully-registered toolsets are bit-identical. On pi < 0.99
+  (no `exposure` field) behaviour is unchanged.
+
 ### Removed
 
 - **The `"inclusion"` resolution mode** — the `DefaultResolutionMode` union

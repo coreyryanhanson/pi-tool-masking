@@ -1047,9 +1047,43 @@ export function getActiveAllowlist(): string[] | undefined {
 
 /**
  * Enumerate every registered toolset in the global registry.
- * Returns a read-only snapshot — callers cannot mutate the live registry
- * through the returned array. Each entry carries the full spec and the
- * Toolset handle (enable / disable / isEnabled).
+ *
+ * The returned array is a copy — mutating the array itself cannot corrupt
+ * the registry — but each element is the **live registry entry**: mutating
+ * `entry.spec` (e.g. `entry.spec.names = new Set(nextNames)`) reaches the
+ * registry in place. The same `ToolsetImpl` instance stays registered, so
+ * handles the consumer already holds keep working, no warn-and-replace
+ * fires, and persisted on/off state is unaffected.
+ *
+ * This is the mechanism for changing a dynamically-managed toolset's
+ * members at runtime (an MCP server gaining or losing tools). It is scoped
+ * to consumers that are the toolset's membership authority (spec existing
+ * only at runtime); a declared toolset's authority is its spec literal in
+ * source — change members by changing code and re-registering. Caveats:
+ *
+ * - Assignment is data only: no actuation, no persistence, no event. Callers
+ *   that want an immediate reconcile can call `applyToolsetEnabled(pi, spec,
+ *   desired)`; a disabled toolset's newly-added members are removed by the
+ *   per-turn `before_agent_start` re-assert, which reads the updated
+ *   `spec.names`.
+ * - Members pi does not activate on registration (not declarable —
+ *   `codemode`/`deferred`/`hidden` — or `defaultActive: false`) that are
+ *   added to an *on* toolset stay undeclared until the caller runs
+ *   `applyToolsetEnabled`; symmetrically, removing a name does not
+ *   deactivate it (an on toolset can keep declaring a tool it no longer
+ *   owns until pi itself re-hides or de-registers it).
+ * - No overlap guard runs (that is a `defineToolset` registration-time
+ *   check). Assign a fresh `Set`; a retained live reference mutated after
+ *   assignment bypasses all discipline.
+ * - `/reload` resets membership to the code-defined spec; persisted on/off
+ *   state survives, membership does not.
+ * - An emptied toolset (`new Set()`) is permitted, but `enable()`/`disable()`
+ *   on it are complete no-ops — a new "off" cannot be recorded while empty
+ *   (disable before emptying); a prior branch entry survives and
+ *   repopulating revives actuation from persisted intent.
+ *
+ * No membership event exists: second-order consumers presenting member sets
+ * must re-read via this function rather than caching.
  *
  * No `pi` argument needed — enumeration is a pure registry read.
  */
