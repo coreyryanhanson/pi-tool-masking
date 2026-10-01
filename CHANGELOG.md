@@ -10,9 +10,10 @@
   the same tier chain restore and the per-turn re-assert actuate on
   (`defaults` is a `readMergedToolsetDefaults()` snapshot).
   Returns `{ enabled, persistedEntry }` — display and toggle-gating read
-  `.enabled`; `persistedEntry` reports only that a chat-branch entry exists
-  for the toolset (a fact about the branch, not which tier decided). The
-  intended consumer rule: display and toggle-gating read intent (`effectiveEnabled`),
+  `.enabled`; `persistedEntry` is true only when the last branch entry for
+  the toolset carries a boolean `enabled` (a `null` tombstone or no entry
+  reports `false`). The intended consumer rule: display and toggle-gating
+  read intent (`effectiveEnabled`),
   declaration-sensitive surfaces read observation (`isEnabled()`).
 
 ### Changed
@@ -29,8 +30,9 @@
   direction the mirror image — while issuing no loadout write when nothing
   can be actuated. `isEnabled()` remains observational and stays `false`
   until actuatable members exist; branch entries record intent, not
-  observation. Fully-registered toolsets are bit-identical. On pi < 0.99
-  (no `exposure` field) behaviour is unchanged.
+  observation. Toolsets whose members are all registered and actuatable
+  are bit-identical. On pi < 0.99 (no `exposure` field) behaviour is
+  unchanged.
 
 ### Removed
 

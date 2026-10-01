@@ -2330,6 +2330,30 @@ describe("Restore — persistence round-trip", () => {
 
 		expect(mock.getActiveTools()).toEqual(["outsider"]);
 	});
+
+	it("restore disable with nothing active skips the redundant setActiveTools write", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		mock.registerTool({ name: "tool-b", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "two-members",
+				persistKey: "k:two-members",
+				names: new Set(["tool-a", "tool-b"]),
+			}),
+		);
+		// Nothing active — the tools were never activated.
+		expect(mock.getActiveTools()).toEqual([]);
+		const callsBefore = mock.getSetActiveCalls().length;
+
+		mock.appendEntry("k:two-members", { enabled: false });
+		mock.fireLifecycleEvent("session_start");
+
+		expect(mock.getActiveTools()).toEqual([]);
+		// Pure-removal filter removed nothing — no loadout write.
+		expect(mock.getSetActiveCalls()).toHaveLength(callsBefore);
+	});
 });
 
 // ===================================================================

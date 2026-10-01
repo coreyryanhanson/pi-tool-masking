@@ -248,10 +248,11 @@ function readBranchModeState(branch: readonly SessionEntry[]): {
  * module state: a consumer whose handler runs before masking's restore in
  * a fresh process would otherwise see an unpopulated mirror and report a
  * suppressed toolset ON — the exact failure this export exists to prevent.
- * Under allowlist mode, `persistedEntry` still reports branch-entry
- * existence; only external callers can observe that combination (restore
- * and the turn re-assert short-circuit before reaching the resolver in
- * allowlist mode).
+ * Under allowlist mode, `persistedEntry` keeps reporting the same thing —
+ * whether the last branch entry carries a boolean `enabled` — even though
+ * the resolved `enabled` value itself comes from the allowlist. Only
+ * external callers can observe that combination (restore and the turn
+ * re-assert short-circuit before reaching the resolver in allowlist mode).
  *
  * `settingsDefaults` is the on-disk shape
  * `Record<persistKey, { enabled: boolean }>` (see `readMergedToolsetDefaults`);
@@ -259,8 +260,9 @@ function readBranchModeState(branch: readonly SessionEntry[]): {
  * (tombstoned) last branch entry falls through to the next tier, same as
  * no entry at all.
  *
- * `persistedEntry` reports whether the value came from a chat-branch entry
- * (vs settings/packaged fallback) — restore uses it to pick the
+ * `persistedEntry` is true only when the last branch entry carries a
+ * boolean `enabled` (a `null` tombstone or no entry resolves `false`) —
+ * restore uses it to pick the
  * `restored` vs `changed` emit; the turn-boundary re-assert only needs
  * `.enabled`. Shared by both so the two can never drift on what
  * "effectively off" means.
@@ -726,8 +728,9 @@ function _applyDisable(spec: ToolsetSpec, pi: ExtensionAPI): void {
 	// (members all hidden, or server not yet connected) and silently dropped
 	// the user's "off" — the toolset resolved back ON when the server
 	// connected. The gate costs one getAllTools() pass, and only on this
-	// no-removal path; for a fully-registered toolset it collapses to the
-	// old behaviour bit-for-bit. Empty names is vacuously witnessed (0 === 0)
+	// no-removal path; for a toolset whose members are all registered and
+	// actuatable it collapses to the old behaviour bit-for-bit. Empty names is
+	// vacuously witnessed (0 === 0)
 	// and still no-ops.
 	const actuatable = getActuatableNames(pi);
 	const actuatableNames = [...spec.names].filter((n) => actuatable.has(n));
@@ -1070,11 +1073,12 @@ export function getActiveAllowlist(): string[] | undefined {
  *   per-turn `before_agent_start` re-assert, which reads the updated
  *   `spec.names`.
  * - Members pi does not activate on registration (not declarable —
- *   `codemode`/`deferred`/`hidden` — or `defaultActive: false`) that are
+ *   `codemode`/`deferred` — or `defaultActive: false`) that are
  *   added to an *on* toolset stay undeclared until the caller runs
- *   `applyToolsetEnabled`; symmetrically, removing a name does not
- *   deactivate it (an on toolset can keep declaring a tool it no longer
- *   owns until pi itself re-hides or de-registers it).
+ *   `applyToolsetEnabled`; a `hidden` member can never be declared
+ *   (`applyToolsetEnabled` cannot help). Symmetrically, removing a name
+ *   does not deactivate it (an on toolset can keep declaring a tool it no
+ *   longer owns until pi itself re-hides or de-registers it).
  * - No overlap guard runs (that is a `defineToolset` registration-time
  *   check). Assign a fresh `Set`; a retained live reference mutated after
  *   assignment bypasses all discipline.
