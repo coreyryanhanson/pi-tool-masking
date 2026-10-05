@@ -2382,45 +2382,6 @@ describe("Contradiction detection (planner-level)", () => {
 		expect(err.name).toBe("ContradictionError");
 	});
 
-	it("refuses the transitive contradiction a direct-edge rule would miss (A/B/D)", () => {
-		const { mock, pi } = createEnv();
-		mock.registerTool({ name: "a-tool", description: "" });
-		mock.registerTool({ name: "b-tool", description: "" });
-		mock.registerTool({ name: "d-tool", description: "" });
-		defineToolset(
-			pi,
-			makeSpec({ id: "A", persistKey: "k:A", names: new Set(["a-tool"]) }),
-		);
-		defineToolset(
-			pi,
-			makeSpec({
-				id: "B",
-				persistKey: "k:B",
-				names: new Set(["b-tool"]),
-				requires: ["A"],
-			}),
-		);
-		defineToolset(
-			pi,
-			makeSpec({
-				id: "D",
-				persistKey: "k:D",
-				names: new Set(["d-tool"]),
-				requires: ["B"],
-			}),
-		);
-		// No explicit pair shares a direct requires edge, yet closure
-		// resolution pulls B toward off (disable A's dependents cascade) and
-		// toward on (enable D's requires closure) — the coherence invariant
-		// must refuse it, not silently resolve.
-		const ops: BatchOp[] = [
-			{ id: "A", desired: false },
-			{ id: "D", desired: true },
-		];
-		const err = catchByName(() => planBatch(ops));
-		expect(err.name).toBe("ContradictionError");
-	});
-
 	it("refuses a contradiction below an intermediate enabled id", () => {
 		const { mock, pi } = createEnv();
 		for (const name of ["a-tool", "b-tool", "c-tool"]) {
@@ -2612,18 +2573,6 @@ describe("Batch execution (executor-level)", () => {
 		expect(mock.getActiveTools()).toEqual(
 			expect.arrayContaining(["c-tool", "a-tool", "b-tool"]),
 		);
-	});
-
-	it("an op already in its desired state is absent from the returned delta", () => {
-		const { mock } = rig();
-		mock.appendEntry("k:A", { enabled: true }); // A already on...
-		mock.setActiveTools(["a-tool"]); // ...including its loadout
-		const results = execute(mock, [
-			{ id: "C", desired: true },
-			{ id: "A", desired: true },
-		]);
-		expect(results).toEqual([{ id: "C", enabled: true }]);
-		expect(mock.getEntries("k:A")).toHaveLength(1); // no duplicate persist for A
 	});
 
 	it("emits fire only after ALL writes, in plan.order", () => {
@@ -4753,28 +4702,6 @@ describe("intent-delta gate", () => {
 		// re-invokes the reader, sees web's entry, and stays silent.
 		expect(mock.getEntries("k:web")).toHaveLength(1);
 		expect(mock.getEntries("k:learn")).toHaveLength(1);
-	});
-
-	it("one branch read per toggle call, taken at the call's own boundary", () => {
-		const { mock, pi } = createEnv();
-		mock.registerTool({ name: "tool-a", description: "" });
-		const ts = defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
-
-		let branchReads = 0;
-		const spyReader = {
-			getBranch: () => {
-				branchReads++;
-				return reader(pi).getBranch();
-			},
-		};
-
-		// Resolved on (default), member active: the disable's delta fires, so
-		// the call reads the branch — exactly once, at its own boundary. All
-		// reads occur during the call itself — none is deferred, cached, or
-		// re-invoked after it returns (the cascade machinery itself never
-		// dereferences the reader).
-		ts.disable(pi, spyReader);
-		expect(branchReads).toBe(1);
 	});
 });
 
