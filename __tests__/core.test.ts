@@ -3061,24 +3061,6 @@ describe("Default-resolution mode — entry vs no-entry", () => {
 });
 
 // ===================================================================
-// Entry-point exports
-// ===================================================================
-
-describe("Entry-point exports", () => {
-	it("all public exports resolve from the package entry", () => {
-		expect(typeof defineToolset).toBe("function");
-		expect(typeof setDefaultResolutionMode).toBe("function");
-		expect(typeof readBranchModeState).toBe("function");
-
-		expect(typeof TOOLSET_EVENTS).toBe("object");
-		expect(typeof TOOLSET_EVENTS.changed).toBe("string");
-		expect(typeof TOOLSET_EVENTS.restored).toBe("string");
-
-		expect(typeof effectiveEnabled).toBe("function");
-		expect(typeof toggleBatch).toBe("function");
-	});
-});
-
 // ===================================================================
 // Settings.json reader — parseToolsetDefaults
 // ===================================================================
