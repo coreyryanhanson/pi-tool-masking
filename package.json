@@ -17,9 +17,6 @@
 	"scripts": {
 		"test": "vitest run",
 		"test:watch": "vitest",
-		"version:patch": "npm version patch --no-git-tag-version",
-		"version:minor": "npm version minor --no-git-tag-version",
-		"version:major": "npm version major --no-git-tag-version",
 		"prepublishOnly": "npm test && npx tsc --noEmit",
 		"publish:dry": "npm publish --access public --dry-run",
 		"release:patch": "node scripts/release.mjs patch",

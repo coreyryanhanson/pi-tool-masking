@@ -66,9 +66,6 @@ commits that, and pushes `main` + the tag to `origin`. Draft `[Unreleased]`
 entries in `CHANGELOG.md` before running (the script warns if empty but
 proceeds).
 
-The shorter `version:patch|minor|major` scripts only bump `package.json` —
-they do NOT test, commit, tag, or publish.
-
 ## Key public API
 
 | Export | Notes |
