@@ -739,7 +739,7 @@ export interface BatchOp {
  *  write/report/emit order — ops in op order, enable deps-first post-order
  *  over `requires` in declaration order, disable self-first over dependents
  *  in registry order, one global visited set across the whole batch. */
-export interface BatchPlan {
+interface BatchPlan {
 	intent: Map<string, boolean>;
 	order: string[];
 }

@@ -169,6 +169,10 @@ This is what display surfaces should read (see [Intent vs observation](#intent-v
 | `changed` | A toggle, a re-assert, or `forceToolsetEnabled` applied a state; exclusion-mode restore also emits it for a toolset with no persisted entry (settings/packaged fallback) |
 | `restored` | Exclusion-mode restore of a persisted branch entry; allowlist-mode restore of **every** registered toolset (a branch replay of the allowlist, not a live toggle) |
 
+### `lastCustomEntry(branch, customType)`
+
+Returns the last `type === "custom"` entry in the branch matching `customType`, discriminator-narrowed to `CustomEntry<T>` so callers get typed `.data` without casting. Tombstones (`data: null`) are returned, not skipped; returns `undefined` when no entry matches. Useful for extensions that store their own session state via `pi.appendEntry(customType, data)` and need to read it back from `ctx.sessionManager.getBranch()`.
+
 ### Types
 
 | Type | Description |
