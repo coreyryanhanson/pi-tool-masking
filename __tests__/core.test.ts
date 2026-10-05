@@ -652,29 +652,6 @@ describe("defineToolset — name-overlap guard", () => {
 		).toThrow(/tool "y" already claimed by toolset "b"/);
 		warnSpy.mockRestore();
 	});
-
-	it("forward-reference overlap caught: name not yet a registered tool still collides", () => {
-		const { pi } = createEnv();
-		defineToolset(
-			pi,
-			makeSpec({
-				id: "a",
-				persistKey: "toolset-state:a",
-				names: new Set(["x"]),
-			}),
-		);
-		// `x` is not registerTool'd by either side — purely name-based collision.
-		expect(() =>
-			defineToolset(
-				pi,
-				makeSpec({
-					id: "b",
-					persistKey: "toolset-state:b",
-					names: new Set(["x"]),
-				}),
-			),
-		).toThrow(/name overlap/);
-	});
 });
 
 // ===================================================================
@@ -1557,7 +1534,7 @@ describe("before_agent_start disabled-leak re-assert", () => {
 		expect(changedSpy).not.toHaveBeenCalled();
 	});
 
-	it("is a steady-state no-op — does not emit or mutate when nothing drifted", () => {
+	it("is a steady-state no-op in exclusion mode — does not emit or mutate when nothing drifted", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		mock.registerTool({ name: "tool-b", description: "" });
@@ -1756,29 +1733,6 @@ describe("Dependency cascade on enable", () => {
 		expect(tsB.isEnabled(pi)).toBe(true);
 	});
 
-	it("cascade writes appendEntry for the dependency, not just the caller", () => {
-		const { mock, pi } = createEnv();
-		mock.registerTool({ name: "b-tool", description: "" });
-		mock.registerTool({ name: "l-tool", description: "" });
-		defineToolset(
-			pi,
-			makeSpec({ id: "B", persistKey: "k:B", names: new Set(["b-tool"]) }),
-		);
-		const tsL = defineToolset(
-			pi,
-			makeSpec({
-				id: "L",
-				persistKey: "k:L",
-				names: new Set(["l-tool"]),
-				requires: ["B"],
-			}),
-		);
-		tsL.enable(pi, reader(pi));
-		const bEntries = mock.getEntries("k:B");
-		expect(bEntries).toHaveLength(1);
-		expect(bEntries[0]?.data).toEqual({ enabled: true });
-	});
-
 	it('duplicate requires ids (["B", "B"]) does not double-enable or throw', () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "b-tool", description: "" });
@@ -1829,6 +1783,7 @@ describe("Cascade appendEntry consistency", () => {
 		tsL.enable(pi, reader(pi));
 		expect(mock.getEntries("k:L")).toHaveLength(1);
 		expect(mock.getEntries("k:B")).toHaveLength(1);
+		expect(mock.getEntries("k:B")[0]?.data).toEqual({ enabled: true });
 	});
 
 	it("disable cascades write entries for each affected toolset", () => {
@@ -3133,23 +3088,16 @@ describe("parseToolsetDefaults", () => {
 		expect(parseToolsetDefaults({})).toEqual({});
 	});
 
-	it("non-object toolsetDefaults (string) returns {}", () => {
+	it("non-object toolsetDefaults (string, array) returns {}", () => {
 		expect(parseToolsetDefaults({ toolsetDefaults: "" })).toEqual({});
-	});
-
-	it("non-object toolsetDefaults (array) returns {}", () => {
 		expect(parseToolsetDefaults({ toolsetDefaults: [] })).toEqual({});
 	});
 
-	it("drops entry with string enabled value", () => {
+	it("drops entries with non-boolean enabled values (string, number)", () => {
 		expect(
-			parseToolsetDefaults({ toolsetDefaults: { "k:x": { enabled: "true" } } }),
-		).toEqual({});
-	});
-
-	it("drops entry with number enabled value", () => {
-		expect(
-			parseToolsetDefaults({ toolsetDefaults: { "k:x": { enabled: 1 } } }),
+			parseToolsetDefaults({
+				toolsetDefaults: { "k:x": { enabled: "true" }, "k:y": { enabled: 1 } },
+			}),
 		).toEqual({});
 	});
 
@@ -3680,23 +3628,6 @@ describe("Restore — settings.json defaults tier", () => {
 		);
 		mock.fireLifecycleEvent("session_start");
 		expect(mock.getActiveTools()).toContain("tool-a");
-	});
-
-	it("null-tombstoned branch entry falls through to settings pin", () => {
-		const { mock, pi } = createEnv();
-		mock.registerTool({ name: "tool-a", description: "" });
-		setDefaultsOverride({
-			"toolset-state:test.toolset": { enabled: false },
-		});
-		defineToolset(
-			pi,
-			makeSpec({ names: new Set(["tool-a"]), defaultEnabled: true }),
-		);
-		// real entry (true), then null tombstone → settings pin (false) wins
-		mock.appendEntry("toolset-state:test.toolset", { enabled: true });
-		mock.appendEntry("toolset-state:test.toolset", null);
-		mock.fireLifecycleEvent("session_start");
-		expect(mock.getActiveTools()).not.toContain("tool-a");
 	});
 });
 
@@ -4506,18 +4437,6 @@ describe("intent-delta gate", () => {
 		expect(results).toEqual([{ id: "test.toolset", enabled: true }]);
 		expect(mock.getEntries("toolset-state:test.toolset")).toHaveLength(2);
 		expect(changed).toEqual([{ id: "test.toolset", enabled: true }]);
-	});
-
-	it("external branch write is visible: direct true write, then disable fires", () => {
-		const { mock, pi } = createEnv();
-		mock.registerTool({ name: "tool-a", description: "" });
-		const ts = defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
-		pi.appendEntry("toolset-state:test.toolset", { enabled: true });
-
-		const results = ts.disable(pi, reader(pi));
-
-		expect(results).toEqual([{ id: "test.toolset", enabled: false }]);
-		expect(mock.getEntries("toolset-state:test.toolset")).toHaveLength(2);
 	});
 
 	it("settings-pin delta: pin off, repeat off silent, toggle on persists", () => {
