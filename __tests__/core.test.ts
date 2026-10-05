@@ -4577,7 +4577,7 @@ describe("allowlist boundary — toggle refusal", () => {
 		expect(mock.getActiveTools()).toEqual(before);
 	});
 
-	it("mode source is the branch, not module state: a raw-appended mode entry throws with no setDefaultResolutionMode call", () => {
+	it("mode source is the branch: a raw-appended mode entry throws with no setDefaultResolutionMode call", () => {
 		const { mock, pi, listed } = setupBoundary([]);
 		// No setDefaultResolutionMode — the branch carries no mode entry yet.
 		expect(readBranchModeState(reader(pi).getBranch()).mode).toBe("exclusion");
@@ -4907,11 +4907,10 @@ describe("branch-read unification — dispatcher arm + copy semantics", () => {
 		return { mock, pi };
 	}
 
-	it("a raw-appended allowlist mode entry selects the allowlist arm — enforced from the first turn, no restore, no module write", () => {
+	it("a raw-appended allowlist mode entry selects the allowlist arm — enforced from the first turn, no restore", () => {
 		const { mock, pi } = setupFresh();
 		// Raw branch write — setDefaultResolutionMode is never called, so no
-		// library API has touched this mode before. A module-state mirror would
-		// read empty here; the branch read must win.
+		// library API has touched this mode before; the branch read must win.
 		mock.appendEntry("toolset-resolution-mode", {
 			mode: "allowlist",
 			allowlist: ["search.web"],

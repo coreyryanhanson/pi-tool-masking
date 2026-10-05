@@ -143,7 +143,7 @@ function collectMaskEvents(mock: MockPI): () => { type: string; id: string }[] {
 			}));
 }
 
-// Process-global state (env var + globalThis module state + the once-per-
+// Process-global state (env var + the globalThis library keys + the once-per-
 // process warn-dedup flag) pollutes subsequent cases if left dirty — the
 // env-passthrough suite's save/restore discipline, plus a sweep of the
 // CHILD_POLICY_WARNED_KEY dedup flag: without it the invalid-value warn
@@ -273,8 +273,8 @@ describe("defer at re-assert", () => {
 		expect(mock.getActiveTools()).toEqual(["search-web", "web-search"]);
 
 		// Allowlist path: a raw-appended allowlist mode entry (a resumed child
-		// branch could carry one) — still a no-op. The seed is a branch entry,
-		// not module state, because the dispatcher's arm source IS the branch:
+		// branch could carry one) — still a no-op. The seed is a branch
+		// entry: the dispatcher's arm source IS the branch:
 		// this pins that the defer guard precedes arm selection on the
 		// allowlist arm specifically (the exclusion half above covers the
 		// other arm).
@@ -584,8 +584,8 @@ describe("isDeferredChild", () => {
 // ===================================================================
 
 /** Raw-appended allowlist mode entry — the mode-source mechanism: no
- *  setDefaultResolutionMode call, so module state still claims exclusion;
- *  only the branch carries the governance entry. */
+ *  setDefaultResolutionMode call; only the branch carries the governance
+ *  entry. */
 function seedAllowlistBranch(mock: MockPI): void {
 	mock.appendEntry(MODE_PERSIST_KEY, {
 		mode: "allowlist",
