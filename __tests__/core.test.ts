@@ -3663,16 +3663,13 @@ describe("Null-tombstone — toolset restore", () => {
 // ===================================================================
 
 describe("Tombstone helpers", () => {
-	const branchOf = (mock: MockPI) =>
-		mock.createContext().sessionManager.getBranch();
-
 	it("clearToolsetEntry appends null when last entry is non-null", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
 		mock.appendEntry("toolset-state:test.toolset", { enabled: true });
 
-		clearToolsetEntry(pi, "toolset-state:test.toolset", branchOf(mock));
+		clearToolsetEntry(pi, "toolset-state:test.toolset", reader(pi).getBranch());
 
 		const entries = mock.getEntries("toolset-state:test.toolset");
 		expect(entries).toHaveLength(2);
@@ -3686,7 +3683,7 @@ describe("Tombstone helpers", () => {
 		mock.appendEntry("toolset-state:test.toolset", { enabled: true });
 		mock.appendEntry("toolset-state:test.toolset", null);
 
-		clearToolsetEntry(pi, "toolset-state:test.toolset", branchOf(mock));
+		clearToolsetEntry(pi, "toolset-state:test.toolset", reader(pi).getBranch());
 
 		// No second tombstone stacked
 		expect(mock.getEntries("toolset-state:test.toolset")).toHaveLength(2);
@@ -3697,7 +3694,7 @@ describe("Tombstone helpers", () => {
 		mock.registerTool({ name: "tool-a", description: "" });
 		defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
 
-		clearToolsetEntry(pi, "toolset-state:test.toolset", branchOf(mock));
+		clearToolsetEntry(pi, "toolset-state:test.toolset", reader(pi).getBranch());
 
 		// No redundant tombstone for a never-toggled toolset
 		expect(mock.getEntries("toolset-state:test.toolset")).toHaveLength(0);
@@ -3726,7 +3723,7 @@ describe("Tombstone helpers", () => {
 		mock.appendEntry("toolset-state:a", { enabled: true });
 		// toolset b never toggled → no branch entry
 
-		clearAllToolsetEntries(pi, branchOf(mock));
+		clearAllToolsetEntries(pi, reader(pi).getBranch());
 
 		const a = mock.getEntries("toolset-state:a");
 		expect(a).toHaveLength(2);
@@ -3740,8 +3737,8 @@ describe("Tombstone helpers", () => {
 		defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
 		mock.appendEntry("toolset-state:test.toolset", { enabled: true });
 
-		clearAllToolsetEntries(pi, branchOf(mock));
-		clearAllToolsetEntries(pi, branchOf(mock));
+		clearAllToolsetEntries(pi, reader(pi).getBranch());
+		clearAllToolsetEntries(pi, reader(pi).getBranch());
 
 		// First call appends the tombstone; second sees it and skips
 		expect(mock.getEntries("toolset-state:test.toolset")).toHaveLength(2);
@@ -3759,7 +3756,7 @@ describe("Tombstone helpers", () => {
 		});
 		mock.appendEntry("toolset-state:test.toolset", { enabled: true });
 
-		clearToolsetEntry(pi, "toolset-state:test.toolset", branchOf(mock));
+		clearToolsetEntry(pi, "toolset-state:test.toolset", reader(pi).getBranch());
 		mock.fireLifecycleEvent("session_start");
 
 		// Tombstone makes the stale {enabled:true} invisible; settings pin wins
@@ -4026,32 +4023,28 @@ describe("hidden-exposure — per-turn allowlist mask", () => {
 // ===================================================================
 
 describe("effectiveEnabled", () => {
-	function branchOf(mock: MockPI) {
-		return mock.createContext().sessionManager.getBranch();
-	}
-
 	it("resolves a chat-branch entry (tier 1) with no mode argument", () => {
 		const { mock, pi } = createEnv();
 		const spec = makeSpec({ persistKey: "k:a", defaultEnabled: false });
 		pi.appendEntry("k:a", { enabled: true });
 
-		expect(effectiveEnabled(spec, branchOf(mock), {})).toEqual({
+		expect(effectiveEnabled(spec, reader(pi).getBranch(), {})).toEqual({
 			enabled: true,
 			persistedEntry: true,
 		});
 	});
 
 	it("resolves a settings pin (tier 2), then the packaged fallback (tier 3)", () => {
-		const { mock } = createEnv();
+		const { mock, pi } = createEnv();
 		setDefaultsOverride({ "k:a": { enabled: true } });
 		const pinned = makeSpec({ persistKey: "k:a", defaultEnabled: false });
-		expect(effectiveEnabled(pinned, branchOf(mock), readMergedToolsetDefaults())).toEqual({
+		expect(effectiveEnabled(pinned, reader(pi).getBranch(), readMergedToolsetDefaults())).toEqual({
 			enabled: true,
 			persistedEntry: false,
 		});
 
 		const unpinned = makeSpec({ persistKey: "k:b", defaultEnabled: false });
-		expect(effectiveEnabled(unpinned, branchOf(mock), {})).toEqual({
+		expect(effectiveEnabled(unpinned, reader(pi).getBranch(), {})).toEqual({
 			enabled: false,
 			persistedEntry: false,
 		});
@@ -4063,7 +4056,7 @@ describe("effectiveEnabled", () => {
 		pi.appendEntry("k:a", null);
 		const spec = makeSpec({ persistKey: "k:a", defaultEnabled: false });
 
-		expect(effectiveEnabled(spec, branchOf(mock), {})).toEqual({
+		expect(effectiveEnabled(spec, reader(pi).getBranch(), {})).toEqual({
 			enabled: false,
 			persistedEntry: false,
 		});
@@ -4085,7 +4078,7 @@ describe("effectiveEnabled", () => {
 			persistKey: "k:suppressed",
 		});
 		expect(
-			effectiveEnabled(suppressed, branchOf(mock), readMergedToolsetDefaults()),
+			effectiveEnabled(suppressed, reader(pi).getBranch(), readMergedToolsetDefaults()),
 		).toEqual({ enabled: false, persistedEntry: true });
 
 		// Allowlisted: branch entry and settings pin say false, allowlist wins.
@@ -4093,7 +4086,7 @@ describe("effectiveEnabled", () => {
 		setDefaultsOverride({ "k:allowed": { enabled: false } });
 		const allowed = makeSpec({ id: "allowed.web", persistKey: "k:allowed" });
 		expect(
-			effectiveEnabled(allowed, branchOf(mock), readMergedToolsetDefaults()),
+			effectiveEnabled(allowed, reader(pi).getBranch(), readMergedToolsetDefaults()),
 		).toEqual({ enabled: true, persistedEntry: true });
 	});
 
@@ -4103,7 +4096,7 @@ describe("effectiveEnabled", () => {
 		// A stale allowlist field in a non-allowlist mode entry is ignored.
 		pi.appendEntry("toolset-resolution-mode", { mode: "exclusion" });
 
-		expect(effectiveEnabled(spec, branchOf(mock), {})).toEqual({
+		expect(effectiveEnabled(spec, reader(pi).getBranch(), {})).toEqual({
 			enabled: true,
 			persistedEntry: false,
 		});
