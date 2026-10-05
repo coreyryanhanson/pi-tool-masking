@@ -2905,15 +2905,14 @@ describe("Restore — idempotent / last-writer-wins", () => {
 		expect(stateAfterSecond).toEqual(stateAfterFirst);
 	});
 
-	it("second restore does not double-write appendEntry", () => {
+	it("restore never persists — appendEntry is not called", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
+		const appendSpy = vi.spyOn(mock, "appendEntry");
 		mock.fireLifecycleEvent("session_start");
-		const entriesAfterFirst = mock.getEntries().length;
-		mock.fireLifecycleEvent("session_start");
-		const entriesAfterSecond = mock.getEntries().length;
-		expect(entriesAfterSecond).toBe(entriesAfterFirst);
+		mock.fireLifecycleEvent("session_tree");
+		expect(appendSpy).not.toHaveBeenCalled();
 	});
 
 	it("last-writer-wins: most recent entry takes precedence", () => {
