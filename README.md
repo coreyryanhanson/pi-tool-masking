@@ -197,7 +197,7 @@ Restore resolves each toolset's default in this order (first hit wins):
 
 1. **Chat-branch entry** — the last `appendEntry(persistKey, …)` on this branch. A `null` tombstone (see [`clearToolsetEntry`](#tombstone-helpers)) falls through to the tiers below.
 2. **Settings pin** — `toolsetDefaults[persistKey].enabled`, merged global → project (project wins per entry). Mode-agnostic.
-3. **Packaged default** — `spec.defaultEnabled ?? true`, filtered by resolution mode for unpinned toolsets only.
+3. **Packaged default** — `spec.defaultEnabled ?? true`. In exclusion mode the mode filter applies to unpinned toolsets only; under allowlist mode tiers 1–2 are bypassed entirely, so every toolset falls through here.
 
 Settings pins are honored in exclusion mode, mirroring how chat-branch entries are honored — only unpinned toolsets consult mode for the floor. While allowlist mode is active, pins and branch entries are bypassed: the active set is exactly the allowlist members.
 
@@ -298,7 +298,7 @@ Caveats:
 
 ## Hidden-exposure toolsets and inert state
 
-Pi 1.0 gives every tool an `exposure` (`direct | model-only | codemode | deferred | hidden`). `hidden` tools can never enter the active set, so the library's actuation and mask paths filter them out: a `hidden` member of a toolset is never handed to `setActiveTools` and never triggers a redundant mask write on the per-turn re-assert. On older pi (no `exposure` field) every registered name is actuatable — behaviour is unchanged.
+Pi 1.0 gives every tool an `exposure` (`direct | model-only | codemode | deferred | hidden`). `hidden` tools can never enter the active set. The library's add and mask paths filter them out explicitly; the remove path doesn't need to — it only ever removes from the already-active set, which pi keeps hidden-free — so a `hidden` member is never handed to `setActiveTools` and never triggers a redundant mask write on the per-turn re-assert. On older pi (no `exposure` field) every registered name is actuatable — behaviour is unchanged.
 
 **Inert toolsets — `enabled` means intent, not observation.** A non-empty toolset with zero actuatable members (members still `hidden`, or its MCP server not yet connected) cannot witness either state: a hidden member can never be active, and absence of activity proves nothing when nothing can be active. For such a toolset:
 
