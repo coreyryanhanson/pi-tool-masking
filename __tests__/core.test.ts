@@ -1206,38 +1206,42 @@ describe("Allowlist resolution mode", () => {
 		expect(mock.getEntries("k:comp")).toHaveLength(0);
 	});
 
-	it("restore fail-closed — mode entry claims allowlist with no array → empty allowlist, everything off", () => {
-		const { mock, pi } = createEnv();
-		mock.registerTool({ name: "tool-a", description: "" });
-		defineToolset(
-			pi,
-			makeSpec({
-				id: "a",
-				persistKey: "k:a",
-				names: new Set(["tool-a"]),
-				defaultEnabled: true,
-			}),
-		);
+	it.each([
+		["array missing", { mode: "allowlist" }],
+		["array present but not an array", { mode: "allowlist", allowlist: "tool-a" }],
+	])(
+		"restore fail-closed — allowlist %s → empty allowlist, everything off",
+		(_shape, entry) => {
+			const { mock, pi } = createEnv();
+			mock.registerTool({ name: "tool-a", description: "" });
+			defineToolset(
+				pi,
+				makeSpec({
+					id: "a",
+					persistKey: "k:a",
+					names: new Set(["tool-a"]),
+					defaultEnabled: true,
+				}),
+			);
 
-		// Hand-edited branch corruption: mode claims "allowlist", array missing
-		// (write-time validation would prevent this, but branch files are
-		// hand-editable).
-		mock.appendEntry("toolset-resolution-mode", { mode: "allowlist" });
-		mock.setActiveTools(["tool-a"]);
+			// Hand-edited branch corruption: mode claims "allowlist" (write-time
+			// validation would prevent this, but branch files are hand-editable).
+			mock.appendEntry("toolset-resolution-mode", entry);
+			mock.setActiveTools(["tool-a"]);
 
-		mock.fireLifecycleEvent("session_start");
+			mock.fireLifecycleEvent("session_start");
 
-		// Mode claim respected — not silently rewritten to "exclusion"...
-		// ...recovered to an empty array (consistent, not "undefined")...
-		expect(readBranchModeState(reader(pi).getBranch())).toEqual({
-			mode: "allowlist",
-			allowlist: [],
-		});
-		// ...and the recovery fails CLOSED: nothing is on. (Recovering to
-		// "exclusion" instead would fail open — `defaultEnabled: true` would
-		// have turned tool-a on.)
-		expect(mock.getActiveTools()).toEqual([]);
-	});
+			// Mode claim respected — not silently rewritten to "exclusion";
+			// recovered to an empty array, which fails CLOSED: nothing is on.
+			// (Recovering to "exclusion" instead would fail open —
+			// `defaultEnabled: true` would have turned tool-a on.)
+			expect(readBranchModeState(reader(pi).getBranch())).toEqual({
+				mode: "allowlist",
+				allowlist: [],
+			});
+			expect(mock.getActiveTools()).toEqual([]);
+		},
+	);
 
 	it("corrupt allowlist members — non-string entries are dropped, string[] type holds", () => {
 		const { mock, pi } = createEnv();
@@ -1251,34 +1255,6 @@ describe("Allowlist resolution mode", () => {
 			mode: "allowlist",
 			allowlist: ["a"],
 		});
-	});
-
-	it("restore fail-closed — allowlist present but not an array → empty allowlist, everything off", () => {
-		const { mock, pi } = createEnv();
-		mock.registerTool({ name: "tool-a", description: "" });
-		defineToolset(
-			pi,
-			makeSpec({
-				id: "a",
-				persistKey: "k:a",
-				names: new Set(["tool-a"]),
-				defaultEnabled: true,
-			}),
-		);
-
-		mock.appendEntry("toolset-resolution-mode", {
-			mode: "allowlist",
-			allowlist: "tool-a", // not an array
-		});
-		mock.setActiveTools(["tool-a"]);
-
-		mock.fireLifecycleEvent("session_start");
-
-		expect(readBranchModeState(reader(pi).getBranch())).toEqual({
-			mode: "allowlist",
-			allowlist: [],
-		});
-		expect(mock.getActiveTools()).toEqual([]);
 	});
 
 	it("null-tombstoned mode entry supersedes a prior allowlist → exclusion, allowlist []", () => {
