@@ -12,6 +12,7 @@ import {
 	clearToolsetEntry,
 	clearAllToolsetEntries,
 	forceToolsetEnabled,
+	isDeferredChild,
 } from "../index.js";
 import { cleanGlobalKeys, cleanRegistry, REGISTRY_KEY, catchByName, createEnv, reader } from "./helpers.js";
 
@@ -551,6 +552,28 @@ describe("var passthrough", () => {
 		// at its next restore — the exact republish trap.
 		expect(process.env[DEFER_ENV]).toBe(FOREIGN_PID);
 		expect(events()).toEqual([]);
+	});
+});
+
+// ===================================================================
+// isDeferredChild — the exported env-only predicate. Consumers gate their
+// own actuation paths with this, so its fail-closed contract is pinned
+// directly rather than only through the restore/toggle gates.
+// ===================================================================
+
+describe("isDeferredChild", () => {
+	it("fails closed: absent, empty, and own-pid vars are not deferred; only a foreign pid is", () => {
+		delete process.env[DEFER_ENV];
+		expect(isDeferredChild()).toBe(false);
+
+		process.env[DEFER_ENV] = "";
+		expect(isDeferredChild()).toBe(false);
+
+		process.env[DEFER_ENV] = String(process.pid);
+		expect(isDeferredChild()).toBe(false);
+
+		process.env[DEFER_ENV] = FOREIGN_PID;
+		expect(isDeferredChild()).toBe(true);
 	});
 });
 

@@ -393,6 +393,59 @@ describe("defineToolset — collision policy", () => {
 		}
 	});
 
+	it("replace on changed spec does not throw on own unchanged persistKey (self-skip)", () => {
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const { pi } = createEnv();
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "a",
+				persistKey: "toolset-state:a",
+				names: new Set(["x"]),
+			}),
+		);
+		// Re-define "a" with a changed spec whose persistKey is unchanged — the
+		// collision loop skips the spec's own id.
+		expect(() =>
+			defineToolset(
+				pi,
+				makeSpec({
+					id: "a",
+					persistKey: "toolset-state:a",
+					names: new Set(["x", "y"]),
+				}),
+			),
+		).not.toThrow();
+		warnSpy.mockRestore();
+	});
+
+	it("replace on changed spec whose new persistKey collides throws PersistKeyCollisionError", () => {
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const { pi } = createEnv();
+		defineToolset(
+			pi,
+			makeSpec({ id: "a", persistKey: "k:a", names: new Set(["x"]) }),
+		);
+		defineToolset(
+			pi,
+			makeSpec({ id: "b", persistKey: "k:b", names: new Set(["y"]) }),
+		);
+		// Re-define "a" with a changed spec that now claims b's persistKey —
+		// the self-skip only protects the spec's own key, not a foreign one.
+		try {
+			defineToolset(
+				pi,
+				makeSpec({ id: "a", persistKey: "k:b", names: new Set(["x2"]) }),
+			);
+			expect.unreachable("defineToolset should have thrown");
+		} catch (err) {
+			expect((err as { name?: string })?.name).toBe("PersistKeyCollisionError");
+			expect((err as { persistKey?: string }).persistKey).toBe("k:b");
+			expect((err as { existingId?: string }).existingId).toBe("b");
+		}
+		warnSpy.mockRestore();
+	});
+
 	it("allows duplicate id with identical spec (idempotent re-registration)", () => {
 		const { pi } = createEnv();
 		const spec = makeSpec();
@@ -1962,6 +2015,8 @@ describe("Cycle detection on enable", () => {
 		);
 		const err = catchByName(() => tsA.enable(pi, reader(pi)));
 		expect(err.name).toBe("CycleError");
+		// The discovered path is carried as a field, not just in the message.
+		expect((err as { cyclePath?: string }).cyclePath).toBe("A → B → A");
 	});
 
 	it("detects a three-node cycle (A → B → C → A) as a CycleError", () => {
