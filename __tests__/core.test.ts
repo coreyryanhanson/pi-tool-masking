@@ -772,30 +772,6 @@ describe("Toolset.disable", () => {
 		expect(last?.data).toEqual({ enabled: false });
 	});
 
-	it("uses getActiveTools(), not getAllTools() — does not revive peer's tools", () => {
-		const { mock, pi } = createEnv();
-		mock.registerTool({ name: "a-only", description: "" });
-		mock.registerTool({ name: "b-only", description: "" });
-		const tsA = defineToolset(
-			pi,
-			makeSpec({ id: "a", persistKey: "k:a", names: new Set(["a-only"]) }),
-		);
-		const tsB = defineToolset(
-			pi,
-			makeSpec({ id: "b", persistKey: "k:b", names: new Set(["b-only"]) }),
-		);
-		tsA.enable(pi, reader(pi));
-		tsB.enable(pi, reader(pi));
-		expect(mock.getActiveTools()).toEqual(
-			expect.arrayContaining(["a-only", "b-only"]),
-		);
-		tsA.disable(pi, reader(pi));
-		expect(mock.getActiveTools()).not.toContain("a-only");
-		expect(mock.getActiveTools()).toContain("b-only");
-		tsB.disable(pi, reader(pi));
-		expect(mock.getActiveTools()).not.toContain("a-only");
-	});
-
 	it("is idempotent — second call is no-op", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
@@ -821,84 +797,6 @@ describe("Toolset.disable", () => {
 			id: "test.toolset",
 			enabled: false,
 		});
-		emitSpy.mockRestore();
-	});
-});
-
-// ===================================================================
-// Invariant: disable reads from getActiveTools, not getAllTools
-// ===================================================================
-
-describe("Invariant — disable reads getActiveTools, not getAllTools", () => {
-	it("disable does not re-activate tools in getAllTools but absent from getActiveTools", () => {
-		const { mock, pi } = createEnv();
-		mock.registerTool({ name: "a", description: "" });
-		mock.registerTool({ name: "b", description: "" });
-		const tsA = defineToolset(
-			pi,
-			makeSpec({ id: "A", persistKey: "k:A", names: new Set(["a"]) }),
-		);
-		defineToolset(
-			pi,
-			makeSpec({ id: "B", persistKey: "k:B", names: new Set(["b"]) }),
-		);
-		tsA.enable(pi, reader(pi));
-		expect(mock.getActiveTools()).toEqual(["a"]);
-		tsA.disable(pi, reader(pi));
-		expect(mock.getActiveTools()).toEqual([]);
-	});
-
-	it("disable does not revive a peer that was disabled earlier", () => {
-		const { mock, pi } = createEnv();
-		mock.registerTool({ name: "a", description: "" });
-		mock.registerTool({ name: "b", description: "" });
-		const tsA = defineToolset(
-			pi,
-			makeSpec({ id: "A", persistKey: "k:A", names: new Set(["a"]) }),
-		);
-		const tsB = defineToolset(
-			pi,
-			makeSpec({ id: "B", persistKey: "k:B", names: new Set(["b"]) }),
-		);
-		tsA.enable(pi, reader(pi));
-		tsB.enable(pi, reader(pi));
-		tsB.disable(pi, reader(pi));
-		expect(mock.getActiveTools()).toEqual(["a"]);
-		tsA.disable(pi, reader(pi));
-		expect(mock.getActiveTools()).toEqual([]);
-	});
-
-	it("disable of an absent member persists the off entry (delta gate), does not revive peers", () => {
-		const { mock, pi } = createEnv();
-		mock.registerTool({ name: "a", description: "" });
-		mock.registerTool({ name: "b", description: "" });
-		defineToolset(
-			pi,
-			makeSpec({ id: "A", persistKey: "k:A", names: new Set(["a"]) }),
-		);
-		defineToolset(
-			pi,
-			makeSpec({ id: "B", persistKey: "k:B", names: new Set(["b"]) }),
-		);
-		mock.setActiveTools(["b"]);
-		const emitSpy = vi.spyOn(mock.events, "emit");
-		const callsBefore = mock.getSetActiveCalls().length;
-		const results = defineToolset(
-			pi,
-			makeSpec({ id: "A", persistKey: "k:A", names: new Set(["a"]) }),
-		).disable(pi, reader(pi));
-		// Intent on (default tier), nothing active: no loadout write, but the
-		// off toggle is a real intent delta — it persists and emits.
-		expect(emitSpy).toHaveBeenCalledWith(TOOLSET_EVENTS.changed, {
-			id: "A",
-			enabled: false,
-		});
-		expect(mock.getEntries("k:A")).toEqual([
-			{ customType: "k:A", data: { enabled: false } },
-		]);
-		expect(results).toEqual([{ id: "A", enabled: false }]);
-		expect(mock.getSetActiveCalls()).toHaveLength(callsBefore);
-		expect(mock.getActiveTools()).toEqual(["b"]);
 		emitSpy.mockRestore();
 	});
 });
@@ -958,10 +856,11 @@ describe("Toolset with empty names", () => {
 });
 
 // ===================================================================
-// Peer composition (canonical test)
+// Peer composition (canonical test) — disable reads getActiveTools,
+// not getAllTools: a disabled toolset's members must never be revived.
 // ===================================================================
 
-describe("Peer composition (canonical test)", () => {
+describe("Peer composition — disable reads getActiveTools, not getAllTools", () => {
 	it("disable(A) does not re-activate B when disable(B) is called", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "a-only", description: "" });
@@ -4622,6 +4521,40 @@ describe("intent-delta gate", () => {
 	function clobberOff(mock: MockPI, names: string[]): void {
 		mock.setActiveTools(names);
 	}
+
+	it("disable of an absent member persists the off entry (delta gate), does not revive peers", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "a", description: "" });
+		mock.registerTool({ name: "b", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({ id: "A", persistKey: "k:A", names: new Set(["a"]) }),
+		);
+		defineToolset(
+			pi,
+			makeSpec({ id: "B", persistKey: "k:B", names: new Set(["b"]) }),
+		);
+		mock.setActiveTools(["b"]);
+		const emitSpy = vi.spyOn(mock.events, "emit");
+		const callsBefore = mock.getSetActiveCalls().length;
+		const results = defineToolset(
+			pi,
+			makeSpec({ id: "A", persistKey: "k:A", names: new Set(["a"]) }),
+		).disable(pi, reader(pi));
+		// Intent on (default tier), nothing active: no loadout write, but the
+		// off toggle is a real intent delta — it persists and emits.
+		expect(emitSpy).toHaveBeenCalledWith(TOOLSET_EVENTS.changed, {
+			id: "A",
+			enabled: false,
+		});
+		expect(mock.getEntries("k:A")).toEqual([
+			{ customType: "k:A", data: { enabled: false } },
+		]);
+		expect(results).toEqual([{ id: "A", enabled: false }]);
+		expect(mock.getSetActiveCalls()).toHaveLength(callsBefore);
+		expect(mock.getActiveTools()).toEqual(["b"]);
+		emitSpy.mockRestore();
+	});
 
 	it("clobber repair: clobbered-active toolset, user toggles off → off entry + emit, no setActiveTools", () => {
 		const { mock, pi } = createEnv();
