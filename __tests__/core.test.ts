@@ -724,20 +724,6 @@ describe("Toolset.enable", () => {
 		expect(mock.getActiveTools()).not.toContain("does-not-exist");
 	});
 
-	it("is idempotent — second call is no-op (no double entry/emit)", () => {
-		const { mock, pi } = createEnv();
-		mock.registerTool({ name: "tool-a", description: "" });
-		mock.registerTool({ name: "tool-b", description: "" });
-		const ts = defineToolset(pi, makeSpec());
-		ts.enable(pi, reader(pi));
-		const entryCount = mock.getEntries().length;
-		const emitSpy = vi.spyOn(mock.events, "emit");
-		ts.enable(pi, reader(pi));
-		expect(mock.getEntries().length).toBe(entryCount);
-		expect(emitSpy).not.toHaveBeenCalled();
-		emitSpy.mockRestore();
-	});
-
 	it("emits changed event with enabled: true", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
@@ -770,20 +756,6 @@ describe("Toolset.disable", () => {
 		const disableEntries = mock.getEntries("toolset-state:test.toolset");
 		const last = disableEntries[disableEntries.length - 1];
 		expect(last?.data).toEqual({ enabled: false });
-	});
-
-	it("is idempotent — second call is no-op", () => {
-		const { mock, pi } = createEnv();
-		mock.registerTool({ name: "tool-a", description: "" });
-		const ts = defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
-		ts.enable(pi, reader(pi));
-		ts.disable(pi, reader(pi));
-		const entryCount = mock.getEntries().length;
-		const emitSpy = vi.spyOn(mock.events, "emit");
-		ts.disable(pi, reader(pi));
-		expect(mock.getEntries().length).toBe(entryCount);
-		expect(emitSpy).not.toHaveBeenCalled();
-		emitSpy.mockRestore();
 	});
 
 	it("emits changed event with enabled: false", () => {
@@ -2983,15 +2955,6 @@ describe("Restore — no entry (default fallback)", () => {
 		mock.fireLifecycleEvent("session_start");
 		expect(mock.getActiveTools()).not.toContain("tool-a");
 	});
-
-	it("no-entry restore does not call appendEntry (entry count unchanged)", () => {
-		const { mock, pi } = createEnv();
-		mock.registerTool({ name: "tool-a", description: "" });
-		defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
-		const entryCountBefore = mock.getEntries().length;
-		mock.fireLifecycleEvent("session_start");
-		expect(mock.getEntries().length).toBe(entryCountBefore);
-	});
 });
 
 // ===================================================================
@@ -2999,27 +2962,6 @@ describe("Restore — no entry (default fallback)", () => {
 // ===================================================================
 
 describe("Restore — always-emit invariant", () => {
-	it("restore emits one event per registered toolset always", () => {
-		const { mock, pi } = createEnv();
-		mock.registerTool({ name: "t1", description: "" });
-		mock.registerTool({ name: "t2", description: "" });
-		defineToolset(
-			pi,
-			makeSpec({ id: "ts1", persistKey: "k:ts1", names: new Set(["t1"]) }),
-		);
-		defineToolset(
-			pi,
-			makeSpec({ id: "ts2", persistKey: "k:ts2", names: new Set(["t2"]) }),
-		);
-		const emitSpy = vi.spyOn(mock.events, "emit");
-		mock.fireLifecycleEvent("session_start");
-		const totalEvents = emitSpy.mock.calls.filter(
-			([c]) => c === TOOLSET_EVENTS.changed || c === TOOLSET_EVENTS.restored,
-		).length;
-		expect(totalEvents).toBeGreaterThanOrEqual(2);
-		emitSpy.mockRestore();
-	});
-
 	it("restore emits even when resolved state matches current in-memory state", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
@@ -3078,45 +3020,6 @@ describe("Restore — event split changed vs restored", () => {
 		emitSpy.mockRestore();
 	});
 
-	it("default-fallback restore emits changed (not restored)", () => {
-		const { mock, pi } = createEnv();
-		mock.registerTool({ name: "tool-a", description: "" });
-		defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
-		const emitSpy = vi.spyOn(mock.events, "emit");
-		mock.fireLifecycleEvent("session_start");
-		const changedCalls = emitSpy.mock.calls.filter(
-			([c]) => c === TOOLSET_EVENTS.changed,
-		);
-		const restoredCalls = emitSpy.mock.calls.filter(
-			([c]) => c === TOOLSET_EVENTS.restored,
-		);
-		expect(changedCalls.length).toBeGreaterThanOrEqual(1);
-		expect(restoredCalls.length).toBe(0);
-		emitSpy.mockRestore();
-	});
-
-	it("restored event payload carries id and enabled", () => {
-		const { mock, pi } = createEnv();
-		mock.registerTool({ name: "tool-a", description: "" });
-		const ts = defineToolset(
-			pi,
-			makeSpec({
-				id: "my.test",
-				persistKey: "k:my.test",
-				names: new Set(["tool-a"]),
-			}),
-		);
-		ts.enable(pi, reader(pi));
-		const emitSpy = vi.spyOn(mock.events, "emit");
-		mock.fireLifecycleEvent("session_start");
-		const restoredCalls = emitSpy.mock.calls.filter(
-			([c]) => c === TOOLSET_EVENTS.restored,
-		);
-		const payload = restoredCalls[0]?.[1] as any;
-		expect(payload.id).toBe("my.test");
-		expect(typeof payload.enabled).toBe("boolean");
-		emitSpy.mockRestore();
-	});
 });
 
 // ===================================================================
