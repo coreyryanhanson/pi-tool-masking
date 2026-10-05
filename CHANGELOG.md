@@ -262,6 +262,10 @@
   per toolset, always. Consumers needing per-tool granularity can
   subscribe to the group event and diff members via
   `getRegisteredToolsets()`.
+- **`ToolsetSpec.description`** — the optional field is gone from the spec
+  shape. Consumers who passed it (e.g. tbox's single-tool orphan
+  pass-through) have migrated; presenters fall back to `label`/`id` as
+  they already did when the field was absent.
 
 ## [1.3.0] - 2026-09-02
 
