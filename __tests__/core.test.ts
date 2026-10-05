@@ -9,13 +9,10 @@ import {
 	TOOLSET_EVENTS,
 	setDefaultResolutionMode,
 	getRegisteredToolsets,
-	parseToolsetDefaults,
 	readMergedToolsetDefaults,
 	readToolsetDefaults,
 	getEffectiveDefault,
 	effectiveEnabled,
-	setSettingsOverrideForTests,
-	setSettingsWriterOverrideForTests,
 	writeToolsetDefaults,
 	clearToolsetDefaults,
 	MalformedSettingsError,
@@ -23,13 +20,12 @@ import {
 	clearAllToolsetEntries,
 	forceToolsetEnabled,
 	AllowlistModeError,
-	planBatch,
-	executeBatchPlan,
 	toggleBatch,
 	readBranchModeState,
 	type BatchOp,
 	type RegistryEntry,
 } from "../index.js";
+import { __internal } from "../index.js";
 import { cleanRegistry, REGISTRY_KEY, catchByName, createEnv, reader } from "./helpers.js";
 
 // ---------------------------------------------------------------------------
@@ -45,7 +41,7 @@ import { cleanRegistry, REGISTRY_KEY, catchByName, createEnv, reader } from "./h
 function setDefaultsOverride(
 	defaults: Record<string, { enabled: boolean }> | null,
 ): void {
-	setSettingsOverrideForTests(
+	__internal.setSettingsOverrideForTests(
 		defaults === null
 			? null
 			: { global: { toolsetDefaults: defaults }, project: {} },
@@ -56,8 +52,8 @@ function setDefaultsOverride(
  *  one branch read + one settings snapshot per call, then plan → execute. */
 function execute(mock: MockPI, ops: BatchOp[]) {
 	const branch = mock.branchReader().getBranch();
-	return executeBatchPlan(
-		planBatch(ops),
+	return __internal.executeBatchPlan(
+		__internal.planBatch(ops),
 		mock as unknown as ExtensionAPI,
 		branch,
 		readMergedToolsetDefaults(),
@@ -90,7 +86,7 @@ beforeEach(() => {
 
 afterEach(() => {
 	setDefaultsOverride(null);
-	setSettingsWriterOverrideForTests(null);
+	__internal.setSettingsWriterOverrideForTests(null);
 });
 
 // ===================================================================
@@ -2315,11 +2311,11 @@ describe("Contradiction detection (planner-level)", () => {
 			{ id: "X", desired: true },
 			{ id: "Y", desired: false },
 		];
-		const err = catchByName(() => planBatch(ops));
+		const err = catchByName(() => __internal.planBatch(ops));
 		expect(err.name).toBe("ContradictionError");
 		// Sanity: the coherent one-op forms against the same graph still plan.
-		expect(planBatch([{ id: "X", desired: true }]).intent.get("X")).toBe(true);
-		expect(planBatch([{ id: "Y", desired: false }]).intent.get("Y")).toBe(false);
+		expect(__internal.planBatch([{ id: "X", desired: true }]).intent.get("X")).toBe(true);
+		expect(__internal.planBatch([{ id: "Y", desired: false }]).intent.get("Y")).toBe(false);
 	});
 
 	it("refuses the explicit-enable-over-implied-off collision (disable Y + enable X, X requires Y)", () => {
@@ -2347,7 +2343,7 @@ describe("Contradiction detection (planner-level)", () => {
 			{ id: "Y", desired: false },
 			{ id: "X", desired: true },
 		];
-		const err = catchByName(() => planBatch(ops));
+		const err = catchByName(() => __internal.planBatch(ops));
 		expect(err.name).toBe("ContradictionError");
 	});
 
@@ -2384,7 +2380,7 @@ describe("Contradiction detection (planner-level)", () => {
 			{ id: "A", desired: true },
 			{ id: "C", desired: false },
 		];
-		const err = catchByName(() => planBatch(ops));
+		const err = catchByName(() => __internal.planBatch(ops));
 		expect(err.name).toBe("ContradictionError");
 	});
 
@@ -2399,7 +2395,7 @@ describe("Contradiction detection (planner-level)", () => {
 			{ id: "X", desired: true },
 			{ id: "X", desired: false },
 		];
-		const err = catchByName(() => planBatch(ops));
+		const err = catchByName(() => __internal.planBatch(ops));
 		expect(err.name).toBe("ContradictionError");
 	});
 
@@ -2429,7 +2425,7 @@ describe("Contradiction detection (planner-level)", () => {
 			{ id: "D", desired: true },
 			{ id: "D", desired: false },
 		];
-		const err = catchByName(() => planBatch(ops));
+		const err = catchByName(() => __internal.planBatch(ops));
 		expect(err.name).toBe("ContradictionError");
 	});
 
@@ -2440,7 +2436,7 @@ describe("Contradiction detection (planner-level)", () => {
 			pi,
 			makeSpec({ id: "X", persistKey: "k:X", names: new Set(["x-tool"]) }),
 		);
-		const plan = planBatch([
+		const plan = __internal.planBatch([
 			{ id: "X", desired: true },
 			{ id: "X", desired: true },
 		]);
@@ -2468,7 +2464,7 @@ describe("Contradiction detection (planner-level)", () => {
 		// An off toolset imposes no requirement on its own dependencies, so
 		// {Y: true, Z: false} is a legal resolution — the explicit enable of
 		// Y is not clobbered by disabling its dependent.
-		const plan = planBatch([
+		const plan = __internal.planBatch([
 			{ id: "Y", desired: true },
 			{ id: "Z", desired: false },
 		]);
@@ -2495,7 +2491,7 @@ describe("Contradiction detection (planner-level)", () => {
 		);
 		// Disabling A must not drag its requirement B off with it — B stays
 		// explicitly on and the batch resolves {A: false, B: true}.
-		const plan = planBatch([
+		const plan = __internal.planBatch([
 			{ id: "A", desired: false },
 			{ id: "B", desired: true },
 		]);
@@ -2965,22 +2961,22 @@ describe("Restore independence — does not cascade", () => {
 });
 
 // ===================================================================
-// Settings.json reader — parseToolsetDefaults
+// Settings.json reader — __internal.parseToolsetDefaults
 // ===================================================================
 
-describe("parseToolsetDefaults", () => {
+describe("__internal.parseToolsetDefaults", () => {
 	it("absent toolsetDefaults returns {}", () => {
-		expect(parseToolsetDefaults({})).toEqual({});
+		expect(__internal.parseToolsetDefaults({})).toEqual({});
 	});
 
 	it("non-object toolsetDefaults (string, array) returns {}", () => {
-		expect(parseToolsetDefaults({ toolsetDefaults: "" })).toEqual({});
-		expect(parseToolsetDefaults({ toolsetDefaults: [] })).toEqual({});
+		expect(__internal.parseToolsetDefaults({ toolsetDefaults: "" })).toEqual({});
+		expect(__internal.parseToolsetDefaults({ toolsetDefaults: [] })).toEqual({});
 	});
 
 	it("drops entries with non-boolean enabled values (string, number)", () => {
 		expect(
-			parseToolsetDefaults({
+			__internal.parseToolsetDefaults({
 				toolsetDefaults: { "k:x": { enabled: "true" }, "k:y": { enabled: 1 } },
 			}),
 		).toEqual({});
@@ -2992,7 +2988,7 @@ describe("parseToolsetDefaults", () => {
 				"k:extra": { enabled: true, extra: 1 },
 			},
 		};
-		expect(parseToolsetDefaults(input)).toEqual({
+		expect(__internal.parseToolsetDefaults(input)).toEqual({
 			"k:extra": { enabled: true },
 		});
 	});
@@ -3004,7 +3000,7 @@ describe("parseToolsetDefaults", () => {
 				"k:b": { enabled: false },
 			},
 		};
-		expect(parseToolsetDefaults(input)).toEqual({
+		expect(__internal.parseToolsetDefaults(input)).toEqual({
 			"k:a": { enabled: true },
 			"k:b": { enabled: false },
 		});
@@ -3046,11 +3042,11 @@ describe("readMergedToolsetDefaults / readToolsetDefaults", () => {
 
 describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 	beforeEach(() => {
-		setSettingsWriterOverrideForTests({ global: {}, project: {} });
+		__internal.setSettingsWriterOverrideForTests({ global: {}, project: {} });
 	});
 
 	afterEach(() => {
-		setSettingsWriterOverrideForTests(null);
+		__internal.setSettingsWriterOverrideForTests(null);
 	});
 
 	it("writeToolsetDefaults merges entries into scope, preserves existing keys", () => {
@@ -3058,7 +3054,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 			global: { "toolset-state:z": { enabled: true } },
 			project: {},
 		};
-		setSettingsWriterOverrideForTests(state);
+		__internal.setSettingsWriterOverrideForTests(state);
 		try {
 			writeToolsetDefaults(
 				{
@@ -3074,13 +3070,13 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 			});
 			expect(state.project).toEqual({});
 		} finally {
-			setSettingsWriterOverrideForTests(null);
+			__internal.setSettingsWriterOverrideForTests(null);
 		}
 	});
 
 	it("writing to project does not touch global, and vice versa", () => {
 		const state = { global: {}, project: {} };
-		setSettingsWriterOverrideForTests(state);
+		__internal.setSettingsWriterOverrideForTests(state);
 		try {
 			writeToolsetDefaults({ "toolset-state:x": { enabled: true } }, "project");
 			expect(state.global).toEqual({});
@@ -3090,7 +3086,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 			expect(state.global).toEqual({ "toolset-state:y": { enabled: false } });
 			expect(state.project).toEqual({ "toolset-state:x": { enabled: true } });
 		} finally {
-			setSettingsWriterOverrideForTests(null);
+			__internal.setSettingsWriterOverrideForTests(null);
 		}
 	});
 
@@ -3102,7 +3098,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 			},
 			project: {},
 		};
-		setSettingsWriterOverrideForTests(state);
+		__internal.setSettingsWriterOverrideForTests(state);
 		try {
 			expect(clearToolsetDefaults("global")).toEqual(
 				expect.stringContaining("settings.json"),
@@ -3113,7 +3109,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 
 			expect(clearToolsetDefaults("project")).toBeNull();
 		} finally {
-			setSettingsWriterOverrideForTests(null);
+			__internal.setSettingsWriterOverrideForTests(null);
 		}
 	});
 
@@ -3122,7 +3118,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 			global: { "toolset-state:writer": { enabled: true } },
 			project: {},
 		};
-		setSettingsWriterOverrideForTests(writerState);
+		__internal.setSettingsWriterOverrideForTests(writerState);
 		setDefaultsOverride({ "toolset-state:reader": { enabled: false } });
 		try {
 			// Reader returns the reader override, not writer-captured state
@@ -3130,7 +3126,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 			expect(merged["toolset-state:reader"]).toEqual({ enabled: false });
 			expect(merged["toolset-state:writer"]).toBeUndefined();
 		} finally {
-			setSettingsWriterOverrideForTests(null);
+			__internal.setSettingsWriterOverrideForTests(null);
 			setDefaultsOverride({});
 		}
 	});
@@ -3142,7 +3138,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 		let origAgentDir: string | undefined;
 
 		beforeEach(() => {
-			setSettingsWriterOverrideForTests(null);
+			__internal.setSettingsWriterOverrideForTests(null);
 			setDefaultsOverride(null);
 
 			tmpDir = mkdtempSync(join(tmpdir(), "pi-tool-masking-roundtrip-"));
@@ -3162,7 +3158,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 			} else {
 				process.env.PI_CODING_AGENT_DIR = origAgentDir;
 			}
-			setSettingsWriterOverrideForTests(null);
+			__internal.setSettingsWriterOverrideForTests(null);
 			setDefaultsOverride({});
 		});
 
@@ -3255,7 +3251,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 
 		beforeEach(() => {
 			// Clear both overrides so reads and writes hit disk
-			setSettingsWriterOverrideForTests(null);
+			__internal.setSettingsWriterOverrideForTests(null);
 			setDefaultsOverride(null);
 
 			tmpDir = mkdtempSync(join(tmpdir(), "pi-tool-masking-writer-"));
@@ -3266,7 +3262,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 
 		afterEach(() => {
 			process.chdir(origCwd);
-			setSettingsWriterOverrideForTests(null);
+			__internal.setSettingsWriterOverrideForTests(null);
 			setDefaultsOverride({});
 		});
 
@@ -3342,7 +3338,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 		let origCwd: string;
 
 		beforeEach(() => {
-			setSettingsWriterOverrideForTests(null);
+			__internal.setSettingsWriterOverrideForTests(null);
 			setDefaultsOverride(null);
 
 			tmpDir = mkdtempSync(join(tmpdir(), "pi-tool-masking-writer-"));
@@ -3370,7 +3366,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 
 		afterEach(() => {
 			process.chdir(origCwd);
-			setSettingsWriterOverrideForTests(null);
+			__internal.setSettingsWriterOverrideForTests(null);
 			setDefaultsOverride({});
 		});
 
@@ -3424,7 +3420,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 		let origCwd: string;
 
 		beforeEach(() => {
-			setSettingsWriterOverrideForTests(null);
+			__internal.setSettingsWriterOverrideForTests(null);
 			setDefaultsOverride(null);
 
 			tmpDir = mkdtempSync(join(tmpdir(), "pi-tool-masking-writer-"));
@@ -3435,7 +3431,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 
 		afterEach(() => {
 			process.chdir(origCwd);
-			setSettingsWriterOverrideForTests(null);
+			__internal.setSettingsWriterOverrideForTests(null);
 			setDefaultsOverride({});
 		});
 

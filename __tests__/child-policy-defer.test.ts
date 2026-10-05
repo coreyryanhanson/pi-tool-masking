@@ -4,8 +4,6 @@ import { MockPI } from "./mock-pi.js";
 import {
 	defineToolset,
 	TOOLSET_EVENTS,
-	setSettingsOverrideForTests,
-	setSettingsWriterOverrideForTests,
 	setDefaultResolutionMode,
 	writeToolsetDefaults,
 	clearToolsetDefaults,
@@ -14,6 +12,7 @@ import {
 	forceToolsetEnabled,
 	isDeferredChild,
 } from "../index.js";
+import { __internal } from "../index.js";
 import { cleanGlobalKeys, cleanRegistry, REGISTRY_KEY, catchByName, createEnv, reader } from "./helpers.js";
 
 // ---------------------------------------------------------------------------
@@ -127,7 +126,7 @@ function settings(
 	} else if (opts.emptyProjectPiToolMasking) {
 		project["piToolMasking"] = {};
 	}
-	setSettingsOverrideForTests({ global, project });
+	__internal.setSettingsOverrideForTests({ global, project });
 }
 
 function collectMaskEvents(mock: MockPI): () => { type: string; id: string }[] {
@@ -153,12 +152,12 @@ let savedDeferVar: string | undefined;
 beforeEach(() => {
 	savedDeferVar = process.env[DEFER_ENV];
 	cleanRegistry();
-	setSettingsOverrideForTests({ global: {}, project: {} });
+	__internal.setSettingsOverrideForTests({ global: {}, project: {} });
 });
 
 afterEach(() => {
-	setSettingsOverrideForTests(null);
-	setSettingsWriterOverrideForTests(null);
+	__internal.setSettingsOverrideForTests(null);
+	__internal.setSettingsWriterOverrideForTests(null);
 	if (savedDeferVar === undefined) delete process.env[DEFER_ENV];
 	else process.env[DEFER_ENV] = savedDeferVar;
 	vi.restoreAllMocks();
@@ -692,7 +691,7 @@ describe("defer gate — toggle boundary", () => {
 			global: {},
 			project: {},
 		};
-		setSettingsWriterOverrideForTests(writerState as any);
+		__internal.setSettingsWriterOverrideForTests(writerState as any);
 
 		writeToolsetDefaults(
 			{ "toolset-state:lean.web": { enabled: false } },

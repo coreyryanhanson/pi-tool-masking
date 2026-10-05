@@ -789,9 +789,9 @@ export class ContradictionError extends Error {
  *  re-record its claim even over an implied value, or a second conflicting
  *  explicit op would overwrite silently instead of throwing.
  *
- * @internal — exported for planner-level tests; not a public API commitment.
+ * @internal — planner-level tests only; not a public API commitment.
  */
-export function planBatch(ops: readonly BatchOp[]): BatchPlan {
+function planBatch(ops: readonly BatchOp[]): BatchPlan {
 	const registry = getRegistry();
 	const intent = new Map<string, boolean>();
 	const explicitIntent = new Map<string, boolean>();
@@ -893,9 +893,9 @@ export function planBatch(ops: readonly BatchOp[]): BatchPlan {
  *  intent already matched is neither repaired nor reported — it wins at
  *  the next restore by last-writer-wins.
  *
- * @internal — exported for executor-level tests; not a public API commitment.
+ * @internal — executor-level tests only; not a public API commitment.
  */
-export function executeBatchPlan(
+function executeBatchPlan(
 	plan: BatchPlan,
 	pi: ExtensionAPI,
 	branch: readonly SessionEntry[],
@@ -1323,8 +1323,8 @@ export function forceToolsetEnabled(
 
 /** On-disk settings shape: `toolsetDefaults[persistKey] = { enabled }`.
  *  Exported because it appears in the signatures of exported functions
- *  (`parseToolsetDefaults`, `readMergedToolsetDefaults`,
- *  `writeToolsetDefaults`, `getEffectiveDefault`, `effectiveEnabled`). */
+ *  (`readMergedToolsetDefaults`, `writeToolsetDefaults`,
+ *  `getEffectiveDefault`, `effectiveEnabled`). */
 export type ToolsetDefaultsMap = Record<string, { enabled: boolean }>;
 
 function settingsPath(scope: "global" | "project"): string {
@@ -1374,7 +1374,7 @@ let _settingsOverride: {
  *
  * @internal
  */
-export function setSettingsOverrideForTests(
+function setSettingsOverrideForTests(
 	override: {
 		global: ParsedSettings | undefined;
 		project: ParsedSettings | undefined;
@@ -1403,7 +1403,7 @@ function readScopeSettings(scope: "global" | "project"): ParsedSettings {
  *
  * @internal
  */
-export function parseToolsetDefaults(json: unknown): ToolsetDefaultsMap {
+function parseToolsetDefaults(json: unknown): ToolsetDefaultsMap {
 	if (!json || typeof json !== "object" || Array.isArray(json)) return {};
 	const td = (json as Record<string, unknown>)["toolsetDefaults"];
 	if (!td || typeof td !== "object" || Array.isArray(td)) return {};
@@ -1443,7 +1443,7 @@ export function readMergedToolsetDefaults(): ToolsetDefaultsMap {
  * Returns the raw `toolsetDefaults` block parsed from that scope's file,
  * without merging. Missing/unreadable/malformed files return `{}`.
  *
- * When `setSettingsOverrideForTests` has set an override, returns only this
+ * When `__internal.setSettingsOverrideForTests` has set an override, returns only this
  * scope's slice (`parseToolsetDefaults(override[scope])`, `{}` when the
  * scope is absent) — per-scope attribution, not a both-scopes copy.
  *
@@ -1532,12 +1532,12 @@ let _settingsWriterOverride: {
 /**
  * Capture toolset-defaults writes in-memory instead of hitting disk. Pass
  * `null` to restore the disk-write path. Independent of
- * `setSettingsOverrideForTests` — both seams must be cleared (`null`) for a
+ * `__internal.setSettingsOverrideForTests` — both seams must be cleared (`null`) for a
  * true round-trip that hits disk on both read and write.
  *
  * @internal
  */
-export function setSettingsWriterOverrideForTests(
+function setSettingsWriterOverrideForTests(
 	state: {
 		global: ToolsetDefaultsMap;
 		project: ToolsetDefaultsMap;
@@ -1692,3 +1692,19 @@ export class MalformedSettingsError extends Error {
 		this.name = "MalformedSettingsError";
 	}
 }
+
+/**
+ * Test-only internals, grouped so the un-exported status is structural: if
+ * you reach for `__internal.` you are off the supported surface. The members
+ * may change or vanish between any releases (majors included); downstream
+ * test suites use them at their own risk.
+ *
+ * @internal
+ */
+export const __internal = {
+	planBatch,
+	executeBatchPlan,
+	parseToolsetDefaults,
+	setSettingsOverrideForTests,
+	setSettingsWriterOverrideForTests,
+};
