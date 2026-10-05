@@ -1048,6 +1048,36 @@ describe("Allowlist resolution mode", () => {
 		expect(mock.getSetActiveCalls()).toHaveLength(callsBefore);
 	});
 
+	it("allowlist restore emits restored for every registered toolset with the allowlist-decided payload", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		mock.registerTool({ name: "tool-b", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({ id: "a", persistKey: "k:a", names: new Set(["tool-a"]) }),
+		);
+		defineToolset(
+			pi,
+			makeSpec({ id: "b", persistKey: "k:b", names: new Set(["tool-b"]) }),
+		);
+
+		setDefaultResolutionMode(pi, "allowlist", ["a"]);
+		mock.setActiveTools(["tool-a", "tool-b"]);
+
+		const emitSpy = vi.spyOn(mock.events, "emit");
+		mock.fireLifecycleEvent("session_start");
+
+		const restoredCalls = emitSpy.mock.calls.filter(
+			([c]) => c === TOOLSET_EVENTS.restored,
+		);
+		expect(restoredCalls).toHaveLength(2);
+		expect(restoredCalls.map(([, payload]) => payload)).toEqual([
+			{ id: "a", enabled: true },
+			{ id: "b", enabled: false },
+		]);
+		emitSpy.mockRestore();
+	});
+
 	it("non-toolset tools preserved during allowlist restore", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
