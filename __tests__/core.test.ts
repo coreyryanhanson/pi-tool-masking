@@ -1,6 +1,4 @@
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { describe, it, expect, vi } from "vitest";
 import { MockPI } from "./mock-pi.js";
@@ -26,26 +24,27 @@ import {
 	type RegistryEntry,
 } from "../index.js";
 import { __internal } from "../index.js";
-import { cleanRegistry, REGISTRY_KEY, catchByName, createEnv, reader } from "./helpers.js";
+import { cleanRegistry, REGISTRY_KEY, catchByName, createEnv, reader, useTempSettingsDir } from "./helpers.js";
 
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
 
+/** Temp settings dirs, file-wide: every test is isolated from the real ~/.pi. */
+const settings = useTempSettingsDir();
+
 /**
- * Local wrapper keeping the historical flat defaults shape at call sites:
- * wraps the map into the per-scope seam shape
- * (`{ global: { toolsetDefaults }, project: {} }`). `null` passes through
- * (seam off).
+ * Seed the temp global settings file with a flat defaults map (`null`
+ * removes the file). One wrapper serves every reader-tier test call site.
  */
 function setDefaultsOverride(
 	defaults: Record<string, { enabled: boolean }> | null,
 ): void {
-	__internal.setSettingsOverrideForTests(
-		defaults === null
-			? null
-			: { global: { toolsetDefaults: defaults }, project: {} },
-	);
+	if (defaults === null) {
+		rmSync(settings.globalSettings, { force: true });
+		return;
+	}
+	settings.writeJson(settings.globalSettings, { toolsetDefaults: defaults });
 }
 
 /** Executor-level plumbing shared by planner/executor describe blocks:
@@ -86,7 +85,6 @@ beforeEach(() => {
 
 afterEach(() => {
 	setDefaultsOverride(null);
-	__internal.setSettingsWriterOverrideForTests(null);
 });
 
 // ===================================================================
@@ -3042,136 +3040,70 @@ describe("readMergedToolsetDefaults / readToolsetDefaults", () => {
 
 describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 	beforeEach(() => {
-		__internal.setSettingsWriterOverrideForTests({ global: {}, project: {} });
-	});
-
-	afterEach(() => {
-		__internal.setSettingsWriterOverrideForTests(null);
+		rmSync(settings.globalSettings, { force: true });
+		rmSync(settings.projectSettings, { force: true });
 	});
 
 	it("writeToolsetDefaults merges entries into scope, preserves existing keys", () => {
-		const state = {
-			global: { "toolset-state:z": { enabled: true } },
-			project: {},
-		};
-		__internal.setSettingsWriterOverrideForTests(state);
-		try {
-			writeToolsetDefaults(
-				{
-					"toolset-state:x": { enabled: true },
-					"toolset-state:y": { enabled: false },
-				},
-				"global",
-			);
-			expect(state.global).toEqual({
-				"toolset-state:z": { enabled: true },
-				"toolset-state:x": { enabled: true },
-				"toolset-state:y": { enabled: false },
-			});
-			expect(state.project).toEqual({});
-		} finally {
-			__internal.setSettingsWriterOverrideForTests(null);
-		}
-	});
-
-	it("writing to project does not touch global, and vice versa", () => {
-		const state = { global: {}, project: {} };
-		__internal.setSettingsWriterOverrideForTests(state);
-		try {
-			writeToolsetDefaults({ "toolset-state:x": { enabled: true } }, "project");
-			expect(state.global).toEqual({});
-			expect(state.project).toEqual({ "toolset-state:x": { enabled: true } });
-
-			writeToolsetDefaults({ "toolset-state:y": { enabled: false } }, "global");
-			expect(state.global).toEqual({ "toolset-state:y": { enabled: false } });
-			expect(state.project).toEqual({ "toolset-state:x": { enabled: true } });
-		} finally {
-			__internal.setSettingsWriterOverrideForTests(null);
-		}
-	});
-
-	it("clearToolsetDefaults empties scope and returns path (null when empty)", () => {
-		const state = {
-			global: {
+		settings.writeJson(settings.globalSettings, {
+			toolsetDefaults: { "toolset-state:z": { enabled: true } },
+		});
+		writeToolsetDefaults(
+			{
 				"toolset-state:x": { enabled: true },
 				"toolset-state:y": { enabled: false },
 			},
-			project: {},
-		};
-		__internal.setSettingsWriterOverrideForTests(state);
-		try {
-			expect(clearToolsetDefaults("global")).toEqual(
-				expect.stringContaining("settings.json"),
-			);
-			expect(state.global).toEqual({});
-
-			expect(clearToolsetDefaults("global")).toBeNull();
-
-			expect(clearToolsetDefaults("project")).toBeNull();
-		} finally {
-			__internal.setSettingsWriterOverrideForTests(null);
-		}
+			"global",
+		);
+		expect(readToolsetDefaults("global")).toEqual({
+			"toolset-state:z": { enabled: true },
+			"toolset-state:x": { enabled: true },
+			"toolset-state:y": { enabled: false },
+		});
+		expect(readToolsetDefaults("project")).toEqual({});
 	});
 
-	it("writer override and reader override are independent", () => {
-		const writerState = {
-			global: { "toolset-state:writer": { enabled: true } },
-			project: {},
-		};
-		__internal.setSettingsWriterOverrideForTests(writerState);
-		setDefaultsOverride({ "toolset-state:reader": { enabled: false } });
-		try {
-			// Reader returns the reader override, not writer-captured state
-			const merged = readMergedToolsetDefaults();
-			expect(merged["toolset-state:reader"]).toEqual({ enabled: false });
-			expect(merged["toolset-state:writer"]).toBeUndefined();
-		} finally {
-			__internal.setSettingsWriterOverrideForTests(null);
-			setDefaultsOverride({});
-		}
+	it("writing to project does not touch global, and vice versa", () => {
+		writeToolsetDefaults({ "toolset-state:x": { enabled: true } }, "project");
+		expect(readToolsetDefaults("global")).toEqual({});
+		expect(readToolsetDefaults("project")).toEqual({
+			"toolset-state:x": { enabled: true },
+		});
+
+		writeToolsetDefaults({ "toolset-state:y": { enabled: false } }, "global");
+		expect(readToolsetDefaults("global")).toEqual({
+			"toolset-state:y": { enabled: false },
+		});
+		expect(readToolsetDefaults("project")).toEqual({
+			"toolset-state:x": { enabled: true },
+		});
+	});
+
+	it("clearToolsetDefaults empties scope and returns path (null when empty)", () => {
+		writeToolsetDefaults(
+			{
+				"toolset-state:x": { enabled: true },
+				"toolset-state:y": { enabled: false },
+			},
+			"global",
+		);
+		expect(clearToolsetDefaults("global")).toEqual(
+			expect.stringContaining("settings.json"),
+		);
+		expect(readToolsetDefaults("global")).toEqual({});
+
+		expect(clearToolsetDefaults("global")).toBeNull();
+
+		expect(clearToolsetDefaults("project")).toBeNull();
 	});
 
 	describe("disk round-trip (writeToolsetDefaults + readMergedToolsetDefaults)", () => {
-		let tmpDir: string;
-		let agentDir: string;
-		let origCwd: string;
-		let origAgentDir: string | undefined;
-
-		beforeEach(() => {
-			__internal.setSettingsWriterOverrideForTests(null);
-			setDefaultsOverride(null);
-
-			tmpDir = mkdtempSync(join(tmpdir(), "pi-tool-masking-roundtrip-"));
-			agentDir = join(tmpDir, "agent");
-			mkdirSync(join(tmpDir, ".pi"), { recursive: true });
-			mkdirSync(agentDir, { recursive: true });
-			origCwd = process.cwd();
-			origAgentDir = process.env.PI_CODING_AGENT_DIR;
-			process.env.PI_CODING_AGENT_DIR = agentDir;
-			process.chdir(tmpDir);
-		});
-
-		afterEach(() => {
-			process.chdir(origCwd);
-			if (origAgentDir === undefined) {
-				delete process.env.PI_CODING_AGENT_DIR;
-			} else {
-				process.env.PI_CODING_AGENT_DIR = origAgentDir;
-			}
-			__internal.setSettingsWriterOverrideForTests(null);
-			setDefaultsOverride({});
-		});
-
 		it("write→readMergedToolsetDefaults round-trip (project overrides global)", () => {
-			const globalPath = join(agentDir, "settings.json");
-			writeFileSync(
-				globalPath,
-				JSON.stringify({
-					toolsetDefaults: {
-						"toolset-state:shared": { enabled: false },
-					},
-				}) + "\n",
-			);
+			settings.writeJson(settings.globalSettings, {
+				toolsetDefaults: {
+					"toolset-state:shared": { enabled: false },
+				},
+			});
 
 			writeToolsetDefaults({ "toolset-state:new": { enabled: true } }, "project");
 			writeToolsetDefaults(
@@ -3187,15 +3119,11 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 
 		it("readToolsetDefaults attributes to the correct scope", () => {
 			// Global has an entry; project has no file yet
-			const globalPath = join(agentDir, "settings.json");
-			writeFileSync(
-				globalPath,
-				JSON.stringify({
-					toolsetDefaults: {
-						"toolset-state:x": { enabled: true },
-					},
-				}) + "\n",
-			);
+			settings.writeJson(settings.globalSettings, {
+				toolsetDefaults: {
+					"toolset-state:x": { enabled: true },
+				},
+			});
 
 			// project doesn't exist yet — readToolsetDefaults returns {}
 			expect(readToolsetDefaults("project")).toEqual({});
@@ -3221,8 +3149,8 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 		});
 
 		it("readers return {} on malformed files, never throw (both scopes)", () => {
-			writeFileSync(join(agentDir, "settings.json"), "{not valid");
-			writeFileSync(join(tmpDir, ".pi", "settings.json"), "[]");
+			writeFileSync(settings.globalSettings, "{not valid");
+			writeFileSync(settings.projectSettings, "[]");
 
 			expect(readToolsetDefaults("global")).toEqual({});
 			expect(readToolsetDefaults("project")).toEqual({});
@@ -3230,13 +3158,10 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 		});
 
 		it("a malformed project file does not poison global entries in the merge", () => {
-			writeFileSync(
-				join(agentDir, "settings.json"),
-				JSON.stringify({
-					toolsetDefaults: { "toolset-state:g": { enabled: true } },
-				}),
-			);
-			writeFileSync(join(tmpDir, ".pi", "settings.json"), "{not valid");
+			settings.writeJson(settings.globalSettings, {
+				toolsetDefaults: { "toolset-state:g": { enabled: true } },
+			});
+			writeFileSync(settings.projectSettings, "{not valid");
 
 			expect(readToolsetDefaults("project")).toEqual({});
 			expect(readMergedToolsetDefaults()).toEqual({
@@ -3246,85 +3171,60 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 	});
 
 	describe("malformed-file guard (disk)", () => {
-		let tmpDir: string;
-		let origCwd: string;
-
-		beforeEach(() => {
-			// Clear both overrides so reads and writes hit disk
-			__internal.setSettingsWriterOverrideForTests(null);
-			setDefaultsOverride(null);
-
-			tmpDir = mkdtempSync(join(tmpdir(), "pi-tool-masking-writer-"));
-			mkdirSync(join(tmpDir, ".pi"), { recursive: true });
-			origCwd = process.cwd();
-			process.chdir(tmpDir);
-		});
-
-		afterEach(() => {
-			process.chdir(origCwd);
-			__internal.setSettingsWriterOverrideForTests(null);
-			setDefaultsOverride({});
-		});
-
 		it("writeToolsetDefaults throws on malformed JSON", () => {
-			const settingsPath = join(tmpDir, ".pi", "settings.json");
-			writeFileSync(settingsPath, "{not valid");
-			const before = readFileSync(settingsPath, "utf-8");
+			writeFileSync(settings.projectSettings, "{not valid");
+			const before = readFileSync(settings.projectSettings, "utf-8");
 
 			expect(() =>
 				writeToolsetDefaults({ "toolset-state:x": { enabled: true } }, "project"),
 			).toThrow(/malformed settings.json/);
 
 			// File unchanged
-			expect(readFileSync(settingsPath, "utf-8")).toBe(before);
+			expect(readFileSync(settings.projectSettings, "utf-8")).toBe(before);
 		});
 
 		it("writeToolsetDefaults throws MalformedSettingsError on non-object (array)", () => {
-			const settingsPath = join(tmpDir, ".pi", "settings.json");
-			writeFileSync(settingsPath, "[]");
-			const before = readFileSync(settingsPath, "utf-8");
+			writeFileSync(settings.projectSettings, "[]");
+			const before = readFileSync(settings.projectSettings, "utf-8");
 
 			expect(() =>
 				writeToolsetDefaults({ "toolset-state:x": { enabled: true } }, "project"),
 			).toThrow(MalformedSettingsError);
 
-			expect(readFileSync(settingsPath, "utf-8")).toBe(before);
+			expect(readFileSync(settings.projectSettings, "utf-8")).toBe(before);
 		});
 
 		it("writeToolsetDefaults throws on non-object (null)", () => {
-			const settingsPath = join(tmpDir, ".pi", "settings.json");
-			writeFileSync(settingsPath, "null");
-			const before = readFileSync(settingsPath, "utf-8");
+			writeFileSync(settings.projectSettings, "null");
+			const before = readFileSync(settings.projectSettings, "utf-8");
 
 			expect(() =>
 				writeToolsetDefaults({ "toolset-state:x": { enabled: true } }, "project"),
 			).toThrow(/non-object settings.json/);
 
-			expect(readFileSync(settingsPath, "utf-8")).toBe(before);
+			expect(readFileSync(settings.projectSettings, "utf-8")).toBe(before);
 		});
 
 		it("clearToolsetDefaults throws on malformed JSON", () => {
-			const settingsPath = join(tmpDir, ".pi", "settings.json");
-			writeFileSync(settingsPath, "{not valid");
-			const before = readFileSync(settingsPath, "utf-8");
+			writeFileSync(settings.projectSettings, "{not valid");
+			const before = readFileSync(settings.projectSettings, "utf-8");
 
 			expect(() => clearToolsetDefaults("project")).toThrow(
 				/malformed settings.json/,
 			);
 
-			expect(readFileSync(settingsPath, "utf-8")).toBe(before);
+			expect(readFileSync(settings.projectSettings, "utf-8")).toBe(before);
 		});
 
 		it("clearToolsetDefaults throws on non-object (array)", () => {
-			const settingsPath = join(tmpDir, ".pi", "settings.json");
-			writeFileSync(settingsPath, "[]");
-			const before = readFileSync(settingsPath, "utf-8");
+			writeFileSync(settings.projectSettings, "[]");
+			const before = readFileSync(settings.projectSettings, "utf-8");
 
 			expect(() => clearToolsetDefaults("project")).toThrow(
 				/non-object settings.json/,
 			);
 
-			expect(readFileSync(settingsPath, "utf-8")).toBe(before);
+			expect(readFileSync(settings.projectSettings, "utf-8")).toBe(before);
 		});
 
 		it("clearToolsetDefaults returns null for missing file", () => {
@@ -3334,48 +3234,21 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 	});
 
 	describe("top-level-key preservation (disk)", () => {
-		let tmpDir: string;
-		let origCwd: string;
-
 		beforeEach(() => {
-			__internal.setSettingsWriterOverrideForTests(null);
-			setDefaultsOverride(null);
-
-			tmpDir = mkdtempSync(join(tmpdir(), "pi-tool-masking-writer-"));
-			mkdirSync(join(tmpDir, ".pi"), { recursive: true });
-			origCwd = process.cwd();
-			process.chdir(tmpDir);
-
 			// Seed a settings file with non-toolsetDefaults keys
-			const settingsPath = join(tmpDir, ".pi", "settings.json");
-			writeFileSync(
-				settingsPath,
-				JSON.stringify(
-					{
-						provider: "mistral",
-						theme: "x",
-						toolsetDefaults: {
-							"toolset-state:old": { enabled: false },
-						},
-					},
-					null,
-					2,
-				) + "\n",
-			);
-		});
-
-		afterEach(() => {
-			process.chdir(origCwd);
-			__internal.setSettingsWriterOverrideForTests(null);
-			setDefaultsOverride({});
+			settings.writeJson(settings.projectSettings, {
+				provider: "mistral",
+				theme: "x",
+				toolsetDefaults: {
+					"toolset-state:old": { enabled: false },
+				},
+			});
 		});
 
 		it("write preserves provider, theme, existing td entries; adds new entry", () => {
-			const settingsPath = join(tmpDir, ".pi", "settings.json");
-
 			writeToolsetDefaults({ "toolset-state:new": { enabled: true } }, "project");
 
-			const raw = JSON.parse(readFileSync(settingsPath, "utf-8"));
+			const raw = JSON.parse(readFileSync(settings.projectSettings, "utf-8"));
 			expect(raw.provider).toBe("mistral");
 			expect(raw.theme).toBe("x");
 			expect(raw.toolsetDefaults["toolset-state:old"]).toEqual({
@@ -3387,12 +3260,10 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 		});
 
 		it("clearToolsetDefaults removes the wrapper key, preserves other keys", () => {
-			const settingsPath = join(tmpDir, ".pi", "settings.json");
-
 			const result = clearToolsetDefaults("project");
-			expect(result).toBe(settingsPath);
+			expect(result).toBe(settings.projectSettings);
 
-			const raw = JSON.parse(readFileSync(settingsPath, "utf-8"));
+			const raw = JSON.parse(readFileSync(settings.projectSettings, "utf-8"));
 			expect(raw.provider).toBe("mistral");
 			expect(raw.theme).toBe("x");
 			expect(raw.toolsetDefaults).toBeUndefined();
@@ -3404,9 +3275,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 			expect(clearToolsetDefaults("project")).toBeNull();
 
 			// Other keys still intact
-			const raw = JSON.parse(
-				readFileSync(join(tmpDir, ".pi", "settings.json"), "utf-8"),
-			);
+			const raw = JSON.parse(readFileSync(settings.projectSettings, "utf-8"));
 			expect(raw.provider).toBe("mistral");
 		});
 	});
@@ -3416,27 +3285,8 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 	// writer serializes with JSON.stringify(_, null, 2), so a skip preserves
 	// our compact seed bytes while a real write would reformat to indented.
 	describe("no-op writes skip disk reformat", () => {
-		let tmpDir: string;
-		let origCwd: string;
-
-		beforeEach(() => {
-			__internal.setSettingsWriterOverrideForTests(null);
-			setDefaultsOverride(null);
-
-			tmpDir = mkdtempSync(join(tmpdir(), "pi-tool-masking-writer-"));
-			mkdirSync(join(tmpDir, ".pi"), { recursive: true });
-			origCwd = process.cwd();
-			process.chdir(tmpDir);
-		});
-
-		afterEach(() => {
-			process.chdir(origCwd);
-			__internal.setSettingsWriterOverrideForTests(null);
-			setDefaultsOverride({});
-		});
-
 		it("writeToolsetDefaults with unchanged values does not rewrite", () => {
-			const settingsPath = join(tmpDir, ".pi", "settings.json");
+			const settingsPath = settings.projectSettings;
 			// Compact seed (writer would emit 2-space indented + trailing \n)
 			const seed = '{"toolsetDefaults":{"toolset-state:x":{"enabled":true}}}';
 			writeFileSync(settingsPath, seed);
@@ -3447,7 +3297,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 		});
 
 		it("writeToolsetDefaults with {} entries does not rewrite", () => {
-			const settingsPath = join(tmpDir, ".pi", "settings.json");
+			const settingsPath = settings.projectSettings;
 			const seed = '{"toolsetDefaults":{"toolset-state:x":{"enabled":true}}}';
 			writeFileSync(settingsPath, seed);
 
@@ -3457,7 +3307,7 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 		});
 
 		it("a real change still rewrites (sanity for the compact-seed observable)", () => {
-			const settingsPath = join(tmpDir, ".pi", "settings.json");
+			const settingsPath = settings.projectSettings;
 			const seed = '{"toolsetDefaults":{"toolset-state:x":{"enabled":true}}}';
 			writeFileSync(settingsPath, seed);
 
@@ -4044,7 +3894,7 @@ describe("hidden-exposure — per-turn allowlist mask", () => {
 
 describe("effectiveEnabled", () => {
 	it("resolves a chat-branch entry (tier 1) with no mode argument", () => {
-		const { mock, pi } = createEnv();
+		const { pi } = createEnv();
 		const spec = makeSpec({ persistKey: "k:a", defaultEnabled: false });
 		pi.appendEntry("k:a", { enabled: true });
 
@@ -4055,7 +3905,7 @@ describe("effectiveEnabled", () => {
 	});
 
 	it("resolves a settings pin (tier 2), then the packaged fallback (tier 3)", () => {
-		const { mock, pi } = createEnv();
+		const { pi } = createEnv();
 		setDefaultsOverride({ "k:a": { enabled: true } });
 		const pinned = makeSpec({ persistKey: "k:a", defaultEnabled: false });
 		expect(effectiveEnabled(pinned, reader(pi).getBranch(), readMergedToolsetDefaults())).toEqual({
@@ -4071,7 +3921,7 @@ describe("effectiveEnabled", () => {
 	});
 
 	it("null-tombstoned entry falls through to the next tier", () => {
-		const { mock, pi } = createEnv();
+		const { pi } = createEnv();
 		pi.appendEntry("k:a", { enabled: true });
 		pi.appendEntry("k:a", null);
 		const spec = makeSpec({ persistKey: "k:a", defaultEnabled: false });
@@ -4083,7 +3933,7 @@ describe("effectiveEnabled", () => {
 	});
 
 	it("allowlist mode: the set-level override is authoritative — suppressed resolves false, allowlisted true", () => {
-		const { mock, pi } = createEnv();
+		const { pi } = createEnv();
 		pi.appendEntry("toolset-resolution-mode", {
 			mode: "allowlist",
 			allowlist: ["allowed.web"],
@@ -4111,7 +3961,7 @@ describe("effectiveEnabled", () => {
 	});
 
 	it("exclusion mode (default): no allowlist fallthrough — tier chain applies", () => {
-		const { mock, pi } = createEnv();
+		const { pi } = createEnv();
 		const spec = makeSpec({ persistKey: "k:a", defaultEnabled: true });
 		// A stale allowlist field in a non-allowlist mode entry is ignored.
 		pi.appendEntry("toolset-resolution-mode", { mode: "exclusion" });

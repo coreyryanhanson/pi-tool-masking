@@ -11,9 +11,13 @@ import {
 	clearAllToolsetEntries,
 	forceToolsetEnabled,
 	isDeferredChild,
+	readToolsetDefaults,
 } from "../index.js";
-import { __internal } from "../index.js";
-import { cleanGlobalKeys, cleanRegistry, REGISTRY_KEY, catchByName, createEnv, reader } from "./helpers.js";
+import { cleanGlobalKeys, cleanRegistry, REGISTRY_KEY, catchByName, createEnv, reader, useTempSettingsDir } from "./helpers.js";
+
+// Temp settings dirs, file-wide: global settings live in a fresh mkdtemp
+// agent dir per test, project settings under a temp cwd — never ~/.pi.
+const tmpSettings = useTempSettingsDir();
 
 // ---------------------------------------------------------------------------
 // Child-policy defer — piToolMasking.childPolicy + PI_TOOLMASKING_DEFER
@@ -100,35 +104,6 @@ function setupTwoToolsets(mock: MockPI, pi: ExtensionAPI): void {
 	);
 }
 
-// Compose per-scope settings in ONE seam call: optional web pin-off plus the
-// childPolicy values. One seam feeds all readers, so pins and policy must be
-// set together or the later call silently drops the earlier one.
-function settings(
-	opts: {
-		pinWebOff?: boolean;
-		globalPolicy?: unknown;
-		projectPolicy?: unknown;
-		emptyProjectPiToolMasking?: boolean;
-	} = {},
-): void {
-	const global: Record<string, unknown> = {};
-	if (opts.pinWebOff) {
-		global["toolsetDefaults"] = {
-			"toolset-state:lean.web": { enabled: false },
-		};
-	}
-	if (opts.globalPolicy !== undefined) {
-		global["piToolMasking"] = { childPolicy: opts.globalPolicy };
-	}
-	const project: Record<string, unknown> = {};
-	if (opts.projectPolicy !== undefined) {
-		project["piToolMasking"] = { childPolicy: opts.projectPolicy };
-	} else if (opts.emptyProjectPiToolMasking) {
-		project["piToolMasking"] = {};
-	}
-	__internal.setSettingsOverrideForTests({ global, project });
-}
-
 function collectMaskEvents(mock: MockPI): () => { type: string; id: string }[] {
 	const spy = vi.spyOn(mock.events, "emit");
 	return () =>
@@ -152,17 +127,47 @@ let savedDeferVar: string | undefined;
 beforeEach(() => {
 	savedDeferVar = process.env[DEFER_ENV];
 	cleanRegistry();
-	__internal.setSettingsOverrideForTests({ global: {}, project: {} });
 });
 
 afterEach(() => {
-	__internal.setSettingsOverrideForTests(null);
-	__internal.setSettingsWriterOverrideForTests(null);
 	if (savedDeferVar === undefined) delete process.env[DEFER_ENV];
 	else process.env[DEFER_ENV] = savedDeferVar;
 	vi.restoreAllMocks();
 	cleanGlobalKeys();
 });
+
+// Compose per-scope settings files: optional web pin-off plus the
+// childPolicy values, written to the temp global/project settings.json.
+function settings(
+	opts: {
+		pinWebOff?: boolean;
+		globalPolicy?: unknown;
+		projectPolicy?: unknown;
+		emptyProjectPiToolMasking?: boolean;
+	} = {},
+): void {
+	const global: Record<string, unknown> = {};
+	if (opts.pinWebOff) {
+		global["toolsetDefaults"] = {
+			"toolset-state:lean.web": { enabled: false },
+		};
+	}
+	if (opts.globalPolicy !== undefined) {
+		global["piToolMasking"] = { childPolicy: opts.globalPolicy };
+	}
+	const project: Record<string, unknown> = {};
+	if (opts.projectPolicy !== undefined) {
+		project["piToolMasking"] = { childPolicy: opts.projectPolicy };
+	} else if (opts.emptyProjectPiToolMasking) {
+		project["piToolMasking"] = {};
+	}
+	if (Object.keys(global).length > 0) {
+		tmpSettings.writeJson(tmpSettings.globalSettings, global);
+	}
+	if (Object.keys(project).length > 0) {
+		tmpSettings.writeJson(tmpSettings.projectSettings, project);
+	}
+}
 
 // ===================================================================
 // Defer at restore
@@ -687,22 +692,17 @@ describe("defer gate — toggle boundary", () => {
 		const { mock, pi } = createEnv();
 		setupTwoToolsets(mock, pi);
 		process.env[DEFER_ENV] = FOREIGN_PID;
-		const writerState: { global: Record<string, unknown>; project: Record<string, unknown> } = {
-			global: {},
-			project: {},
-		};
-		__internal.setSettingsWriterOverrideForTests(writerState as any);
 
 		writeToolsetDefaults(
 			{ "toolset-state:lean.web": { enabled: false } },
 			"global",
 		);
-		expect(writerState.global["toolset-state:lean.web"]).toEqual({
-			enabled: false,
+		expect(readToolsetDefaults("global")).toEqual({
+			"toolset-state:lean.web": { enabled: false },
 		});
 
 		clearToolsetDefaults("global");
-		expect(writerState.global["toolset-state:lean.web"]).toBeUndefined();
+		expect(readToolsetDefaults("global")).toEqual({});
 	});
 
 	it("the gate keys on the foreign var alone, never policy: policy settings + foreign var still noops", () => {

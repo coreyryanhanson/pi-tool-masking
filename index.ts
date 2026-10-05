@@ -1359,35 +1359,7 @@ function readSettingsJsonSafe(scope: "global" | "project"): ParsedSettings {
 	}
 }
 
-let _settingsOverride: {
-	global: ParsedSettings | undefined;
-	project: ParsedSettings | undefined;
-} | null = null;
-
-/**
- * Inject full parsed settings objects (per scope) for tests. Pass `null` to
- * restore the disk-read path. One seam feeds all three readers
- * (`readMergedToolsetDefaults`, `readToolsetDefaults`, `readChildPolicy`),
- * so a test cannot desync them. Production code never calls this.
- *
- * @internal
- */
-function setSettingsOverrideForTests(
-	override: {
-		global: ParsedSettings | undefined;
-		project: ParsedSettings | undefined;
-	} | null,
-): void {
-	_settingsOverride = override;
-}
-
 function readScopeSettings(scope: "global" | "project"): ParsedSettings {
-	if (_settingsOverride !== null) {
-		// Seam active: an absent scope entry means "this scope is {}" — never a
-		// disk read (the seam exists precisely to keep tests off the developer's
-		// real settings files).
-		return _settingsOverride[scope] ?? {};
-	}
 	return readSettingsJsonSafe(scope);
 }
 
@@ -1440,10 +1412,6 @@ export function readMergedToolsetDefaults(): ToolsetDefaultsMap {
  *
  * Returns the raw `toolsetDefaults` block parsed from that scope's file,
  * without merging. Missing/unreadable/malformed files return `{}`.
- *
- * When `__internal.setSettingsOverrideForTests` has set an override, returns only this
- * scope's slice (`parseToolsetDefaults(override[scope])`, `{}` when the
- * scope is absent) — per-scope attribution, not a both-scopes copy.
  *
  * @public — exported for a `defaults show`-style command that needs
  * per-scope attribution.
@@ -1522,28 +1490,6 @@ export function getEffectiveDefault(
 // Settings.json writer — toolsetDefaults tier
 // ---------------------------------------------------------------------------
 
-let _settingsWriterOverride: {
-	global: ToolsetDefaultsMap;
-	project: ToolsetDefaultsMap;
-} | null = null;
-
-/**
- * Capture toolset-defaults writes in-memory instead of hitting disk. Pass
- * `null` to restore the disk-write path. Independent of
- * `__internal.setSettingsOverrideForTests` — both seams must be cleared (`null`) for a
- * true round-trip that hits disk on both read and write.
- *
- * @internal
- */
-function setSettingsWriterOverrideForTests(
-	state: {
-		global: ToolsetDefaultsMap;
-		project: ToolsetDefaultsMap;
-	} | null,
-): void {
-	_settingsWriterOverride = state;
-}
-
 /**
  * Read one scope's settings.json, run `mutator` against the parsed object,
  * and write it back iff `mutator` returns `true` (the return value is
@@ -1614,14 +1560,6 @@ export function writeToolsetDefaults(
 	entries: ToolsetDefaultsMap,
 	scope: "global" | "project",
 ): string {
-	// Seam path: merge into memory
-	if (_settingsWriterOverride !== null) {
-		for (const [key, val] of Object.entries(entries)) {
-			_settingsWriterOverride[scope][key] = { enabled: val.enabled };
-		}
-		return settingsPath(scope);
-	}
-
 	mutateSettingsJson(scope, (existing) => {
 		// Non-object `toolsetDefaults` (array/string/null) recovers to `{}` —
 		// same recovery as the reader (`parseToolsetDefaults`). A bare array
@@ -1658,16 +1596,6 @@ export function writeToolsetDefaults(
 export function clearToolsetDefaults(
 	scope: "global" | "project",
 ): string | null {
-	// Seam path: clear all keys in memory
-	if (_settingsWriterOverride !== null) {
-		const state = _settingsWriterOverride[scope];
-		const keys = Object.keys(state);
-		for (const key of keys) {
-			delete state[key];
-		}
-		return keys.length > 0 ? settingsPath(scope) : null;
-	}
-
 	return mutateSettingsJson(scope, (existing) => {
 		if (!("toolsetDefaults" in existing)) return false; // no write, no reformat
 		delete existing.toolsetDefaults;
@@ -1703,6 +1631,4 @@ export const __internal = {
 	planBatch,
 	executeBatchPlan,
 	parseToolsetDefaults,
-	setSettingsOverrideForTests,
-	setSettingsWriterOverrideForTests,
 };

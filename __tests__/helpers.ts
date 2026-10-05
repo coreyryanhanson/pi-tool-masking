@@ -1,3 +1,7 @@
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { beforeEach, afterEach } from "vitest";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { BranchReader } from "../index.js";
 import { MockPI } from "./mock-pi.js";
@@ -51,4 +55,64 @@ export function catchByName(
 		return e as { name?: string; specId?: string };
 	}
 	throw new Error("expected fn to throw");
+}
+
+// ---------------------------------------------------------------------------
+// Temp settings dir — real settings.json files, never the developer's ~/.pi
+// ---------------------------------------------------------------------------
+
+let current: {
+	tmp: string;
+	origCwd: string;
+	origAgentDir: string | undefined;
+} | null = null;
+
+/**
+ * Call once at file scope (module level): isolates `PI_CODING_AGENT_DIR` and the
+ * process cwd into a fresh mkdtemp dir per test, so global settings live at
+ * `<tmp>/agent/settings.json` and project settings at `<tmp>/.pi/settings.json`.
+ * Returns paths and a raw-JSON writer for seeding files; missing files read as
+ * empty settings, so an unseeded test needs no setup.
+ */
+export function useTempSettingsDir(): {
+	globalSettings: string;
+	projectSettings: string;
+	writeJson(path: string, data: unknown): void;
+} {
+	beforeEach(() => {
+		const tmp = mkdtempSync(join(tmpdir(), "pi-tool-masking-settings-"));
+		mkdirSync(join(tmp, "agent"), { recursive: true });
+		mkdirSync(join(tmp, ".pi"), { recursive: true });
+		current = {
+			tmp,
+			origCwd: process.cwd(),
+			origAgentDir: process.env.PI_CODING_AGENT_DIR,
+		};
+		process.env.PI_CODING_AGENT_DIR = join(tmp, "agent");
+		process.chdir(tmp);
+	});
+	afterEach(() => {
+		if (current === null) return;
+		process.chdir(current.origCwd);
+		if (current.origAgentDir === undefined) {
+			delete process.env.PI_CODING_AGENT_DIR;
+		} else {
+			process.env.PI_CODING_AGENT_DIR = current.origAgentDir;
+		}
+		rmSync(current.tmp, { recursive: true, force: true });
+		current = null;
+	});
+	return {
+		get globalSettings() {
+			if (current === null) throw new Error("useTempSettingsDir not active");
+			return join(current.tmp, "agent", "settings.json");
+		},
+		get projectSettings() {
+			if (current === null) throw new Error("useTempSettingsDir not active");
+			return join(current.tmp, ".pi", "settings.json");
+		},
+		writeJson(path, data) {
+			writeFileSync(path, JSON.stringify(data, null, 2));
+		},
+	};
 }

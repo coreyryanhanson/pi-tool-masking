@@ -113,10 +113,10 @@ Not a full API reference — see `README.md`.
   `$PI_CODING_AGENT_DIR/settings.json` (default `~/.pi/agent/settings.json`),
   project `<cwd>/.pi/settings.json`, project wins per entry; `childPolicy` is a
   scalar per scope (never spread-merge). Readers never throw (malformed → `{}`);
-  writers throw `MalformedSettingsError`. Test seams live under `__internal`
-  (`__internal.setSettingsOverrideForTests` / `__internal.setSettingsWriterOverrideForTests`)
-  — test-only, may change or vanish between any releases; downstream suites use
-  them at their own risk.
+  writers throw `MalformedSettingsError`. Tests run against temp settings dirs
+  (see `__tests__/helpers.ts` `useTempSettingsDir`), never the real `~/.pi`.
+  Test-only internals (`planBatch`, `executeBatchPlan`, `parseToolsetDefaults`)
+  live under `__internal` — may change or vanish between any releases.
 - `TOOLSET_EVENTS`: `changed` / `restored`. Type diverges by path — exclusion
   restore emits `restored` for a persisted entry but `changed` for a
   settings/packaged fallback; allowlist restore emits `restored` for every
