@@ -155,7 +155,7 @@ effectiveEnabled(spec, branch, readMergedToolsetDefaults())
 
 Returns `{ enabled, persistedEntry }` — read `.enabled` for display (intent rendering); `persistedEntry` is true only when the last branch entry for this toolset carries a boolean `enabled` (a `null` tombstone or no entry reports `false`). Resolution order:
 
-1. **Allowlist mode** (read from the passed `branch`): returns `{ enabled: allow.includes(spec.id) }` — the set-level override is authoritative, branch entries and settings pins are bypassed, exactly as restore's allowlist short-circuit does.
+1. **Allowlist mode** (read from the passed `branch`): returns `{ enabled: allow.includes(spec.id) }` — the set-level override is authoritative, branch entries and settings pins are bypassed, exactly as restore's allowlist short-circuit does. (`persistedEntry` still reflects the toolset's own branch entry in this mode — restore doesn't use it here, allowlist restore always emits `restored`.)
 2. **Chat-branch entry** — the last `appendEntry(persistKey, …)` on this branch (`null` tombstone falls through).
 3. **Settings pin** — `toolsetDefaults[persistKey].enabled`.
 4. **Packaged default** — `spec.defaultEnabled ?? true`.
@@ -238,7 +238,7 @@ Top-level key in pi-core settings (global `~/.pi/agent/settings.json` or project
 | Value | Behavior at each restore |
 |---|---|
 | `"defer"` (default) | If `PI_TOOLMASKING_DEFER` is absent, publish it (value = own pid — a top-level parent). If it carries a **foreign** pid, defer: the entire restore is skipped (branch entries, settings pins, mode resolution — both tiers) and the per-turn `before_agent_start` re-assert is a no-op. The var is left **untouched** — env inheritance already delivers the parent's pid to grandchildren, and republishing the child's own pid would flip it to enforcing at its next restore (`/new`, `/resume`, `session_tree`). |
-| `"settings"` | Opt out: delete the var and mask normally. Subtree-effective — a `"settings"` child of a `"defer"` parent un-defers itself and stops propagation to grandchildren (a default-defer grandchild of *it* publishes its own var). |
+| `"settings"` | Opt out: delete the var and mask normally. Subtree-effective — a `"settings"` child of a `"defer"` parent un-defers itself and stops propagation to grandchildren (a default-defer grandchild of *it* publishes its own var). Until that first restore runs, inherited defer tags still gate: toggles stay `[]` no-ops. |
 
 The var is a **static pid tag**, not live state — no payload, no per-toolset data, no per-`tool_call` publishing. The parent never defers against its own tag (the pid check is stable across `/new` and `/reload`, which stay in-process). A deferring child emits no `restored`/`changed` events — the mask took no action, so there is nothing to notify about.
 
@@ -298,7 +298,7 @@ Caveats:
 
 ## Hidden-exposure toolsets and inert state
 
-Pi 0.99 gives every tool an `exposure` (`direct | model-only | codemode | deferred | hidden`). `hidden` tools can never enter the active set, so the library's actuation and mask paths filter them out: a `hidden` member of a toolset is never handed to `setActiveTools` and never triggers a redundant mask write on the per-turn re-assert. On pi < 0.99 (no `exposure` field) every registered name is actuatable — behaviour is unchanged.
+Pi 1.0 gives every tool an `exposure` (`direct | model-only | codemode | deferred | hidden`). `hidden` tools can never enter the active set, so the library's actuation and mask paths filter them out: a `hidden` member of a toolset is never handed to `setActiveTools` and never triggers a redundant mask write on the per-turn re-assert. On older pi (no `exposure` field) every registered name is actuatable — behaviour is unchanged.
 
 **Inert toolsets — `enabled` means intent, not observation.** A non-empty toolset with zero actuatable members (members still `hidden`, or its MCP server not yet connected) cannot witness either state: a hidden member can never be active, and absence of activity proves nothing when nothing can be active. For such a toolset:
 

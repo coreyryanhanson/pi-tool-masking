@@ -401,7 +401,8 @@
 
   Restore is atomic and two-phase — the full
   desired active-tools set is applied with a single `setActiveTools` call
-  before any per-toolset `restored` event fires, so a companion mirroring
+  before any per-toolset `restored` event fires (the write is skipped
+  entirely when the set already matches), so a companion mirroring
   on `TOOLSET_EVENTS.changed` cannot `appendEntry` mid-loop and desync
   the final state. Non-toolset tools in the current active set are
   preserved (the short-circuit computes a delta, not a rebuild).

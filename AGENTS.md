@@ -71,7 +71,8 @@ Not a full API reference — see `README.md`.
   handle; same id + changed spec → warns and replaces (old handles die).
   Registration guards throw atomically: `PersistKeyCollisionError` when another
   toolset claims the `persistKey`; plain `Error` on tool-name overlap (each tool
-  belongs to one toolset). Ids are namespaced `<product-family>.<subset>`.
+  belongs to one toolset) and on the reserved `toolset-resolution-mode`
+  persistKey. Ids are namespaced `<product-family>.<subset>`.
 - Toggles (`toggleBatch`, `Toolset.enable`/`.disable`) take a `BranchReader` —
   pass `ctx.sessionManager` itself, never a bare `getBranch` method reference
   (unbound → throws). They are **exclusion-mode only**: under allowlist
@@ -143,7 +144,8 @@ Not a full API reference — see `README.md`.
   `setActiveTools` masking primitive.
 - **Actuatable members only:** loadout writes and masks filter through
   `getActuatableNames(pi)`; a `hidden`-exposure tool can never be active and is
-  never handed to `setActiveTools` (pre-0.99, all names actuatable). A toolset
+  never handed to `setActiveTools` (older pi without `exposure`: all names
+  actuatable). A toolset
   with zero actuatable members is *inert*: toggles persist/emit intent but
   `isEnabled()` (observation) stays false while `effectiveEnabled()` (intent)
   reports the recorded state — pick the right signal.
