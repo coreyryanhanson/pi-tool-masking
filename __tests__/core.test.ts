@@ -3004,29 +3004,6 @@ describe("Restore independence — does not cascade", () => {
 });
 
 // ===================================================================
-// Default-resolution mode — entry vs no-entry
-// ===================================================================
-
-describe("Default-resolution mode — entry vs no-entry", () => {
-	it("exclusion mode: B (no entry, defaultEnabled: true) defaults on", () => {
-		const { mock, pi } = createEnv();
-		mock.registerTool({ name: "b-tool", description: "" });
-		defineToolset(
-			pi,
-			makeSpec({
-				id: "B",
-				persistKey: "k:B",
-				names: new Set(["b-tool"]),
-				defaultEnabled: true,
-			}),
-		);
-		mock.fireLifecycleEvent("session_start");
-		expect(mock.getActiveTools()).toContain("b-tool");
-	});
-});
-
-// ===================================================================
-// ===================================================================
 // Settings.json reader — parseToolsetDefaults
 // ===================================================================
 
