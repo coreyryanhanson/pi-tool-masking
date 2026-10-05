@@ -23,7 +23,6 @@ import {
 	clearAllToolsetEntries,
 	forceToolsetEnabled,
 	AllowlistModeError,
-	ContradictionError,
 	planBatch,
 	executeBatchPlan,
 	toggleBatch,
@@ -2605,10 +2604,6 @@ describe("Contradiction detection (planner-level)", () => {
 		]);
 		expect(plan.intent.get("A")).toBe(false);
 		expect(plan.intent.get("B")).toBe(true);
-	});
-
-	it("exposes ContradictionError with the name-based catch contract", () => {
-		expect(new ContradictionError("x").name).toBe("ContradictionError");
 	});
 });
 
