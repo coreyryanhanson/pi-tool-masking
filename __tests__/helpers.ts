@@ -21,6 +21,7 @@ const GLOBAL_KEYS = [
 	"__piToolMaskingRegistry",
 	"__piToolMaskingLastRestoreEvent",
 	"__piToolMaskingChildPolicyWarned",
+	"__piToolMaskingHandlerInstalled",
 ] as const;
 
 /** Delete all globalThis module keys (defer env var untouched). */

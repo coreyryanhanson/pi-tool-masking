@@ -95,13 +95,24 @@ export const TOOLSET_EVENTS = {
 
 const REGISTRY_KEY = "__piToolMaskingRegistry";
 const RESTORE_EVENT_KEY = "__piToolMaskingLastRestoreEvent";
+const HANDLERS_KEY = "__piToolMaskingHandlerInstalled";
 // Tracks which pi instances have had the restore/re-assert handlers installed.
 // `defineToolset` calls `ensureRestoreHandler` once per toolset; keying the
 // de-dup on the pi object (not a global boolean) keeps turn-boundary work at
 // O(toolsets) per turn across N toolsets sharing one pi, while still re-
 // installing for a fresh pi after `/reload` (new object identity → new
-// WeakSet entry).
-const RESTORE_HANDLER_INSTALLED = new WeakSet<ExtensionAPI>();
+// WeakSet entry). Lives on globalThis like the registry: two extensions
+// bundling separate copies of this library share one pi, and the dedup must
+// be per (pi, process), not per module copy.
+function getHandlerInstalled(): WeakSet<ExtensionAPI> {
+	if (
+		!(HANDLERS_KEY in globalThis) ||
+		!((globalThis as any)[HANDLERS_KEY] instanceof WeakSet)
+	) {
+		(globalThis as any)[HANDLERS_KEY] = new WeakSet();
+	}
+	return (globalThis as any)[HANDLERS_KEY] as WeakSet<ExtensionAPI>;
+}
 
 export interface RegistryEntry {
 	spec: ToolsetSpec;
@@ -309,9 +320,9 @@ function resolveExclusionTier(
 // ---------------------------------------------------------------------------
 
 function ensureRestoreHandler(pi: ExtensionAPI): void {
-	// Install once per pi instance (see RESTORE_HANDLER_INSTALLED above).
-	if (RESTORE_HANDLER_INSTALLED.has(pi)) return;
-	RESTORE_HANDLER_INSTALLED.add(pi);
+	// Install once per pi instance (see getHandlerInstalled above).
+	if (getHandlerInstalled().has(pi)) return;
+	getHandlerInstalled().add(pi);
 
 	// Dedup by event-object identity. The runner passes the same event
 	// reference to every extension's handler in one emit() call, so the first
