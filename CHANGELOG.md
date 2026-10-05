@@ -1,5 +1,7 @@
 # Changelog
 
+## [Unreleased]
+
 ## [2.0.1] - 2026-10-05
 
 This is a breaking release centered on one idea: toggles are a **batch-first,
