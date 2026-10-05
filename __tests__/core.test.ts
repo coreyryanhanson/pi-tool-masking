@@ -711,6 +711,10 @@ describe("Toolset.enable", () => {
 			id: "test.toolset",
 			enabled: true,
 		});
+		// Toggles emit `changed`, never `restored` (branch replay only).
+		expect(
+			emitSpy.mock.calls.filter(([c]) => c === TOOLSET_EVENTS.restored),
+		).toHaveLength(0);
 		emitSpy.mockRestore();
 	});
 });
@@ -745,6 +749,10 @@ describe("Toolset.disable", () => {
 			id: "test.toolset",
 			enabled: false,
 		});
+		// Toggles emit `changed`, never `restored` (branch replay only).
+		expect(
+			emitSpy.mock.calls.filter(([c]) => c === TOOLSET_EVENTS.restored),
+		).toHaveLength(0);
 		emitSpy.mockRestore();
 	});
 });
@@ -2844,48 +2852,6 @@ describe("Restore — always-emit invariant", () => {
 		expect(changedCalls.length).toBeGreaterThanOrEqual(1);
 		emitSpy.mockRestore();
 	});
-});
-
-// ===================================================================
-// Restore — event split changed vs restored
-// ===================================================================
-
-describe("Restore — event split changed vs restored", () => {
-	it("enable emits changed (not restored)", () => {
-		const { mock, pi } = createEnv();
-		mock.registerTool({ name: "tool-a", description: "" });
-		const emitSpy = vi.spyOn(mock.events, "emit");
-		const ts = defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
-		ts.enable(pi, reader(pi));
-		const changedCalls = emitSpy.mock.calls.filter(
-			([c]) => c === TOOLSET_EVENTS.changed,
-		);
-		const restoredCalls = emitSpy.mock.calls.filter(
-			([c]) => c === TOOLSET_EVENTS.restored,
-		);
-		expect(changedCalls.length).toBeGreaterThanOrEqual(1);
-		expect(restoredCalls.length).toBe(0);
-		emitSpy.mockRestore();
-	});
-
-	it("disable emits changed (not restored)", () => {
-		const { mock, pi } = createEnv();
-		mock.registerTool({ name: "tool-a", description: "" });
-		const ts = defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
-		ts.enable(pi, reader(pi));
-		const emitSpy = vi.spyOn(mock.events, "emit");
-		ts.disable(pi, reader(pi));
-		const changedCalls = emitSpy.mock.calls.filter(
-			([c]) => c === TOOLSET_EVENTS.changed,
-		);
-		const restoredCalls = emitSpy.mock.calls.filter(
-			([c]) => c === TOOLSET_EVENTS.restored,
-		);
-		expect(changedCalls.length).toBeGreaterThanOrEqual(1);
-		expect(restoredCalls.length).toBe(0);
-		emitSpy.mockRestore();
-	});
-
 });
 
 // ===================================================================
