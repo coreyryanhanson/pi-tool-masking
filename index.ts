@@ -161,7 +161,7 @@ const CHILD_POLICY_WARNED_KEY = "__piToolMaskingChildPolicyWarned";
  *  (pi's setActiveTools silently drops hidden names, so they can never be
  *  active). Pre-0.99 pi has no `exposure` field — absent reads as actuatable,
  *  i.e. exactly the pre-fix behaviour. The read keeps a defensive cast even
- *  under the ^1.0.2 devDependency: this library ships raw TS source, so every
+ *  under the ^1.0.3 devDependency: this library ships raw TS source, so every
  *  consumer's tsc compiles it against THEIR installed pi types, and pre-0.99
  *  types have no `exposure` (TS2339 on a plain read). */
 function getActuatableNames(pi: ExtensionAPI): Set<string> {
