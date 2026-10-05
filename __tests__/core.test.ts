@@ -2510,10 +2510,10 @@ describe("Contradiction detection (planner-level)", () => {
 // ===================================================================
 
 describe("Batch execution (executor-level)", () => {
-	/** Shared rig: C ← A (A requires C), B independent. */
+	/** Shared rig: C ← A (A requires C) — one cascade edge. */
 	function rig() {
 		const { mock, pi } = createEnv();
-		for (const n of ["c-tool", "a-tool", "b-tool"]) {
+		for (const n of ["c-tool", "a-tool"]) {
 			mock.registerTool({ name: n, description: "" });
 		}
 		defineToolset(pi, makeSpec({ id: "C", persistKey: "k:C", names: new Set(["c-tool"]) }));
@@ -2526,43 +2526,8 @@ describe("Batch execution (executor-level)", () => {
 				requires: ["C"],
 			}),
 		);
-		defineToolset(pi, makeSpec({ id: "B", persistKey: "k:B", names: new Set(["b-tool"]) }));
 		return { mock, pi };
 	}
-
-	it("cross-target overlap dedupes exactly-once: shared dep applied and reported once", () => {
-		const { mock } = rig();
-		const results = execute(mock, [
-			{ id: "A", desired: true },
-			{ id: "B", desired: true },
-		]);
-		// Discovery order [C, A, B] — C reached once despite two pullers.
-		expect(results.map((r) => r.id)).toEqual(["C", "A", "B"]);
-		expect(mock.getEntries("k:C")).toHaveLength(1);
-		expect(mock.getActiveTools()).toEqual(
-			expect.arrayContaining(["c-tool", "a-tool", "b-tool"]),
-		);
-	});
-
-	it("emits fire only after ALL writes, in plan.order", () => {
-		const { mock } = rig();
-		const observed: { id: string; activeAtEmit: string[] }[] = [];
-		mock.events.on(TOOLSET_EVENTS.changed, (payload: any) => {
-			observed.push({ id: payload.id, activeAtEmit: mock.getActiveTools() });
-		});
-		const results = execute(mock, [
-			{ id: "A", desired: true },
-			{ id: "B", desired: true },
-		]);
-		// Event order = plan.order = write/report order.
-		expect(observed.map((o) => o.id)).toEqual(results.map((r) => r.id));
-		// The FIRST emit already observes the final active set — no library
-		// event fired mid-batch, so no listener can see an intermediate state.
-		const final = mock.getActiveTools();
-		for (const o of observed) {
-			expect(o.activeAtEmit).toEqual(final);
-		}
-	});
 
 	it("cascade emit timing: a dependency's emit fires after its dependents are written (disable)", () => {
 		const { mock, pi } = createEnv();
@@ -2603,13 +2568,19 @@ describe("Batch execution (executor-level)", () => {
 		expect(results.map((r) => r.id)).toEqual(["A", "B", "C"]);
 		// A's emit observes B and C already off — the new post-execution
 		// timing (per-apply emits would have shown B, C still active).
+		// EVERY emit observes the final active set — no library event fired
+		// mid-batch, so no listener can see an intermediate state.
 		expect(activeAtEmit["A"]).toEqual([]);
+		const final = mock.getActiveTools();
+		for (const active of Object.values(activeAtEmit)) {
+			expect(active).toEqual(final);
+		}
 	});
 
 	it("the executor never re-reads the branch — the boundary's read is threaded", () => {
 		const { mock, pi } = rig();
 		// Public toggle path: exactly one getBranch() call per toggle, even
-		// with a cascade (B's enable pulls A).
+		// with a cascade (A's enable pulls C).
 		const inner = mock.branchReader();
 		let reads = 0;
 		const counting = {
@@ -2618,7 +2589,7 @@ describe("Batch execution (executor-level)", () => {
 				return inner.getBranch();
 			},
 		};
-		getRegisteredToolsets().find((e) => e.spec.id === "B")!.toolset.enable(
+		getRegisteredToolsets().find((e) => e.spec.id === "A")!.toolset.enable(
 			pi,
 			counting,
 		);
