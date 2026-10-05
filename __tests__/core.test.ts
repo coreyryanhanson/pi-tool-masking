@@ -1389,12 +1389,12 @@ describe("before_agent_start allowlist re-assert", () => {
 
 		const search = makeSpec({
 			id: "search.web",
-			persistKey: "tbox.tool@search",
+			persistKey: "k:search",
 			names: new Set(["search.web"]),
 		});
 		const ask = makeSpec({
-			id: "tbox.tool@npm:@juicesharp/rpiv-ask-user-question",
-			persistKey: "tbox.tool@npm:@juicesharp/rpiv-ask-user-question",
+			id: "k:ask",
+			persistKey: "k:ask",
 			names: new Set(["ask_user_question"]),
 		});
 		defineToolset(pi, search);
@@ -1419,7 +1419,7 @@ describe("before_agent_start allowlist re-assert", () => {
 		expect(pi.getActiveTools()).toEqual(["search.web"]);
 		expect(changedSpy).toHaveBeenCalledTimes(1);
 		expect(changedSpy).toHaveBeenCalledWith({
-			id: "tbox.tool@npm:@juicesharp/rpiv-ask-user-question",
+			id: "k:ask",
 			enabled: false,
 		});
 
@@ -1437,7 +1437,7 @@ describe("before_agent_start allowlist re-assert", () => {
 		mock.registerTool({ name: "search.web", description: "" });
 		const search = makeSpec({
 			id: "search.web",
-			persistKey: "tbox.tool@search",
+			persistKey: "k:search",
 			names: new Set(["search.web"]),
 		});
 		defineToolset(pi, search);
@@ -1471,7 +1471,7 @@ describe("before_agent_start allowlist re-assert", () => {
 		// tool is NOT registered — it can be allowed but never restored.
 		const search = makeSpec({
 			id: "search.web",
-			persistKey: "tbox.tool@search",
+			persistKey: "k:search",
 			names: new Set(["search.web", "future.web"]),
 		});
 		const leak = makeSpec({
@@ -1507,7 +1507,7 @@ describe("before_agent_start allowlist re-assert", () => {
 			pi,
 			makeSpec({
 				id: "search.web",
-				persistKey: "tbox.tool@search",
+				persistKey: "k:search",
 				names: new Set(["search.web"]),
 			}),
 		);
@@ -1534,12 +1534,12 @@ describe("before_agent_start disabled-leak re-assert", () => {
 
 		const search = makeSpec({
 			id: "search.web",
-			persistKey: "tbox.tool@search",
+			persistKey: "k:search",
 			names: new Set(["search.web"]),
 		});
 		const ask = makeSpec({
-			id: "tbox.tool@npm:@juicesharp/rpiv-ask-user-question",
-			persistKey: "tbox.tool@npm:@juicesharp/rpiv-ask-user-question",
+			id: "k:ask",
+			persistKey: "k:ask",
 			names: new Set(["ask_user_question"]),
 		});
 		defineToolset(pi, search);
@@ -1565,7 +1565,7 @@ describe("before_agent_start disabled-leak re-assert", () => {
 		expect(pi.getActiveTools()).toEqual(["search.web"]);
 		expect(changedSpy).toHaveBeenCalledTimes(1);
 		expect(changedSpy).toHaveBeenCalledWith({
-			id: "tbox.tool@npm:@juicesharp/rpiv-ask-user-question",
+			id: "k:ask",
 			enabled: false,
 		});
 
@@ -4180,7 +4180,7 @@ describe("intent-delta gate", () => {
 		mock.registerTool({ name: "tool-a", description: "" });
 		const ts = defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
 
-		// External writer appends the intent directly (tbox focusRelease shape).
+		// External writer appends the intent directly (an external focusRelease-style write).
 		pi.appendEntry("toolset-state:test.toolset", { enabled: false });
 
 		const changed: { id: string; enabled: boolean }[] = [];
@@ -4793,7 +4793,7 @@ describe("branch-read unification — dispatcher arm + copy semantics", () => {
 			pi,
 			makeSpec({
 				id: "search.web",
-				persistKey: "tbox.tool@search",
+				persistKey: "k:search",
 				names: new Set(["search.web"]),
 			}),
 		);
