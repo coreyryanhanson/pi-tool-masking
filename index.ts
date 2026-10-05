@@ -1505,15 +1505,13 @@ function mutateSettingsJson(
 			const raw = readFileSync(path, "utf-8");
 			const parsed = JSON.parse(raw);
 			if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+				let contains: string;
+				if (Array.isArray(parsed)) contains = "a JSON array";
+				else if (parsed === null) contains = "null";
+				else contains = typeof parsed;
 				throw new MalformedSettingsError(
 					`[pi-tool-masking] Refusing to overwrite non-object settings.json at ` +
-						`${path}. The file contains ${
-							Array.isArray(parsed)
-								? "a JSON array"
-								: typeof parsed === "object"
-									? "null"
-									: typeof parsed
-						}. Fix or remove it before writing.`,
+						`${path}. The file contains ${contains}. Fix or remove it before writing.`,
 				);
 			}
 			existing = parsed as Record<string, unknown>;
