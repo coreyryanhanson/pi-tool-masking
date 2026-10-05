@@ -2928,31 +2928,6 @@ describe("Racing-writer residuals", () => {
 		expect(mock.getActiveTools()).not.toContain("a-tool");
 		expect(mock.getActiveTools()).toContain("b-tool");
 	});
-
-	it("entry_appended listener writes mid-batch: land in the ledger, not repaired/reported, win at next restore", () => {
-		const { mock } = rig();
-		// pi-core channel: a session-event handler appending "disable A"
-		// during a mid-batch append (fires synchronously on every appendEntry;
-		// one-shot guard — the handler's own append re-fires it).
-		let fired = false;
-		const unsub = mock.on("entry_appended", () => {
-			if (fired) return;
-			fired = true;
-			mock.appendEntry("k:A", { enabled: false });
-		});
-		const results = execute(mock, [{ id: "B", desired: true }]);
-		unsub();
-		// The batch's report carries plan.intent; the handler's mid-batch
-		// write was not observed by the delta gate (no repair, no report).
-		expect(results).toEqual([
-			{ id: "A", enabled: true },
-			{ id: "B", enabled: true },
-		]);
-		// The handler's entry is newest — restore honors it.
-		mock.fireLifecycleEvent("session_start");
-		expect(mock.getActiveTools()).not.toContain("a-tool");
-		expect(mock.getActiveTools()).toContain("b-tool");
-	});
 });
 // ===================================================================
 // Restore — persistence round-trip

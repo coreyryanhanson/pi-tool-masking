@@ -120,8 +120,8 @@
   `changed` listener cannot intercept through the library's own event
   channel mid-call, and listeners observe one coherent transition. Racing
   writers on channels outside the library's events (`prepareLoadout` hooks
-  reached inside `setActiveTools`, pi-core `entry_appended` listeners) can
-  still append mid-call; such a write for an id whose intent already
+  reached inside `setActiveTools`) can still append mid-call; such a write
+  for an id whose intent already
   matched is neither repaired nor reported and wins at the next restore by
   last-writer-wins (pinned residual, documented in README).
 - **Breaking: report/emit order is now the planner's discovery order** —

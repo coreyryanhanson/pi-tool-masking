@@ -938,8 +938,8 @@ export function planBatch(ops: readonly BatchOp[]): BatchPlan {
  * `plan.intent`, in `plan.order`) — one coherent transition per listener; no
  * library-emitted `changed` event fires mid-batch, so a synchronous listener
  * cannot intercept through the library's own event channel. Racing writers
- * on other channels (`prepareLoadout` hooks reached inside `setActiveTools`,
- * pi-core `entry_appended` listeners) can still append mid-batch; such a
+ * on other channels (`prepareLoadout` hooks reached inside `setActiveTools`)
+ * can still append mid-batch; such a
  * write for an id whose intent already matched is neither repaired nor
  * reported and wins at the next restore by last-writer-wins.
  *

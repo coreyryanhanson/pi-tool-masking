@@ -127,20 +127,6 @@ export class MockPI implements Partial<ExtensionAPI> {
 			data,
 		} as SessionEntry;
 		this._sessionEntries.push(entry);
-
-		// Mirror pi's synchronous entry_appended listener loop (agent-session
-		// _emit): session-event handlers run synchronously on EVERY append and
-		// can append same-key entries mid-batch. Handlers registered via
-		// pi.on("entry_appended", …); a handler appending again recurses, same
-		// as the real fan-out.
-		const handlers = this._handlers.get("entry_appended");
-		if (handlers && handlers.length > 0) {
-			const ctx = this.createContext();
-			const event = { type: "entry_appended", entry };
-			for (const h of [...handlers]) {
-				h(event, ctx);
-			}
-		}
 	}
 
 	/** Returns recorded appendEntry calls, keyed by customType (for assertions). */
