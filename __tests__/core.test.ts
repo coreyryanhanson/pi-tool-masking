@@ -1273,7 +1273,7 @@ describe("Allowlist resolution mode", () => {
 		expect(mock.getActiveTools()).toEqual([]);
 	});
 
-	it("null-tombstoned mode entry supersedes a prior allowlist → exclusion, allowlist undefined", () => {
+	it("null-tombstoned mode entry supersedes a prior allowlist → exclusion, allowlist []", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		defineToolset(
@@ -1309,7 +1309,7 @@ describe("Allowlist resolution mode", () => {
 		expect(mock.getActiveTools()).toEqual(["tool-a"]);
 	});
 
-	it("mode absent / unknown value in the last entry falls through to exclusion; allowlist undefined", () => {
+	it("mode absent / unknown value in the last entry falls through to exclusion", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		defineToolset(

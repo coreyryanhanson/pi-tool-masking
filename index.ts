@@ -315,8 +315,8 @@ function resolveExclusionTier(
 }
 
 // ---------------------------------------------------------------------------
-// Ensure session_start / session_tree restore handler is registered
-// (dedup at runtime by event-object identity, not at registration time)
+// Ensure session_start / session_tree restore handler is registered once
+// per pi (WeakSet), with a second runtime dedup by event-object identity
 // ---------------------------------------------------------------------------
 
 function ensureRestoreHandler(pi: ExtensionAPI): void {
