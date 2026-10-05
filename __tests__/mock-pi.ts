@@ -24,7 +24,16 @@ import type {
 /** Widened ToolInfo fixture: `exposure` optional (0.99 types require the
  *  field on ToolInfo; the mock must be able to represent its ABSENCE so the
  *  "missing exposure reproduces current behaviour" tests stay honest). */
-type MockToolInfo = Omit<ToolInfo, "exposure"> & { exposure?: string };
+type MockToolInfo = Omit<ToolInfo, "exposure"> & {
+	exposure?: string;
+	/** Minimal mirror of ToolDefinition.prepareLoadout — the mock only needs
+	 *  to invoke the hook synchronously inside setActiveTools (what pi's
+	 *  _applyToolLoadout does), not to reproduce description/hidden-declaration
+	 *  handling. ponytail: no loadout object; tests close over the MockPI
+	 *  instance directly. Upgrade to the real ToolLoadout shape if a test
+	 *  needs to inspect it. */
+	prepareLoadout?: (loadout?: any) => unknown;
+};
 
 export class MockPI implements Partial<ExtensionAPI> {
 	private _activeTools: string[] = [];
@@ -43,6 +52,7 @@ export class MockPI implements Partial<ExtensionAPI> {
 		info: Pick<ToolInfo, "name" | "description"> & {
 			sourceInfo?: ToolInfo["sourceInfo"];
 			exposure?: string;
+			prepareLoadout?: (loadout: any) => unknown;
 		},
 	): void {
 		// `exposure` is stored only when provided — NO default. With a default
@@ -59,6 +69,7 @@ export class MockPI implements Partial<ExtensionAPI> {
 				origin: "top-level",
 			},
 			...(info.exposure ? { exposure: info.exposure } : {}),
+			...(info.prepareLoadout ? { prepareLoadout: info.prepareLoadout } : {}),
 		};
 		// Replace any existing same-name entry — real pi rebuilds a
 		// name→definition map on refresh, so re-registering a name replaces it
@@ -83,6 +94,13 @@ export class MockPI implements Partial<ExtensionAPI> {
 			const t = this._tools.find((tool) => tool.name === n);
 			return t !== undefined && t.exposure !== "hidden";
 		});
+		// Mirror pi's _applyToolLoadout: setActiveTools is tool-author code —
+		// every newly active, non-hidden tool's prepareLoadout hook runs
+		// synchronously here, BETWEEN batch writes.
+		for (const name of new Set(this._activeTools)) {
+			const tool = this._tools.find((t) => t.name === name);
+			if (tool?.prepareLoadout) tool.prepareLoadout();
+		}
 	}
 
 	/** Full call history (raw arguments, pre-filter) — `getActiveTools()` state
@@ -100,14 +118,29 @@ export class MockPI implements Partial<ExtensionAPI> {
 	appendEntry<T = unknown>(customType: string, data?: T): void {
 		this._entries.push({ customType, data });
 
-		this._sessionEntries.push({
+		const entry = {
 			type: "custom",
 			id: `mock-entry-${this._entries.length}`,
 			parentId: null,
 			timestamp: new Date().toISOString(),
 			customType,
 			data,
-		} as SessionEntry);
+		} as SessionEntry;
+		this._sessionEntries.push(entry);
+
+		// Mirror pi's synchronous entry_appended listener loop (agent-session
+		// _emit): session-event handlers run synchronously on EVERY append and
+		// can append same-key entries mid-batch. Handlers registered via
+		// pi.on("entry_appended", …); a handler appending again recurses, same
+		// as the real fan-out.
+		const handlers = this._handlers.get("entry_appended");
+		if (handlers && handlers.length > 0) {
+			const ctx = this.createContext();
+			const event = { type: "entry_appended", entry };
+			for (const h of [...handlers]) {
+				h(event, ctx);
+			}
+		}
 	}
 
 	/** Returns recorded appendEntry calls, keyed by customType (for assertions). */
@@ -179,6 +212,13 @@ export class MockPI implements Partial<ExtensionAPI> {
 	}
 
 	// --- Session context ---
+
+	/** The required branch-reader argument for toggle calls. Live view:
+	 *  appendEntry appends to _sessionEntries, so each toggle call's one
+	 *  boundary read sees earlier writes from prior calls in the session. */
+	branchReader(): { getBranch(): readonly SessionEntry[] } {
+		return { getBranch: () => [...this._sessionEntries] };
+	}
 
 	/** Minimal context: the library only ever reads ctx.sessionManager.getBranch().
 	 *  ponytail: add stub fields here if index.ts starts touching more ctx surface. */

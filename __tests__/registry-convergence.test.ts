@@ -1,8 +1,6 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { RegistryEntry } from "../index.js";
 import { describe, it, expect } from "vitest";
-import { MockPI } from "./mock-pi.js";
-import { cleanRegistry, REGISTRY_KEY } from "./helpers.js";
+import { cleanRegistry, REGISTRY_KEY, createEnv, reader } from "./helpers.js";
 
 // ---------------------------------------------------------------------------
 // GlobalThis registry convergence tests
@@ -15,11 +13,6 @@ import { cleanRegistry, REGISTRY_KEY } from "./helpers.js";
 // If someone refactors the registry to module-level state, every test in this
 // file must fail.
 // ---------------------------------------------------------------------------
-
-function createEnv(): { mock: MockPI; pi: ExtensionAPI } {
-	const mock = new MockPI();
-	return { mock, pi: mock as unknown as ExtensionAPI };
-}
 
 beforeEach(() => {
 	cleanRegistry();
@@ -96,10 +89,10 @@ describe("GlobalThis registry convergence", () => {
 			persistKey: "k:actionable.test",
 		});
 
-		ts2.enable(p2);
+		ts2.enable(p2, reader(p2));
 		expect(m2.getActiveTools()).toContain("action");
 
-		ts2.disable(p2);
+		ts2.disable(p2, reader(p2));
 		expect(m2.getActiveTools()).not.toContain("action");
 	});
 

@@ -30,9 +30,37 @@ export interface ToolsetSpec {
 	requires?: string[];
 }
 
+/** One entry of a toggle's change report: a toolset whose user-visible
+ *  state changed (intent delta or loadout write) during the call. */
+export interface ToggleResult {
+	/** The toolset's spec.id — the key toggles are addressed by. */
+	id: string;
+	/** The enabled state this call persisted and emitted — the same value
+	 *  as the appended branch entry and the `changed` event payload. */
+	enabled: boolean;
+}
+
+/** Anything with a synchronous getBranch(); pi's ReadonlySessionManager
+ *  satisfies this. Pass the reader object itself (in practice
+ *  `ctx.sessionManager`) — never a bare `getBranch` method reference, which
+ *  the type makes a compile error (an unbound method would throw).
+ *  There is no branchless fallback: a site without `ctx` restructures to
+ *  obtain one. An empty branch means only "no intent recorded yet". */
+export interface BranchReader {
+	getBranch(): readonly SessionEntry[];
+}
+
+/** A toggleable toolset handle. `enable`/`disable` return a change report
+ *  (`ToggleResult[]`; `[]` = silent no-op; persist + emit iff the intent
+ *  changes or a loadout write occurred). Under allowlist governance every
+ *  toggle throws {@link AllowlistModeError} before anything runs — catch by
+ *  `err?.name`, not `instanceof`. In a deferring child
+ *  ({@link isDeferredChild}) toggles are silent no-ops (`[]`); immediate
+ *  actuation under focus is `forceToolsetEnabled`'s. Pass the reader object
+ *  itself (see {@link BranchReader}). */
 export interface Toolset {
-	enable(pi: ExtensionAPI): void;
-	disable(pi: ExtensionAPI): void;
+	enable(pi: ExtensionAPI, sessionManager: BranchReader): ToggleResult[];
+	disable(pi: ExtensionAPI, sessionManager: BranchReader): ToggleResult[];
 	isEnabled(pi: ExtensionAPI): boolean;
 }
 
@@ -51,6 +79,11 @@ export type DefaultResolutionMode = "exclusion" | "allowlist";
 // Change notification — event names
 // ---------------------------------------------------------------------------
 
+/** Event names for toolset change notification. Restore emits `changed`
+ *  for default-fallback toolsets under exclusion, but `restored` for every
+ *  registered toolset under allowlist (a branch replay, not a live toggle).
+ *  The `requires` cascade is not re-run during allowlist restore — pass the
+ *  forward closure. */
 export const TOOLSET_EVENTS = {
 	changed: "toolset:changed",
 	restored: "toolset:restored",
@@ -88,77 +121,56 @@ function getRegistry(): Registry {
 }
 
 // ---------------------------------------------------------------------------
-// Shared in-memory state (library-level, not per-consumer)
+// Branch persistence keys (library-level, not per-consumer)
 // ---------------------------------------------------------------------------
 
-const MODULE_KEY = "__piToolMaskingModuleState";
 const MODE_PERSIST_KEY = "toolset-resolution-mode";
 
 /** Child-defer signal: value is the publisher's pid (string). Static pid tag
  * — no payload, no per-toolset data. Set by a defer-policy parent at
  * restore, inherited by spawned children via the default parent env. */
 const DEFER_ENV = "PI_TOOLMASKING_DEFER";
-/** Foreign-var check only — an absent, EMPTY, or our OWN pid var all mean
- * "enforce" here; presence-only would defer the parent's own restore/re-assert.
- * Empty value is garbage no legitimate producer writes (publish always stores a pid):
- * fail CLOSED (enforce), consistent with the library's malformed-input policy.
- * Shared by doRestore and onBeforeAgentStart so the two can never drift. */
-const isForeignDeferVar = (): boolean => {
+/** Is this process a governance-deferring child? Env-only — the defer var
+ * is the durable fact (value = the publisher's pid); a FOREIGN pid means
+ * an ancestor suspended governance here. An absent, EMPTY, or our OWN pid
+ * var all mean "enforce": presence-only would defer the parent's own
+ * restore/re-assert, and an empty value is garbage no legitimate producer
+ * writes (publish always stores a pid), so it fails CLOSED (enforce).
+ * Never reads settings — a mid-session policy flip must not flip a child
+ * that restored under defer to enforcing between restores; the policy is
+ * consulted only at the var's creation/deletion site (doRestore's
+ * publish/consume decision). Shared by the re-assert dispatcher, the
+ * toggle gate, and consumers' own actuation/authoring gates.
+ *
+ * @public — exported so consumers gate their own actuation paths with the
+ * identical signal the library's dispatcher and toggle gate use. */
+export function isDeferredChild(): boolean {
 	const v = process.env[DEFER_ENV];
 	return v !== undefined && v !== "" && v !== String(process.pid);
-};
+}
 /** GlobalThis flag key deduping the invalid-childPolicy-value warn, once per
  * process (lives on globalThis — survives /reload). */
 const CHILD_POLICY_WARNED_KEY = "__piToolMaskingChildPolicyWarned";
-
-interface ModuleState {
-	defaultResolutionMode: DefaultResolutionMode;
-	// explicit `| undefined`: exactOptionalPropertyTypes forbids assigning
-	// `undefined` to a bare optional property (TS2412), and both doRestore and
-	// setDefaultResolutionMode assign undefined for non-allowlist modes.
-	activeAllowlist?: string[] | undefined;
-}
-
-function getModuleState(): ModuleState {
-	if (!(MODULE_KEY in globalThis)) {
-		(globalThis as any)[MODULE_KEY] = {
-			defaultResolutionMode: "exclusion" as DefaultResolutionMode,
-		};
-	}
-	return (globalThis as any)[MODULE_KEY] as ModuleState;
-}
 
 // ---------------------------------------------------------------------------
 // Registered tool names — hoisted scan shared by mask/re-assert/apply paths
 // ---------------------------------------------------------------------------
 
-/** One getAllTools() pass collecting both the registered names and the
- *  actuatable subset. Registered = present in the tool registry; actuatable
- *  = registered ∧ not `hidden`-exposure (pi's setActiveTools silently drops
- *  hidden names, so they can never be active). Pre-0.99 pi has no `exposure`
- *  field — absent reads as actuatable, i.e. exactly the pre-fix behaviour.
- *  The read keeps a defensive cast even under the ^0.99 devDependency: this
- *  library ships raw TS source, so every consumer's tsc compiles it against
- *  THEIR installed pi types, and pre-0.99 types have no `exposure` (TS2339
- *  on a plain read). */
-function scanToolNames(pi: ExtensionAPI): {
-	registered: Set<string>;
-	actuatable: Set<string>;
-} {
-	const registered = new Set<string>();
+/** One getAllTools() pass collecting the actuatable subset: present in the
+ *  tool registry and not `hidden`-exposure
+ *  (pi's setActiveTools silently drops hidden names, so they can never be
+ *  active). Pre-0.99 pi has no `exposure` field — absent reads as actuatable,
+ *  i.e. exactly the pre-fix behaviour. The read keeps a defensive cast even
+ *  under the ^0.99 devDependency: this library ships raw TS source, so every
+ *  consumer's tsc compiles it against THEIR installed pi types, and pre-0.99
+ *  types have no `exposure` (TS2339 on a plain read). */
+function getActuatableNames(pi: ExtensionAPI): Set<string> {
 	const actuatable = new Set<string>();
 	for (const tool of pi.getAllTools()) {
-		registered.add(tool.name);
 		if ((tool as { exposure?: string }).exposure === "hidden") continue;
 		actuatable.add(tool.name);
 	}
-	return { registered, actuatable };
-}
-
-/** Registered tool names pi can actuate: present in the registry and not
- *  `hidden`-exposure. */
-function getActuatableNames(pi: ExtensionAPI): Set<string> {
-	return scanToolNames(pi).actuatable;
+	return actuatable;
 }
 
 // ---------------------------------------------------------------------------
@@ -194,20 +206,22 @@ function computeAllowlistDesired(
 }
 
 // ---------------------------------------------------------------------------
-// Persisted resolution state — one branch read shared by restore and the
-// exported resolver, so the two can never drift on what the persisted mode is
+// Persisted resolution state — one branch read shared by restore, the turn
+// re-assert's arm selection, the exported resolver, the toggle refusal, and
+// the exported decision read, so all five can never drift on what the
+// persisted mode is
 // ---------------------------------------------------------------------------
 
-/** Persisted resolution state from the branch's LAST mode entry. Unrecognized
- *  mode values (e.g. a legacy pre-2.0.0 persisted entry) fall through to
- *  `"exclusion"` silently — the entry is ignored, not migrated. A mode entry
- *  claiming `"allowlist"` with no usable array is corruption: recovered to an
- *  EMPTY allowlist (fail closed), not to `"exclusion"` (fail open) —
- *  "everything on" is the wrong recovery for a masking library, and an empty
- *  allowlist keeps mode + array consistent. Write-time validation is the
- *  asymmetric mirror: `setDefaultResolutionMode` rejects an empty array as a
- *  likely mistake; restore-time recovers it as the safe recovery. */
-function readBranchModeState(branch: readonly SessionEntry[]): {
+/** Persisted resolution state from the branch's LAST mode entry.
+ *  Unrecognized modes → `"exclusion"`; an allowlist entry with a corrupt
+ *  array recovers to an EMPTY allowlist (fail closed — "everything on" is
+ *  the wrong recovery for a masking library). Write-time validation is the
+ *  asymmetric mirror: `setDefaultResolutionMode` rejects an empty array,
+ *  restore recovers it. A governance decision/authoring read, NEVER a
+ *  toggle pre-check — call the toggle and catch `AllowlistModeError`.
+ *  Copy-on-read: the returned array is fresh; branch data is never aliased.
+ */
+export function readBranchModeState(branch: readonly SessionEntry[]): {
 	mode: DefaultResolutionMode;
 	allowlist: string[];
 } {
@@ -221,7 +235,8 @@ function readBranchModeState(branch: readonly SessionEntry[]): {
 	const rawAllowlist = last?.data?.allowlist;
 	return {
 		mode: last?.data?.mode === "allowlist" ? "allowlist" : "exclusion",
-		allowlist: Array.isArray(rawAllowlist) ? rawAllowlist : [],
+		// Copy on read: never hand out a reference into the branch entry data.
+		allowlist: Array.isArray(rawAllowlist) ? [...rawAllowlist] : [],
 	};
 }
 
@@ -231,41 +246,18 @@ function readBranchModeState(branch: readonly SessionEntry[]): {
 
 /**
  * Resolve a toolset's effective enabled state through the same tier chain
- * restore applies per toolset: chat-branch entry → settings pin → packaged
- * `defaultEnabled ?? true`.
+ * restore applies: chat-branch entry → settings pin → `defaultEnabled ?? true`
+ * (`settingsDefaults` in the on-disk shape `readMergedToolsetDefaults()`
+ * returns; a null tombstone falls through like no entry). Allowlist-aware:
+ * when the branch's mode entry says `"allowlist"`, the allowlist is
+ * authoritative and the ledger is bypassed — the read is mode-dependent by
+ * design. `persistedEntry` is true only when the last branch entry carries
+ * a boolean `enabled`; restore uses it to pick the `restored` vs `changed`
+ * emit.
  *
- * **Allowlist-aware:** when the branch's last mode entry says
- * `"allowlist"`, the set-level override is authoritative — the resolver
- * answers `allowlist.includes(spec.id)` and per-toolset branch entries and
- * settings pins are bypassed (the same rule as restore's allowlist
- * short-circuit), so a suppressed toolset resolves `false` instead of
- * falling through the tier chain to `defaultEnabled ?? true` while the
- * mask is suppressing it. The mode is read from the passed `branch`, not
- * module state: a consumer whose handler runs before masking's restore in
- * a fresh process would otherwise see an unpopulated mirror and report a
- * suppressed toolset ON. Only external callers can observe the allowlist
- * branch (restore and the turn re-assert short-circuit before reaching the
- * resolver in allowlist mode).
- *
- * `settingsDefaults` is the on-disk shape
- * `Record<persistKey, { enabled: boolean }>` (see `readMergedToolsetDefaults`);
- * the pin is the wrapped object, unwrapped via `?.enabled`. A null
- * (tombstoned) last branch entry falls through to the next tier, same as
- * no entry at all.
- *
- * `persistedEntry` is true only when the last branch entry carries a
- * boolean `enabled` (a `null` tombstone or no entry resolves `false`) —
- * restore uses it to pick the
- * `restored` vs `changed` emit; the turn-boundary re-assert only needs
- * `.enabled`. Shared by both so the two can never drift on what
- * "effectively off" means.
- *
- * @public — the consumer rule: display and toggle-gating read intent via
- * `effectiveEnabled(spec, branch, readMergedToolsetDefaults())` (`branch`
- * from `ctx.sessionManager.getBranch()` inside a handler) so an inert
- * toolset (members hidden or not yet connected) shows its persisted state
- * and an "off" toggle is honored rather than refused; read `.enabled` only.
- * `isEnabled()` stays the observation read — see the README.
+ * @public — display surfaces read `.enabled` (`branch` from
+ * `ctx.sessionManager.getBranch()` inside a handler); never use it to gate
+ * a toggle — call the toggle and catch.
  */
 export function effectiveEnabled(
 	spec: ToolsetSpec,
@@ -287,10 +279,12 @@ export function effectiveEnabled(
 }
 
 /** Exclusion tier chain: chat-branch entry → settings pin → packaged
- *  `defaultEnabled ?? true`. Internal call sites (restore's per-toolset
- *  loop, the exclusion re-assert) use this directly — mode is
- *  loop-invariant and already resolved to exclusion at those sites, so
- *  re-reading the branch mode entry per toolset would be wasted work. */
+ *  `defaultEnabled ?? true`. Internal call sites (`effectiveEnabled`'s
+ *  exclusion path, restore's per-toolset loop, the exclusion re-assert,
+ *  `executeBatchPlan`'s delta basis, `getEffectiveDefault` via an empty
+ *  branch) use this directly — mode is loop-invariant and already
+ *  resolved to exclusion at those sites, so re-reading the branch mode
+ *  entry per toolset would be wasted work. */
 function resolveExclusionTier(
 	spec: ToolsetSpec,
 	branch: readonly SessionEntry[],
@@ -331,7 +325,6 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		(globalThis as any)[RESTORE_EVENT_KEY] = event;
 
 		const registry = getRegistry();
-		const ms = getModuleState();
 
 		// ---- Child-policy defer: read + publish/consume ----
 		// MUST run at the TOP, before the allowlist short-circuit: the allowlist
@@ -341,12 +334,7 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		// The var is a static pid tag; no per-tool_call work, no delta gating.
 		const policy = readChildPolicy();
 		const deferVar = process.env[DEFER_ENV];
-		// Snapshot the defer decision BEFORE any publish side effect (own policy
-		// is authoritative, so the snapshot includes it). Load-bearing rules are
-		// publish-only-when-absent and foreign-leave-untouched below, not this
-		// ordering — a child inherits the PARENT's pid, which is foreign to it,
-		// so no ordering of our reads/writes can flip that.
-		const deferring = policy === "defer" && isForeignDeferVar();
+		const deferring = policy === "defer" && isDeferredChild();
 
 		if (policy === "defer") {
 			// Absent OR EMPTY both publish: an empty value is garbage no
@@ -371,9 +359,7 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 			// Child deferring to its spawner: skip EVERYTHING — mode resolution,
 			// the allowlist short-circuit, and the per-toolset loop (both the
 			// settings tier AND the branch tier — our own branch entries must not
-			// apply either). No restored/changed events. Module state keeps its
-			// pre-restore values; harmless, because nothing acts on them under
-			// defer (the defer check precedes the dispatcher branch).
+			// apply either). No restored/changed events.
 			return;
 		}
 
@@ -388,13 +374,6 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		const { mode, allowlist: allowArr } = readBranchModeState(
 			ctx.sessionManager.getBranch(),
 		);
-		ms.defaultResolutionMode = mode;
-		// Mirror the allowlist into module state so the parameterless
-		// `getActiveAllowlist()` can read it — branch is the source of truth,
-		// module state is the live mirror (same pattern as
-		// `defaultResolutionMode`). `setDefaultResolutionMode` writes this same
-		// field when it appends the mode entry. Non-allowlist modes → undefined.
-		ms.activeAllowlist = mode === "allowlist" ? allowArr : undefined;
 
 		// Allowlist short-circuit: the allowlist is a finite array of
 		// toolset ids stored in the branch mode entry; the suppression (the
@@ -418,19 +397,19 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 			// toolset) is kept as-is — `setActiveTools` is a full replacement, so we
 			// must not rebuild the set from only allowlist members.
 			const current = pi.getActiveTools();
-			const registered = getActuatableNames(pi);
+			const actuatable = getActuatableNames(pi);
 			const desired = computeAllowlistDesired(
 				allowArr,
 				current,
-				registered,
+				actuatable,
 				registry,
 			);
 			pi.setActiveTools(desired);
 
 			// Phase 2: notify AFTER state is final. `restored` for every
 			// registered toolset — the whole pass is a branch replay of the
-			// authoritative allowlist entry, not a live toggle (see the JSDoc on
-			// `getActiveAllowlist` for the event-type divergence by mode).
+			// authoritative allowlist entry, not a live toggle (see the restore
+			// contract on `TOOLSET_EVENTS` for the event-type divergence by mode).
 			for (const [, entry] of registry) {
 				_emitToolsetEvents(
 					entry.spec,
@@ -499,8 +478,8 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		const registry = getRegistry();
 		const current = pi.getActiveTools();
 		const currentSet = new Set(current);
-		const registered = getActuatableNames(pi);
-		const next = computeAllowlistDesired(allow, current, registered, registry);
+		const actuatable = getActuatableNames(pi);
+		const next = computeAllowlistDesired(allow, current, actuatable, registry);
 		// Delta gate — no-op unless the active set actually changed. `next`/`current`
 		// may share a length while differing (a leak removed AND a member re-added),
 		// so compare length AND that every desired tool is already current.
@@ -546,8 +525,6 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 	// force-removal; force-removal reconcilers are rarer than force-add
 	// ones and this has not been reported.)
 	const reassertDisabled = (_event: unknown, ctx: ExtensionContext): void => {
-		const ms = getModuleState();
-		if (ms.activeAllowlist !== undefined) return; // allowlist mode — reassertAllowlist owns it
 		const registry = getRegistry();
 		const current = pi.getActiveTools();
 
@@ -560,8 +537,8 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		const suppress = new Set<string>();
 		for (const [, entry] of registry) {
 			// Exclusion mode is established by the dispatcher (this function is
-			// only reached when `ms.activeAllowlist === undefined`), so the tier
-			// chain is used directly — no per-toolset mode re-read.
+			// only reached when the branch's mode entry resolves to exclusion),
+			// so the tier chain is used directly — no per-toolset mode re-read.
 			const { enabled } = resolveExclusionTier(
 				entry.spec,
 				branch,
@@ -574,10 +551,10 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 
 		const next = current.filter((n) => !suppress.has(n));
 		// Delta gate — no-op unless the active set actually changed. `next` is
-		// a filter of `current`, so equal length already implies equality; the
-		// containment check is kept to mirror reassertAllowlist's gate.
-		const currentSet = new Set(current);
-		if (next.length === current.length && next.every((n) => currentSet.has(n))) {
+		// a filter of `current`, so equal length already implies equality
+		// (unlike reassertAllowlist's gate, where same-length different sets
+		// are possible and the containment check is load-bearing).
+		if (next.length === current.length) {
 			return;
 		}
 		pi.setActiveTools(next);
@@ -586,6 +563,7 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		// drift: names in `current` but not `next` (leak direction). The
 		// `currentSet.has(n)` guard skips toolsets whose names were never
 		// active — removing nothing is not drift, so no false `changed`.
+		const currentSet = new Set(current);
 		const nextSet = new Set(next);
 		for (const [, entry] of registry) {
 			const names = [...entry.spec.names];
@@ -605,13 +583,24 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		// could carry an allowlist mask; the dispatcher placement guarantees it
 		// is guarded rather than hoping fresh branches carry no mode entries).
 		// Never reads settings here, so deferring children shed the per-turn IO.
-		if (isForeignDeferVar()) return;
+		if (isDeferredChild()) return;
 
-		const ms = getModuleState();
-		if (ms.activeAllowlist === undefined) {
+		// Arm selection reads the branch — the same shared read restore, the
+		// resolver, and the toggle refusal use. No module-state mirror
+		// participates: a mirror lags the branch whenever a mode entry is
+		// appended without the module write (e.g. a raw append in a fresh
+		// process before its first restore — there the branch read enforces the
+		// allowlist from the first turn instead of running the exclusion
+		// re-assert over allowlisted state). Fail-open/fail-closed edge cases
+		// (absent entry → exclusion, corrupt array → `[]`) come with
+		// `readBranchModeState`'s contract and now govern this call site.
+		const { mode, allowlist } = readBranchModeState(
+			ctx.sessionManager.getBranch(),
+		);
+		if (mode === "exclusion") {
 			reassertDisabled(event, ctx);
 		} else {
-			reassertAllowlist(ms.activeAllowlist);
+			reassertAllowlist(allowlist);
 		}
 	};
 
@@ -622,7 +611,7 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 	//
 	// ponytail: reassertDisabled computes effective state from the branch,
 	// like restore — so a live-applied disable with no branch entry
-	// (`applyToolsetEnabled(pi, spec, false)`) is not defended. By design
+	// (`forceToolsetEnabled(pi, spec, false)`) is not defended. By design
 	// (the re-assert must not drift from restore); that API is used in the
 	// allowlist restore path, not for interactive exclusion-mode toggles.
 	pi.on("before_agent_start", onBeforeAgentStart);
@@ -666,72 +655,39 @@ export function lastCustomEntry<T>(
 }
 
 // ---------------------------------------------------------------------------
-// Helper: enable a single toolset (writes entry + emits if state changed)
+// Shared actuation primitives — loadout writes only; persisting and
+// emitting live in executeBatchPlan (toggle path) and _applyRestoreToolset
+// (restore path).
 // ---------------------------------------------------------------------------
 
-function _applyEnable(spec: ToolsetSpec, pi: ExtensionAPI): void {
-	// One scan collecting BOTH sets: the witness gate tests the REGISTERED
-	// set; the union filters through the ACTUATABLE set. (Explicit-toggle
-	// path, not per-turn, so the single pass is fine.)
-	const { registered, actuatable } = scanToolNames(pi);
-	const registeredNames = [...spec.names].filter((n) => registered.has(n));
+/** Add a toolset's actuatable, not-yet-active members to the active set.
+ *  A hidden member can never be active, so the add filters through the
+ *  actuatable set — handing one to setActiveTools is a silent drop. A
+ *  no-op when next === current (skips the redundant loadout write and
+ *  pi's system-prompt rebuild). Returns whether any write occurred. */
+function actuateAdd(spec: ToolsetSpec, pi: ExtensionAPI): boolean {
 	const current = new Set(pi.getActiveTools());
-
-	// Witness gate — a no-op requires the ON state to be fully witnessed:
-	// every member registered AND every member active. `[].every()` is
-	// vacuously true, so the length test is load-bearing: without it the gate
-	// early-returns on a partially-registered toolset (server not connected
-	// yet) and deletes the sole intent write, force-removing every turn for a
-	// defaultEnabled: false toolset once its members appear. An inert toolset
-	// (members all hidden) is likewise never witnessed on: it persists intent
-	// and emits while issuing no loadout write.
-	const witnessedOn =
-		registeredNames.length === spec.names.size &&
-		registeredNames.every((n) => current.has(n));
-	if (witnessedOn) return;
-
-	// Adding filters through the actuatable set — a hidden member can never
-	// be active, so handing it to setActiveTools is a silent drop.
-	const toAdd = registeredNames.filter(
+	const actuatable = getActuatableNames(pi);
+	const toAdd = [...spec.names].filter(
 		(n) => actuatable.has(n) && !current.has(n),
 	);
-	if (toAdd.length > 0) {
-		pi.setActiveTools([...new Set([...current, ...toAdd])]);
-	}
-	pi.appendEntry(spec.persistKey, { enabled: true });
-	_emitToolsetEvents(spec, pi, TOOLSET_EVENTS.changed, true);
+	if (toAdd.length === 0) return false;
+	pi.setActiveTools([...new Set([...current, ...toAdd])]);
+	return true;
 }
 
-// ---------------------------------------------------------------------------
-// Helper: disable a single toolset (writes entry + emits if state changed)
-// ---------------------------------------------------------------------------
-
-function _applyDisable(spec: ToolsetSpec, pi: ExtensionAPI): void {
+/** Remove a toolset's active members from the active set. Filters by raw
+ *  spec.names — a stale-but-active member must be removed even if it is no
+ *  longer registered (or is hidden, which can never be active and so removes
+ *  nothing). Only the ADDING direction filters through the actuatable set.
+ *  A no-op when nothing was removed (avoids handing pi back its own active
+ *  list). Returns whether any write occurred. */
+function actuateRemove(spec: ToolsetSpec, pi: ExtensionAPI): boolean {
 	const current = pi.getActiveTools();
-	// Removal filters by raw spec.names — a stale-but-active member must be
-	// removed even if it is no longer registered (or is hidden, which can
-	// never be active and so removes nothing). Only the ADDING direction
-	// filters through the actuatable set.
 	const filtered = current.filter((n) => !spec.names.has(n));
-
-	if (filtered.length !== current.length) {
-		pi.setActiveTools(filtered);
-		pi.appendEntry(spec.persistKey, { enabled: false });
-		_emitToolsetEvents(spec, pi, TOOLSET_EVENTS.changed, false);
-		return;
-	}
-
-	// Nothing to remove. Early-return only when the OFF state is fully
-	// WITNESSED: every member registered and actuatable, so absence of
-	// activity actually proves the intent is applied. An inert or partially-
-	// registered toolset is never witnessed off — it persists the off entry
-	// and emits while issuing no loadout write. Empty names is vacuously
-	// witnessed (0 === 0) and still no-ops.
-	const actuatable = getActuatableNames(pi);
-	const actuatableNames = [...spec.names].filter((n) => actuatable.has(n));
-	if (actuatableNames.length === spec.names.size) return;
-	pi.appendEntry(spec.persistKey, { enabled: false });
-	_emitToolsetEvents(spec, pi, TOOLSET_EVENTS.changed, false);
+	if (filtered.length === current.length) return false;
+	pi.setActiveTools(filtered);
+	return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -748,30 +704,15 @@ function _applyRestoreToolset(
 	isPersistedEntry: boolean,
 ): void {
 	if (enabled) {
-		// Adding filters through the actuatable set — same rule as
-		// _applyEnable (a hidden member can never be active). The toAdd guard
+		// Shared add-path with the toggle path (actuateAdd): the toAdd guard
 		// skips the redundant full-loadout write + system-prompt rebuild when
 		// next === current.
-		const current = new Set(pi.getActiveTools());
-		const actuatable = getActuatableNames(pi);
-		const toAdd = [...spec.names].filter(
-			(n) => actuatable.has(n) && !current.has(n),
-		);
-		if (toAdd.length > 0) {
-			pi.setActiveTools([...new Set([...current, ...toAdd])]);
-		}
+		actuateAdd(spec, pi);
 	} else {
-		const current = pi.getActiveTools();
-		// Use spec.names.has(n) (NOT the actuatable set) to match _applyDisable —
-		// an unregistered spec member active in the list must be removed on
+		// Shared remove-path with the toggle path (actuateRemove) — an
+		// unregistered spec member active in the list must be removed on
 		// restore just like a manual disable would.
-		const filtered = current.filter((n) => !spec.names.has(n));
-		// Pure-removal filter: equal length implies zero names removed, so the
-		// write would hand pi back its own active list (a redundant system-prompt
-		// rebuild). Mirrors the `toAdd.length > 0` guard in the enabled branch.
-		if (filtered.length !== current.length) {
-			pi.setActiveTools(filtered);
-		}
+		actuateRemove(spec, pi);
 	}
 
 	// Always emit regardless of state (always-emit invariant)
@@ -782,94 +723,419 @@ function _applyRestoreToolset(
 }
 
 // ---------------------------------------------------------------------------
-// Enable cascade + cycle detection
+// Batch planner and executor — pure plan, pre-write throws
 // ---------------------------------------------------------------------------
 
-function _enableToolset(
-	registry: Registry,
-	spec: ToolsetSpec,
-	pi: ExtensionAPI,
-	path: string[],
-): void {
-	if (path.includes(spec.id)) {
-		throw new Error(
-			`[pi-tool-masking] Cycle detected: ${[...path, spec.id].join(" \u2192 ")}`,
-		);
-	}
-
-	path.push(spec.id);
-
-	// Always cascade to dependencies first
-	if (spec.requires) {
-		for (const depId of spec.requires) {
-			const dep = registry.get(depId);
-			if (!dep) continue; // forward reference — not yet registered
-			_enableToolset(registry, dep.spec, pi, path);
-		}
-	}
-
-	// Then enable self (no-op if already fully enabled)
-	_applyEnable(spec, pi);
-
-	path.pop();
+/** One requested toggle in a batch: final desired state for a toolset id. */
+export interface BatchOp {
+	id: string;
+	desired: boolean;
 }
 
-// ---------------------------------------------------------------------------
-// Disable reverse-cascade
-// ---------------------------------------------------------------------------
+/** Pure plan for a batch of toggle ops. `intent` is the resolved final state
+ *  per id (explicit targets ∪ cascade closure); `order` is the canonical
+ *  write/report/emit order — ops in op order, enable deps-first post-order
+ *  over `requires` in declaration order, disable self-first over dependents
+ *  in registry order, one global visited set across the whole batch. */
+export interface BatchPlan {
+	intent: Map<string, boolean>;
+	order: string[];
+}
 
-function _disableDependents(
-	registry: Registry,
-	disabledId: string,
-	pi: ExtensionAPI,
-	path: string[],
-): void {
-	for (const [id, entry] of registry) {
-		if (!entry.spec.requires?.includes(disabledId)) continue;
+/**
+ * Error thrown by {@link planBatch} when the registry graph contains a cycle
+ * reachable from any requested op. Atomic: the planner is pure and writes
+ * nothing, so the throw precedes every write and emit. Catch with
+ * `err?.name === "CycleError"`, NOT `instanceof` — same rationale as
+ * {@link AllowlistModeError} (throwers may belong to a different physical
+ * copy of this library). The message carries the discovered cycle path but
+ * is a diagnostic, not contract: never string-match it.
+ */
+export class CycleError extends Error {
+	/** The discovered cycle path, e.g. "A → B → A". */
+	readonly cyclePath: string;
 
+	constructor(cyclePath: string) {
+		super(`[pi-tool-masking] Cycle detected: ${cyclePath}`);
+		this.name = "CycleError";
+		this.cyclePath = cyclePath;
+	}
+}
+
+/**
+ * Error thrown by {@link planBatch} when the resolved batch intent is
+ * incoherent: an id would end up enabled while a transitive `requires`
+ * dependency of it is disabled by the same batch (the zero-hop form — two
+ * conflicting explicit ops on one id — throws the same error). Atomic: the
+ * planner is pure and writes nothing, so the throw precedes every write and
+ * emit. Catch with `err?.name === "ContradictionError"`, NOT `instanceof` —
+ * same rationale as {@link AllowlistModeError} (throwers may belong to a
+ * different physical copy of this library). The message is a diagnostic,
+ * not contract: never string-match it.
+ */
+export class ContradictionError extends Error {
+	constructor(detail: string) {
+		super(`[pi-tool-masking] contradictory toggle batch: ${detail}`);
+		this.name = "ContradictionError";
+	}
+}
+
+/**
+ * Compute the batch plan for toggle ops against the registry — pure, no
+ * writes, so it can run before any effect and throw atomically (a cycle or
+ * a contradiction anywhere reachable from the ops throws here, not during
+ * execution). Closure semantics: an enable pulls its `requires` closure on
+ * (deps first, in declaration order — the legacy enable walker's traversal,
+ * recorded as discovery order); a disable pulls its dependents closure off
+ * (self first, then dependents in registry order — the legacy disable
+ * walker's traversal). Explicit targets win over implied values, and the
+ * shared visited set makes every id appear exactly once in `order`.
+ * Unregistered ids: an explicit op throws (a deliberate claim by the caller
+ * — silently skipping it would swallow the bug class the refusal contract
+ * exists for); an implied closure dep keeps the lenient skip
+ * (forward-referenced `requires` entries stay tolerated).
+ *
+ * Contradiction rule (checked after closure resolution, over transitive
+ * closures — not direct `requires` edges): no id resolved to enabled may
+ * have an id resolved to disabled in its transitive `requires` closure.
+ * Both explicit/implied collision directions reduce to this invariant: an
+ * explicit enable over an implied-off pull leaves the disabling target off
+ * inside the enabled id's closure, and an explicit disable over an
+ * implied-on pull leaves the disabled id inside the enabling target's
+ * closure — either way the invariant fires. The one-hop special case
+ * (explicit enable X + explicit disable Y, X requires Y) and the zero-hop
+ * form (conflicting duplicate ops on one id) throw the same error; there is
+ * no winner-picking and no off-wins fallback — a caught refusal means
+ * "refused, nothing changed". The coherent explicit-beats-implied shape
+ * survives because the check only inspects enabled ids' closures: an off
+ * toolset imposes no requirement on its own dependencies (`enable Y` +
+ * `disable Z`, Z requires Y → {Y: true, Z: false} is legal).
+ *
+ * @internal — exported for planner-level tests; not a public API commitment.
+ */
+export function planBatch(ops: readonly BatchOp[]): BatchPlan {
+	const registry = getRegistry();
+	const intent = new Map<string, boolean>();
+	const explicitIntent = new Map<string, boolean>();
+	const order: string[] = [];
+	const path: string[] = [];
+
+	const visit = (id: string, desired: boolean, explicit: boolean): void => {
 		if (path.includes(id)) {
-			throw new Error(
-				`[pi-tool-masking] Cycle detected on disable: ${[...path, id].join(" \u2192 ")}`,
-			);
+			// Cycle detected in this traversal, before any write — atomic.
+			throw new CycleError([...path, id].join(" \u2192 "));
 		}
-
-		// Disable this dependent
-		_applyDisable(entry.spec, pi);
-
-		// Recurse to its dependents
+		if (intent.has(id)) {
+			if (!explicit) return; // implied revisit — first pull wins; the
+			// closure check below refuses any true/false disagreement
+			const claimed = explicitIntent.get(id);
+			if (claimed === undefined) {
+				// Explicit beats implied. The closure check below refuses the
+				// override whenever it breaks the coherence invariant. Record the
+				// claim too — every explicit write to intent updates the ledger,
+				// or a second conflicting explicit op would overwrite silently
+				// instead of throwing (and would erase the intermediate state the
+				// coherence pass could have caught).
+				intent.set(id, desired);
+				explicitIntent.set(id, desired);
+			} else if (claimed !== desired) {
+				// Conflicting explicit ops on one id — the zero-hop contradiction.
+				throw new ContradictionError(
+					`"${id}" is requested as both enabled and disabled`,
+				);
+			}
+			return;
+		}
+		const entry = registry.get(id);
+		if (!entry) {
+			if (explicit) {
+				throw new Error(
+					`[pi-tool-masking] unknown toolset id "${id}" in toggle batch`,
+				);
+			}
+			return; // implied unregistered dep — lenient skip (forward reference)
+		}
+		if (explicit) explicitIntent.set(id, desired);
 		path.push(id);
-		_disableDependents(registry, id, pi, path);
-		path.pop();
+		if (desired) {
+			// Enable: deps first (post-order over `requires`, declaration order).
+			for (const depId of entry.spec.requires ?? []) {
+				visit(depId, true, false);
+			}
+			path.pop();
+			intent.set(id, desired);
+			order.push(id);
+		} else {
+			// Disable: self first (pre-order), then dependents in registry order.
+			intent.set(id, desired);
+			order.push(id);
+			for (const [dependentId, depEntry] of registry) {
+				if (depEntry.spec.requires?.includes(id)) {
+					visit(dependentId, false, false);
+				}
+			}
+			path.pop();
+		}
+	};
+
+	for (const op of ops) visit(op.id, op.desired, true);
+
+	// Coherence invariant over transitive closures: an enabled id must not
+	// depend (transitively) on a disabled id. The walk only traverses
+	// requires edges already covered by the traversal above, so it is
+	// cycle-free by construction (cycles threw as CycleError).
+	for (const [id, desired] of intent) {
+		if (!desired) continue;
+		const seen = new Set<string>([id]);
+		const stack = [...(registry.get(id)?.spec.requires ?? [])];
+		while (stack.length > 0) {
+			const depId = stack.pop() as string;
+			if (seen.has(depId)) continue;
+			seen.add(depId);
+			const dep = registry.get(depId);
+			if (!dep) continue; // unregistered implied dep — lenient skip
+			if (intent.get(depId) === false) {
+				throw new ContradictionError(
+					`"${id}" would be enabled but its requirement "${depId}" is disabled by the same batch`,
+				);
+			}
+			stack.push(...(dep.spec.requires ?? []));
+		}
 	}
+
+	return { intent, order };
+}
+
+/**
+ * Execute a plan from {@link planBatch} — the sole toggle actuation path.
+ *
+ * Snapshot discipline: the caller threads the ONE branch value its boundary
+ * already read (the allowlist check's) plus one settings snapshot; this
+ * function derives `before` (pre-call resolved state, via the same
+ * `resolveExclusionTier` restore and consumers read) from that snapshot and
+ * never re-reads the branch. One public toggle call = one branch read and
+ * one settings read; a plan-time and execute-time disjoint snapshot is
+ * unreachable by construction.
+ *
+ * Delta gate — persist iff the plan's intent differs from `before` or a
+ * loadout write occurred. Inside a call the plan is the intent authority:
+ * the delta resolves against `before` instead of a fresh branch re-read.
+ * Loop correctness survives because each public call re-reads at its own
+ * boundary; clobber-repair and the disable residue case stay LOUD (wrote ⇒
+ * persist + report + emit fire with it); same-value repeats are silent.
+ * Exactly-once per call is structural: planBatch's global visited set makes
+ * `plan.order` contain each id exactly once.
+ *
+ * Emits fire only after ALL writes complete (payload per id from
+ * `plan.intent`, in `plan.order`) — one coherent transition per listener; no
+ * library-emitted `changed` event fires mid-batch, so a synchronous listener
+ * cannot intercept through the library's own event channel. Racing writers
+ * on other channels (`prepareLoadout` hooks reached inside `setActiveTools`,
+ * pi-core `entry_appended` listeners) can still append mid-batch; such a
+ * write for an id whose intent already matched is neither repaired nor
+ * reported and wins at the next restore by last-writer-wins.
+ *
+ * @internal — exported for executor-level tests; not a public API commitment.
+ */
+export function executeBatchPlan(
+	plan: BatchPlan,
+	pi: ExtensionAPI,
+	branch: readonly SessionEntry[],
+	defaults: ToolsetDefaultsMap,
+): ToggleResult[] {
+	const registry = getRegistry();
+	// Pre-call resolved state from the ONE threaded snapshot — the delta's
+	// basis. Exclusion tier directly: the boundary already established
+	// exclusion mode (allowlist throws before planning).
+	const before = new Map<string, boolean>();
+	for (const id of plan.intent.keys()) {
+		// plan.intent only holds registered ids (planBatch throws on explicit
+		// unknowns and skips implied ones), and the registry only grows.
+		const entry = registry.get(id) as RegistryEntry;
+		before.set(id, resolveExclusionTier(entry.spec, branch, defaults).enabled);
+	}
+
+	const results: ToggleResult[] = [];
+	// plan.order is duplicate-free by planner construction (its `intent.has`
+	// guard is the global visited set), so each id is actuated exactly once.
+	for (const id of plan.order) {
+		const entry = registry.get(id) as RegistryEntry;
+		const desired = plan.intent.get(id) === true;
+		// Loadout write — the delta gate's second disjunct.
+		const wrote = desired ? actuateAdd(entry.spec, pi) : actuateRemove(entry.spec, pi);
+		if (before.get(id) === desired && !wrote) continue; // silent repeat
+		pi.appendEntry(entry.spec.persistKey, { enabled: desired });
+		results.push({ id, enabled: desired });
+	}
+
+	// Post-execution emits — results are in plan.order, so the event order
+	// matches the write/report order. No library event has fired until now.
+	for (const result of results) {
+		const entry = registry.get(result.id) as RegistryEntry;
+		_emitToolsetEvents(entry.spec, pi, TOOLSET_EVENTS.changed, result.enabled);
+	}
+	return results;
 }
 
 // ---------------------------------------------------------------------------
-// ToolsetImpl — concrete Toolset returned by defineToolset
+// AllowlistModeError — the toggle boundary's refusal type
 // ---------------------------------------------------------------------------
+
+/**
+ * Error thrown when a toggle is attempted under allowlist governance
+ * (toggles are an exclusion-mode operation). Atomic: the throw precedes
+ * the cascade — no branch entry, no emit, no loadout write; a caught
+ * refusal means "refused, nothing changed". Catch with
+ * `err?.name === "AllowlistModeError"`, NOT `instanceof`: handles come
+ * from the `globalThis` registry and may belong to a different physical
+ * copy of this library (deliberately unlike {@link MalformedSettingsError},
+ * whose throwers and catchers share a module instance — see its JSDoc).
+ */
+export class AllowlistModeError extends Error {
+	/** The refused toolset's spec.id. Set on single-op refusals (through the
+	 *  {@link Toolset.enable}/`.disable` wrappers); absent (`undefined`) on
+	 *  batch-path refusals — the refusal is mode-global and attributes
+	 *  nothing, so batch callers render it from their own op list. The
+	 *  refusal does not depend on the requested value, so there are no
+	 *  `requested`/`effective` fields. */
+	specId?: string;
+
+	constructor(specId?: string) {
+		super(
+			specId !== undefined
+				? `[pi-tool-masking] enable/disable refused for "${specId}" in allowlist mode — the allowlist/focus set governs toolset state.`
+				: `[pi-tool-masking] toggle batch refused in allowlist mode — the allowlist/focus set governs toolset state.`,
+		);
+		this.name = "AllowlistModeError";
+		if (specId !== undefined) this.specId = specId;
+	}
+}
+
+/** Internal toggle boundary; the full contract (gate order, refusal
+ *  classes, delta semantics) lives on the public {@link toggleBatch} and
+ *  applies verbatim — `refusalSpecId` is only the single-op wrappers'
+ *  attribution, so the wrappers and the batch path share this one
+ *  implementation and cannot diverge. */
+function runBatch(
+	pi: ExtensionAPI,
+	sessionManager: BranchReader,
+	ops: readonly BatchOp[],
+	refusalSpecId?: string,
+): ToggleResult[] {
+	if (isDeferredChild()) return [];
+	if (ops.length === 0) return [];
+	const branch = sessionManager.getBranch();
+	if (readBranchModeState(branch).mode === "allowlist") {
+		throw new AllowlistModeError(refusalSpecId);
+	}
+	// Plan first (pure, throws on cycles/contradictions/unregistered ids
+	// before any read or write beyond the boundary's), then snapshot settings
+	// and execute against the threaded branch value.
+	const plan = planBatch(ops);
+	const defaults = readMergedToolsetDefaults();
+	return executeBatchPlan(plan, pi, branch, defaults);
+}
+
+/**
+ * Toggle a batch of toolsets in one call — the sole toggle actuation path;
+ * {@link Toolset.enable}/`.disable` are one-line single-op wrappers
+ * delegating here, so they cannot diverge from it.
+ *
+ * Gate order (every refusal atomic — nothing written, nothing emitted):
+ * defer → empty `ops` → allowlist refusal → plan → settings snapshot →
+ * execute. A deferring child returns `[]` before the mode check; an empty
+ * `ops` array returns `[]` before the mode check in every governance mode
+ * (an empty batch requests nothing). Under allowlist governance the whole
+ * batch is refused in one throw — a mode-global refusal carries no id
+ * (`err.specId === undefined`); consumers render the refusal from their
+ * own op list.
+ *
+ * Throws, all caught by `err?.name === ...` (never `instanceof` — throwers
+ * may belong to a different physical copy of this library), messages are
+ * diagnostics and never string-matched:
+ * - {@link AllowlistModeError} — allowlist governance (mode-global, no
+ *   `specId` on this path)
+ * - {@link CycleError} — any cycle reachable from any op, before any write
+ * - {@link ContradictionError} — the resolved intent is incoherent (an id
+ *   enabled while a transitive `requires` dependency of it is disabled by
+ *   the same batch; conflicting duplicate ops on one id are the zero-hop
+ *   form)
+ * - a plain `Error` — an explicit op naming an unregistered id (a
+ *   deliberate claim by the caller; implied closure deps that are
+ *   unregistered stay leniently skipped — forward references are
+ *   tolerated). Duplicate ops with the same `desired` dedupe silently.
+ *
+ * One batch is one coherent intent: the planner resolves explicit targets
+ * plus their cascade closures into a final state per id, and the result is
+ * a flattened intent delta — one {@link ToggleResult} per id whose final
+ * state differs from the pre-call resolved state or whose loadout wrote
+ * (an op already in its desired state is absent from the result). No
+ * library-emitted event fires until every write has completed; emits fire
+ * once, in the planner's discovery order. Sequences that disable a
+ * dependency while enabling something that requires it (e.g. "disable
+ * all, then enable the unit") must stay two calls — one batch would
+ * refuse the conflict as a contradiction.
+ */
+export function toggleBatch(
+	pi: ExtensionAPI,
+	sessionManager: BranchReader,
+	ops: readonly BatchOp[],
+): ToggleResult[] {
+	return runBatch(pi, sessionManager, ops);
+}
 
 class ToolsetImpl implements Toolset {
 	constructor(private readonly spec: ToolsetSpec) {}
 
-	enable(pi: ExtensionAPI): void {
-		const registry = getRegistry();
-		const path: string[] = [];
-		_enableToolset(registry, this.spec, pi, path);
+	enable(pi: ExtensionAPI, sessionManager: BranchReader): ToggleResult[] {
+		// One-line sugar over the sole toggle path — cannot diverge from it.
+		return runBatch(
+			pi,
+			sessionManager,
+			[{ id: this.spec.id, desired: true }],
+			this.spec.id,
+		);
 	}
 
-	disable(pi: ExtensionAPI): void {
-		const registry = getRegistry();
-		const path: string[] = [this.spec.id];
-
-		// Disable self
-		_applyDisable(this.spec, pi);
-
-		// Cascade to dependents (toolsets whose requires contains this one's id)
-		_disableDependents(registry, this.spec.id, pi, path);
+	disable(pi: ExtensionAPI, sessionManager: BranchReader): ToggleResult[] {
+		return runBatch(
+			pi,
+			sessionManager,
+			[{ id: this.spec.id, desired: false }],
+			this.spec.id,
+		);
 	}
 
 	isEnabled(pi: ExtensionAPI): boolean {
 		const active = new Set(pi.getActiveTools());
 		return [...this.spec.names].some((n) => active.has(n));
+	}
+}
+
+/**
+ * Error thrown by {@link defineToolset} when a different registered toolset
+ * already claims the spec's `persistKey` (two toolsets sharing one persistKey
+ * would fight over the same persisted intent entries). Registration writes
+ * nothing, so the throw is atomic. Carries the colliding `persistKey` and the
+ * `existingId` that owns it. Catch with
+ * `err?.name === "PersistKeyCollisionError"`, NOT `instanceof` — same
+ * rationale as {@link AllowlistModeError} (throwers may belong to a different
+ * physical copy of this library). The message is a diagnostic, not contract:
+ * never string-match it.
+ */
+export class PersistKeyCollisionError extends Error {
+	/** The persistKey two different toolset ids are claiming. */
+	readonly persistKey: string;
+	/** The spec.id of the already-registered toolset that owns the persistKey. */
+	readonly existingId: string;
+
+	constructor(persistKey: string, existingId: string) {
+		super(
+			`[pi-tool-masking] persistKey collision: "${persistKey}" is already used by toolset "${existingId}"`,
+		);
+		this.name = "PersistKeyCollisionError";
+		this.persistKey = persistKey;
+		this.existingId = existingId;
 	}
 }
 
@@ -907,9 +1173,7 @@ export function defineToolset(pi: ExtensionAPI, spec: ToolsetSpec): Toolset {
 	// Check persistKey collision across all entries (skip self for replace case)
 	for (const [id, entry] of registry) {
 		if (id !== spec.id && entry.spec.persistKey === spec.persistKey) {
-			throw new Error(
-				`[pi-tool-masking] persistKey collision: "${spec.persistKey}" is already used by toolset "${id}"`,
-			);
+			throw new PersistKeyCollisionError(spec.persistKey, id);
 		}
 	}
 
@@ -955,12 +1219,17 @@ export function defineToolset(pi: ExtensionAPI, spec: ToolsetSpec): Toolset {
 }
 
 /**
- * Set how toolsets with no persisted entry resolve on restore.
+ * Set how toolsets with no persisted entry resolve on restore:
+ * `"exclusion"` (default; fall back to `defaultEnabled ?? true`) or
+ * `"allowlist"` (only the listed ids are on; requires a non-empty array).
+ * The append is the governance authority switch — the only mode write, read
+ * back by restore, the re-assert dispatcher, the resolver, and the toggle
+ * boundary ({@link readBranchModeState}). In a deferring child this is
+ * validate-then-suppress: invalid input still throws, only the append is
+ * suppressed.
  *
- * - `"exclusion"` (default): toolsets fall back to `defaultEnabled ?? true`.
- * - `"allowlist"` (ids): only the listed toolset ids are on, everything else
- *   off — the finite, branch-persisted focus constraint, resilient to
- *   toolsets installed after the mode was set. Requires a non-empty array.
+ * @throws on an invalid mode string, or `"allowlist"` without a non-empty
+ *   array — including in a deferring child.
  */
 export function setDefaultResolutionMode(
 	pi: ExtensionAPI,
@@ -986,102 +1255,34 @@ export function setDefaultResolutionMode(
 			`[pi-tool-masking] defaultResolutionMode "allowlist" requires a non-empty allowlist array of toolset ids.`,
 		);
 	}
-	const ms = getModuleState();
-	ms.defaultResolutionMode = mode;
-	// Mirror into module state so `getActiveAllowlist()` stays consistent with
-	// the branch without a `sessionManager` dependency. Exclusion entries
-	// persist `{ mode }` only (unchanged shape);
-	// `.activeAllowlist` is undefined for non-allowlist modes. Copy the
-	// caller's array — the branch snapshots on append, but module state holds
-	// the live reference; a caller mutating the array post-call would
-	// otherwise drift the mirror from the branch.
-	ms.activeAllowlist =
+	// Deferring child: validate-then-suppress. The validation above is input
+	// validation, not a governance write, so it still throws here; only the
+	// branch append below (the governance authority switch) is suppressed,
+	// silently.
+	if (isDeferredChild()) return;
+	// Own the value at the write site: pi stores entry `data` by reference
+	// and serializes the branch on flush — it does NOT snapshot on append. A
+	// caller mutating the array post-call would otherwise edit persisted
+	// governance after the write-time validation above has passed, so the
+	// stored value must be masking-owned, not the caller's array. (The same
+	// invariant covers the read side: `readBranchModeState` copies on read.)
+	// Exclusion entries persist `{ mode }` only (unchanged shape).
+	const ownedAllowlist =
 		mode === "allowlist" && allowlist ? [...allowlist] : undefined;
 	pi.appendEntry(
 		MODE_PERSIST_KEY,
-		mode === "allowlist" ? { mode, allowlist } : { mode },
+		mode === "allowlist" ? { mode, allowlist: ownedAllowlist } : { mode },
 	);
 }
 
-export function getDefaultResolutionMode(): DefaultResolutionMode {
-	return getModuleState().defaultResolutionMode;
-}
-
 /**
- * Read the live allowlist array from module state (mirrored from the last
- * mode branch entry by `doRestore`'s mode-resolution block and by
- * `setDefaultResolutionMode` when it appends the entry). Returns the
- * `allowlist` array when the active mode is `"allowlist"`, otherwise
- * `undefined`.
- *
- * Parameterless (like `getDefaultResolutionMode`) — the consumer call site
- * receives `pi: ExtensionAPI`, which does not expose `sessionManager`, so a
- * `pi`-arg signature would not compile there. The branch remains the source
- * of truth; module state is the live mirror.
- *
- * **Event-type divergence by mode (restore contract):** under
- * exclusion, the per-toolset restore loop emits `restored` for
- * toolsets with a branch entry and `changed` for default-fallback toolsets
- * (no branch entry). Under allowlist, restore emits `restored` for **every**
- * registered toolset — the whole pass is a branch replay of the
- * authoritative allowlist entry, not a live toggle. A consumer expecting
- * `changed` for fallback toolsets during restore gets `restored` instead
- * while allowlist is active.
- *
- * **`requires` cascade:** not re-run during allowlist restore (same
- * independence invariant as per-toolset restore). A caller that passes an
- * allowlist missing a dependency gets that dep off — pass the forward
- * closure.
- */
-export function getActiveAllowlist(): string[] | undefined {
-	// Copy on read: module state is the internal mirror; handing out the live
-	// reference would let a consumer mutate it and corrupt the mirror.
-	const allowlist = getModuleState().activeAllowlist;
-	return allowlist ? [...allowlist] : undefined;
-}
-
-/**
- * Enumerate every registered toolset in the global registry.
- *
- * The returned array is a copy — mutating the array itself cannot corrupt
- * the registry — but each element is the **live registry entry**: mutating
- * `entry.spec` (e.g. `entry.spec.names = new Set(nextNames)`) reaches the
- * registry in place. The same `ToolsetImpl` instance stays registered, so
- * handles the consumer already holds keep working, no warn-and-replace
- * fires, and persisted on/off state is unaffected.
- *
- * This is the mechanism for changing a dynamically-managed toolset's
- * members at runtime (an MCP server gaining or losing tools). It is scoped
- * to consumers that are the toolset's membership authority (spec existing
- * only at runtime); a declared toolset's authority is its spec literal in
- * source — change members by changing code and re-registering. Caveats:
- *
- * - Assignment is data only: no actuation, no persistence, no event. Callers
- *   that want an immediate reconcile can call `applyToolsetEnabled(pi, spec,
- *   desired)`; a disabled toolset's newly-added members are removed by the
- *   per-turn `before_agent_start` re-assert, which reads the updated
- *   `spec.names`.
- * - Members pi does not activate on registration (not declarable —
- *   `codemode`/`deferred` — or `defaultActive: false`) that are
- *   added to an *on* toolset stay undeclared until the caller runs
- *   `applyToolsetEnabled`; a `hidden` member can never be declared
- *   (`applyToolsetEnabled` cannot help). Symmetrically, removing a name
- *   does not deactivate it (an on toolset can keep declaring a tool it no
- *   longer owns until pi itself re-hides or de-registers it).
- * - No overlap guard runs (that is a `defineToolset` registration-time
- *   check). Assign a fresh `Set`; a retained live reference mutated after
- *   assignment bypasses all discipline.
- * - `/reload` resets membership to the code-defined spec; persisted on/off
- *   state survives, membership does not.
- * - An emptied toolset (`new Set()`) is permitted, but `enable()`/`disable()`
- *   on it are complete no-ops — a new "off" cannot be recorded while empty
- *   (disable before emptying); a prior branch entry survives and
- *   repopulating revives actuation from persisted intent.
- *
- * No membership event exists: second-order consumers presenting member sets
- * must re-read via this function rather than caching.
- *
- * No `pi` argument needed — enumeration is a pure registry read.
+ * Enumerate every registered toolset in the global registry. The returned
+ * array is a copy, but its entries are the **live registry entries** — the
+ * runtime-membership mutation mechanism is `entry.spec.names = new Set(next)`
+ * (data only: no actuation, no persistence, no event; the per-turn
+ * re-assert reads the updated `spec.names`, and `forceToolsetEnabled`
+ * reconciles immediately). No membership event exists — re-read rather
+ * than cache. No `pi` argument needed. Full caveats: README.
  */
 export function getRegisteredToolsets(): readonly RegistryEntry[] {
 	return [...getRegistry().values()];
@@ -1093,17 +1294,14 @@ export function getRegisteredToolsets(): readonly RegistryEntry[] {
 
 /**
  * Tombstone a toolset's chat-branch entry: append `null` for `persistKey`
- * so `doRestore` falls through to the settings tier. Owns the
- * tombstone-write convention.
+ * so `doRestore` falls through to the settings tier. Dedup'd — no
+ * tombstone when the last entry is absent or already cleared. `branch` is
+ * the caller's snapshot (`ctx.sessionManager.getBranch()`), since
+ * `ExtensionAPI` exposes `appendEntry` but not `sessionManager`.
  *
- * Dedup: appends `null` only if the key has a prior entry whose last entry
- * is not already cleared. A toolset that was never toggled has no branch
- * entry — no tombstone is written. Consecutive restores with no intervening
- * toggle write zero tombstones.
- *
- * `branch` is the caller's branch snapshot
- * (`ctx.sessionManager.getBranch()`): `ExtensionAPI` exposes `appendEntry`
- * but not `sessionManager`, so the dedup read comes from the caller.
+ * Silent no-op in a deferring child (covers {@link clearAllToolsetEntries},
+ * which loops through here); raw `pi.appendEntry` stays available for
+ * deliberate ledger writes under defer.
  *
  * ponytail: dedup caps growth at one tombstone per toggle/restore cycle,
  * but many cycles in one session still stack entries. Upgrade path: a
@@ -1114,6 +1312,10 @@ export function clearToolsetEntry(
 	persistKey: string,
 	branch: readonly SessionEntry[],
 ): void {
+	// Deferring child: ledger writes are suppressed — silent noop, no read,
+	// no tombstone (covers clearAllToolsetEntries too, which loops through
+	// here).
+	if (isDeferredChild()) return;
 	const last = lastCustomEntry<{ enabled?: boolean } | null>(branch, persistKey);
 	const data = last?.data;
 	// No prior entry, a tombstoned last entry (data null), or a last entry
@@ -1141,19 +1343,16 @@ export function clearAllToolsetEntries(
 
 /**
  * Apply a toolset's enabled state via `setActiveTools` and emit
- * `TOOLSET_EVENTS.changed` — **without** writing a branch entry. The
- * live-apply half of a settings restore: pull the toolset to its
- * settings/packaged default without persisting a chat-branch pin.
- *
- * Inert toolset rule: for a non-empty toolset with zero actuatable members
- * (members still `hidden`, or its server not yet connected), the apply is a
- * no-op (nothing can be added or removed) but the `changed` event still
- * fires — the toolset announces `enabled: true`/`enabled: false` while
- * declaring nothing, and `isEnabled()` stays false until actuatable members
- * exist. This path never persists; only explicit `enable()`/`disable()`
- * write branch entries.
+ * `TOOLSET_EVENTS.changed` — **without** writing a branch entry, with no
+ * cascade or intent gate; call once per spec. Returns `void` by design: it
+ * shares the restore path, whose always-emit invariant can never honor the
+ * `ToggleResult[]` contract. For an inert toolset (zero actuatable
+ * members) the apply no-ops but the `changed` event still fires, and
+ * `isEnabled()` stays false until actuatable members exist. The primary
+ * actuation path under allowlist governance; stays live in a deferring
+ * child (persists nothing, reads no governance source).
  */
-export function applyToolsetEnabled(
+export function forceToolsetEnabled(
 	pi: ExtensionAPI,
 	spec: ToolsetSpec,
 	enabled: boolean,
@@ -1261,21 +1460,10 @@ export function parseToolsetDefaults(json: unknown): ToolsetDefaultsMap {
 }
 
 /**
- * Read and merge toolset defaults from settings.json (global + project).
- *
- * Reads `json.toolsetDefaults` from:
- *   `<agentDir>/settings.json`  (global)
- *   `<cwd>/.pi/settings.json`   (project)
- *
- * Where `agentDir = PI_CODING_AGENT_DIR ?? ~/.pi/agent`.
- * Missing/unreadable/malformed files contribute `{}`. Never throws.
- *
- * Returns the on-disk shape `Record<persistKey, { enabled: boolean }>`
- * (not flattened) — call sites unwrap with `?.enabled`. Project overrides
- * global per entry.
- *
- * @public — exported for snapshot-in usage (read once per loop
- * and pass to `getEffectiveDefault`).
+ * Read and merge `toolsetDefaults` from settings.json (global + project,
+ * project wins per entry). Returns the on-disk shape
+ * `Record<persistKey, { enabled: boolean }>`; missing/unreadable/malformed
+ * files contribute `{}`. Never throws.
  *
  * ponytail: hardcodes the two pi-core settings paths (global
  * `~/.pi/agent/settings.json`, project `<cwd>/.pi/settings.json`) with no
@@ -1313,21 +1501,11 @@ type ChildPolicy = "defer" | "settings";
 
 /**
  * Read `piToolMasking.childPolicy` from settings (global, then project).
- *
- * Precedence is SCALAR, per scope, project wins: each scope's parsed
- * settings object is read separately — the objects are never spread-merged,
- * or a project `"piToolMasking": {}` would silently drop a global
- * `childPolicy`.
- *
- * Never throws: malformed/unreadable settings JSON contributes `{}` for that
- * scope (safe-reader policy — the same file already breaks every
- * `toolsetDefaults` pin, and a throw from a `session_start` handler would
- * break restore over a file problem unrelated to childPolicy). A
- * present-but-invalid value (e.g. `"banana"`) is a config typo worth
- * surfacing: warns once per process (globalThis-flag dedup) and is treated
- * as absent. Key absent entirely → default `"defer"`.
- *
- * Read once per restore — the per-turn re-assert path never calls this.
+ * Precedence is SCALAR per scope, project wins — the objects are never
+ * spread-merged, or a project `"piToolMasking": {}` would silently drop a
+ * global `childPolicy`. Never throws; a present-but-invalid value warns
+ * once per process and is treated as absent; key absent → `"defer"`. Read
+ * once per restore — the per-turn re-assert path never calls this.
  *
  * @internal
  */
@@ -1365,33 +1543,21 @@ function readChildPolicy(): ChildPolicy {
 /**
  * Resolve a toolset's effective fresh-session default: settings tier (2)
  * then packaged `spec.defaultEnabled` (3). **Ignores resolution mode** —
- * callers that need mode-aware behavior must consult
- * `getDefaultResolutionMode()` themselves and act accordingly.
- *
- * Pass an explicit `snapshot` (the merged settings map from
- * `readMergedToolsetDefaults()`) when calling from a loop over multiple
- * toolsets — read the snapshot once before the loop and pass it in to
- * avoid re-reading disk per toolset. When `snapshot` is omitted the
- * function performs its own one-off `readMergedToolsetDefaults()` call.
- *
- * `snapshot` shares the on-disk shape
- * `Record<persistKey, { enabled: boolean }>`; the pin is unwrapped via
- * `?.enabled`. A missing or malformed entry falls through to
- * `spec.defaultEnabled ?? true`.
- *
- * @public — exported for call sites that need the settings-aware default
- * without re-implementing the reader (e.g. focus teardown and
- * post-install actuation).
+ * callers needing mode-aware behavior consult `readBranchModeState`
+ * themselves. Pass `snapshot` (`readMergedToolsetDefaults()`) when calling
+ * from a loop over multiple toolsets to avoid re-reading disk per toolset.
  */
 export function getEffectiveDefault(
 	spec: ToolsetSpec,
 	snapshot?: ToolsetDefaultsMap,
 ): boolean {
-	const map = snapshot ?? readMergedToolsetDefaults();
-	const settingsEnabled = map[spec.persistKey]?.enabled;
-	return typeof settingsEnabled === "boolean"
-		? settingsEnabled
-		: (spec.defaultEnabled ?? true);
+	// Empty branch: no chat-branch tier — falls through to settings pin,
+	// then `defaultEnabled ?? true`.
+	return resolveExclusionTier(
+		spec,
+		[],
+		snapshot ?? readMergedToolsetDefaults(),
+	).enabled;
 }
 
 // ---------------------------------------------------------------------------
@@ -1421,15 +1587,10 @@ export function setSettingsWriterOverrideForTests(
 }
 
 /**
- * Read one scope's settings.json (with the malformed-file guard), run
- * `mutator` against the parsed object, and write it back iff `mutator`
- * returns `true`. Returns the same boolean so callers whose result *is*
- * "did it write" (e.g. `clearToolsetDefaults`) can use it directly.
- *
- * `mutator` returns `false` to skip the write (used by clear when the
- * key is absent — no needless reformat of a hand-edited file). The
- * malformed-file guard throws before `mutator` runs, so a corrupt file is
- * never handed to a mutator and never overwritten.
+ * Read one scope's settings.json, run `mutator` against the parsed object,
+ * and write it back iff `mutator` returns `true` (the return value is
+ * "did it write"). The malformed-file guard throws before `mutator` runs,
+ * so a corrupt file is never handed to a mutator and never overwritten.
  *
  * ponytail: read-modify-write is not atomic — concurrent Pi sessions
  * writing the same global settings.json can lose writes. An advisory
@@ -1484,30 +1645,12 @@ function mutateSettingsJson(
 }
 
 /**
- * Write a batch of toolset default entries to one settings scope.
- *
- * `entries` is the on-disk shape `{ [persistKey]: { enabled: boolean } }`
- * — the same shape `readMergedToolsetDefaults()` returns. Each entry
- * becomes `toolsetDefaults[persistKey] = { enabled }` in the chosen
- * scope's settings file, preserving every other top-level key.
- *
- * Merge semantics: shallow per-entry within `toolsetDefaults`. Existing
- * entries for persistKeys NOT in `entries` are preserved; entries in
- * `entries` overwrite any same-key existing entry. A write where every
- * entry already matches its on-disk value is a no-op: the file is left
- * untouched (no reformat, no mtime bump).
- *
- * **Malformed-file guard:**
- *   - File missing → write fresh (nothing to lose).
- *   - File parses to a non-object (array, string, null) → **throw**
- *     (data-loss guard — would destroy unparsable user config).
- *   - `JSON.parse` throws → **throw** (same reason).
- *
- * Returns the path of the settings file the entries were merged into
- * (whether or not any entry actually changed — the file is the write
- * destination either way).
- *
- * @public
+ * Write a batch of `toolsetDefaults` entries to one settings scope
+ * (`entries` in the shape `readMergedToolsetDefaults()` returns; shallow
+ * per-entry merge — unrelated entries preserved). A no-change write leaves
+ * the file untouched. Malformed-file guard: missing file → write fresh;
+ * non-object or unparsable JSON → **throw** rather than overwrite user
+ * config. Returns the destination file's path.
  */
 export function writeToolsetDefaults(
 	entries: ToolsetDefaultsMap,
@@ -1548,20 +1691,11 @@ export function writeToolsetDefaults(
 }
 
 /**
- * Remove the `toolsetDefaults` wrapper key entirely from one scope's
- * settings file, preserving every other top-level key. After this, every
- * toolset in that scope falls back to tier 3 (packaged default, or
- * `spec.defaultEnabled ?? true`).
- *
- * Returns the path of the settings file the key was removed from, or
- * `null` if the key was already absent (or the file was missing). No
- * per-entry clear path by design — callers who want that write an
- * `entries` map without the unwanted keys via `writeToolsetDefaults`.
- *
- * **Malformed-file guard:** same as `writeToolsetDefaults` — throws on
- * non-object or unparsable JSON rather than overwriting user config.
- *
- * @public
+ * Remove the `toolsetDefaults` wrapper key from one scope's settings file,
+ * preserving every other top-level key (every toolset in that scope then
+ * falls back to its packaged default). Returns the file's path, or `null`
+ * if the key was already absent. Malformed-file guard: same as
+ * {@link writeToolsetDefaults}.
  */
 export function clearToolsetDefaults(
 	scope: "global" | "project",
@@ -1587,11 +1721,10 @@ export function clearToolsetDefaults(
 
 /**
  * Error thrown when refusing to overwrite a malformed or non-object
- * settings.json to prevent data-loss of user pi-core config.
- *
- * @public — exported for downstream consumers to distinguish malformed-file
- * errors from generic I/O errors without string-matching `message`.
- * Catch with `instanceof MalformedSettingsError`.
+ * settings.json (data-loss guard). Catch with `instanceof` — safe here,
+ * thrown and caught from the same module instance; deliberately unlike
+ * {@link AllowlistModeError}'s name-based catch, which crosses copies via
+ * the shared `globalThis` registry. Don't harmonize either side.
  */
 export class MalformedSettingsError extends Error {
 	constructor(message: string) {

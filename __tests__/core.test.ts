@@ -8,8 +8,6 @@ import {
 	defineToolset,
 	TOOLSET_EVENTS,
 	setDefaultResolutionMode,
-	getDefaultResolutionMode,
-	getActiveAllowlist,
 	getRegisteredToolsets,
 	parseToolsetDefaults,
 	readMergedToolsetDefaults,
@@ -23,19 +21,21 @@ import {
 	MalformedSettingsError,
 	clearToolsetEntry,
 	clearAllToolsetEntries,
-	applyToolsetEnabled,
+	forceToolsetEnabled,
+	AllowlistModeError,
+	ContradictionError,
+	planBatch,
+	executeBatchPlan,
+	toggleBatch,
+	readBranchModeState,
+	type BatchOp,
 	type RegistryEntry,
 } from "../index.js";
-import { cleanRegistry, REGISTRY_KEY } from "./helpers.js";
+import { cleanRegistry, REGISTRY_KEY, catchByName, createEnv, reader } from "./helpers.js";
 
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
-
-function createEnv(): { mock: MockPI; pi: ExtensionAPI } {
-	const mock = new MockPI();
-	return { mock, pi: mock as unknown as ExtensionAPI };
-}
 
 /**
  * Local wrapper keeping the historical flat defaults shape at call sites:
@@ -262,8 +262,8 @@ describe("defineToolset — restore handler registration", () => {
 		// Companion co-activation: mirror base `changed` only.
 		pi.events.on(TOOLSET_EVENTS.changed, (data: any) => {
 			if (data.id === "base") {
-				if (data.enabled) comp.enable(pi);
-				else comp.disable(pi);
+				if (data.enabled) comp.enable(pi, reader(pi));
+				else comp.disable(pi, reader(pi));
 			}
 		});
 
@@ -307,14 +307,14 @@ describe("defineToolset — restore handler registration", () => {
 		});
 		pi1.events.on(TOOLSET_EVENTS.changed, (data: any) => {
 			if (data.id === "base") {
-				if (data.enabled) comp.enable(pi1);
-				else comp.disable(pi1);
+				if (data.enabled) comp.enable(pi1, reader(pi1));
+				else comp.disable(pi1, reader(pi1));
 			}
 		});
 		// Real pi activates every extension tool at startup before restore.
 		s1.setActiveTools(["base-tool", "comp-tool"]);
 		s1.fireLifecycleEvent("session_start"); // base off → mirror disables comp
-		base.enable(pi1); // base on → mirror enables comp
+		base.enable(pi1, reader(pi1)); // base on → mirror enables comp
 
 		expect(s1.getActiveTools()).toContain("base-tool");
 		expect(s1.getActiveTools()).toContain("comp-tool");
@@ -379,12 +379,18 @@ describe("defineToolset — collision policy", () => {
 		warnSpy.mockRestore();
 	});
 
-	it("throws on duplicate persistKey across different ids", () => {
+	it("throws PersistKeyCollisionError on duplicate persistKey across different ids", () => {
 		const { pi } = createEnv();
 		defineToolset(pi, makeSpec({ id: "a", persistKey: "shared-key" }));
-		expect(() =>
-			defineToolset(pi, makeSpec({ id: "b", persistKey: "shared-key" })),
-		).toThrow("persistKey collision");
+		try {
+			defineToolset(pi, makeSpec({ id: "b", persistKey: "shared-key" }));
+			expect.unreachable("defineToolset should have thrown");
+		} catch (err) {
+			// Name-based, not instanceof — same contract as the toggle refusals.
+			expect((err as { name?: string })?.name).toBe("PersistKeyCollisionError");
+			expect((err as { persistKey?: string }).persistKey).toBe("shared-key");
+			expect((err as { existingId?: string }).existingId).toBe("a");
+		}
 	});
 
 	it("allows duplicate id with identical spec (idempotent re-registration)", () => {
@@ -610,7 +616,7 @@ describe("Toolset.enable", () => {
 		mock.registerTool({ name: "tool-a", description: "" });
 		mock.registerTool({ name: "tool-b", description: "" });
 		const ts = defineToolset(pi, makeSpec());
-		ts.enable(pi);
+		ts.enable(pi, reader(pi));
 		expect(mock.getActiveTools()).toEqual(
 			expect.arrayContaining(["tool-a", "tool-b"]),
 		);
@@ -627,7 +633,7 @@ describe("Toolset.enable", () => {
 		mock.registerTool({ name: "tool-c", description: "" });
 		mock.setActiveTools(["tool-c"]);
 		const ts = defineToolset(pi, makeSpec());
-		ts.enable(pi);
+		ts.enable(pi, reader(pi));
 		const active = mock.getActiveTools();
 		expect(active).toContain("tool-a");
 		expect(active).toContain("tool-b");
@@ -641,7 +647,7 @@ describe("Toolset.enable", () => {
 			pi,
 			makeSpec({ names: new Set(["tool-a", "does-not-exist"]) }),
 		);
-		ts.enable(pi);
+		ts.enable(pi, reader(pi));
 		expect(mock.getActiveTools()).toContain("tool-a");
 		expect(mock.getActiveTools()).not.toContain("does-not-exist");
 	});
@@ -651,10 +657,10 @@ describe("Toolset.enable", () => {
 		mock.registerTool({ name: "tool-a", description: "" });
 		mock.registerTool({ name: "tool-b", description: "" });
 		const ts = defineToolset(pi, makeSpec());
-		ts.enable(pi);
+		ts.enable(pi, reader(pi));
 		const entryCount = mock.getEntries().length;
 		const emitSpy = vi.spyOn(mock.events, "emit");
-		ts.enable(pi);
+		ts.enable(pi, reader(pi));
 		expect(mock.getEntries().length).toBe(entryCount);
 		expect(emitSpy).not.toHaveBeenCalled();
 		emitSpy.mockRestore();
@@ -666,7 +672,7 @@ describe("Toolset.enable", () => {
 		mock.registerTool({ name: "tool-b", description: "" });
 		const emitSpy = vi.spyOn(mock.events, "emit");
 		const ts = defineToolset(pi, makeSpec());
-		ts.enable(pi);
+		ts.enable(pi, reader(pi));
 		expect(emitSpy).toHaveBeenCalledWith(TOOLSET_EVENTS.changed, {
 			id: "test.toolset",
 			enabled: true,
@@ -685,8 +691,8 @@ describe("Toolset.disable", () => {
 		mock.registerTool({ name: "tool-a", description: "" });
 		mock.registerTool({ name: "tool-b", description: "" });
 		const ts = defineToolset(pi, makeSpec());
-		ts.enable(pi);
-		ts.disable(pi);
+		ts.enable(pi, reader(pi));
+		ts.disable(pi, reader(pi));
 		expect(mock.getActiveTools()).not.toContain("tool-a");
 		expect(mock.getActiveTools()).not.toContain("tool-b");
 		const disableEntries = mock.getEntries("toolset-state:test.toolset");
@@ -706,15 +712,15 @@ describe("Toolset.disable", () => {
 			pi,
 			makeSpec({ id: "b", persistKey: "k:b", names: new Set(["b-only"]) }),
 		);
-		tsA.enable(pi);
-		tsB.enable(pi);
+		tsA.enable(pi, reader(pi));
+		tsB.enable(pi, reader(pi));
 		expect(mock.getActiveTools()).toEqual(
 			expect.arrayContaining(["a-only", "b-only"]),
 		);
-		tsA.disable(pi);
+		tsA.disable(pi, reader(pi));
 		expect(mock.getActiveTools()).not.toContain("a-only");
 		expect(mock.getActiveTools()).toContain("b-only");
-		tsB.disable(pi);
+		tsB.disable(pi, reader(pi));
 		expect(mock.getActiveTools()).not.toContain("a-only");
 	});
 
@@ -722,11 +728,11 @@ describe("Toolset.disable", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		const ts = defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
-		ts.enable(pi);
-		ts.disable(pi);
+		ts.enable(pi, reader(pi));
+		ts.disable(pi, reader(pi));
 		const entryCount = mock.getEntries().length;
 		const emitSpy = vi.spyOn(mock.events, "emit");
-		ts.disable(pi);
+		ts.disable(pi, reader(pi));
 		expect(mock.getEntries().length).toBe(entryCount);
 		expect(emitSpy).not.toHaveBeenCalled();
 		emitSpy.mockRestore();
@@ -736,9 +742,9 @@ describe("Toolset.disable", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		const ts = defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
-		ts.enable(pi);
+		ts.enable(pi, reader(pi));
 		const emitSpy = vi.spyOn(mock.events, "emit");
-		ts.disable(pi);
+		ts.disable(pi, reader(pi));
 		expect(emitSpy).toHaveBeenCalledWith(TOOLSET_EVENTS.changed, {
 			id: "test.toolset",
 			enabled: false,
@@ -764,9 +770,9 @@ describe("Invariant — disable reads getActiveTools, not getAllTools", () => {
 			pi,
 			makeSpec({ id: "B", persistKey: "k:B", names: new Set(["b"]) }),
 		);
-		tsA.enable(pi);
+		tsA.enable(pi, reader(pi));
 		expect(mock.getActiveTools()).toEqual(["a"]);
-		tsA.disable(pi);
+		tsA.disable(pi, reader(pi));
 		expect(mock.getActiveTools()).toEqual([]);
 	});
 
@@ -782,15 +788,15 @@ describe("Invariant — disable reads getActiveTools, not getAllTools", () => {
 			pi,
 			makeSpec({ id: "B", persistKey: "k:B", names: new Set(["b"]) }),
 		);
-		tsA.enable(pi);
-		tsB.enable(pi);
-		tsB.disable(pi);
+		tsA.enable(pi, reader(pi));
+		tsB.enable(pi, reader(pi));
+		tsB.disable(pi, reader(pi));
 		expect(mock.getActiveTools()).toEqual(["a"]);
-		tsA.disable(pi);
+		tsA.disable(pi, reader(pi));
 		expect(mock.getActiveTools()).toEqual([]);
 	});
 
-	it("disable of an already-absent toolset is no-op, does not revive peers", () => {
+	it("disable of an absent member persists the off entry (delta gate), does not revive peers", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "a", description: "" });
 		mock.registerTool({ name: "b", description: "" });
@@ -804,11 +810,22 @@ describe("Invariant — disable reads getActiveTools, not getAllTools", () => {
 		);
 		mock.setActiveTools(["b"]);
 		const emitSpy = vi.spyOn(mock.events, "emit");
-		defineToolset(
+		const callsBefore = mock.getSetActiveCalls().length;
+		const results = defineToolset(
 			pi,
 			makeSpec({ id: "A", persistKey: "k:A", names: new Set(["a"]) }),
-		).disable(pi);
-		expect(emitSpy).not.toHaveBeenCalled();
+		).disable(pi, reader(pi));
+		// Intent on (default tier), nothing active: no loadout write, but the
+		// off toggle is a real intent delta — it persists and emits.
+		expect(emitSpy).toHaveBeenCalledWith(TOOLSET_EVENTS.changed, {
+			id: "A",
+			enabled: false,
+		});
+		expect(mock.getEntries("k:A")).toEqual([
+			{ customType: "k:A", data: { enabled: false } },
+		]);
+		expect(results).toEqual([{ id: "A", enabled: false }]);
+		expect(mock.getSetActiveCalls()).toHaveLength(callsBefore);
 		expect(mock.getActiveTools()).toEqual(["b"]);
 		emitSpy.mockRestore();
 	});
@@ -847,15 +864,18 @@ describe("Toolset with empty names", () => {
 	it("enable does nothing and does not throw", () => {
 		const { mock, pi } = createEnv();
 		const ts = defineToolset(pi, makeSpec({ names: new Set([]) }));
-		expect(() => ts.enable(pi)).not.toThrow();
+		expect(() => ts.enable(pi, reader(pi))).not.toThrow();
 		expect(mock.getEntries().length).toBe(0);
 	});
 
-	it("disable does nothing and does not throw", () => {
+	it("disable persists the off entry (toggle opposing the resolved default) and does not throw", () => {
 		const { mock, pi } = createEnv();
 		const ts = defineToolset(pi, makeSpec({ names: new Set([]) }));
-		expect(() => ts.disable(pi)).not.toThrow();
-		expect(mock.getEntries().length).toBe(0);
+		expect(() => ts.disable(pi, reader(pi))).not.toThrow();
+		// Delta gate: an empty-names toggle opposing the resolved default
+		// (defaultEnabled ?? true) persists — the old vacuous-witness no-op is
+		// gone.
+		expect(mock.getEntries().length).toBe(1);
 	});
 
 	it("isEnabled returns false", () => {
@@ -882,15 +902,15 @@ describe("Peer composition (canonical test)", () => {
 			pi,
 			makeSpec({ id: "b", persistKey: "k:b", names: new Set(["b-only"]) }),
 		);
-		tsA.enable(pi);
-		tsB.enable(pi);
+		tsA.enable(pi, reader(pi));
+		tsB.enable(pi, reader(pi));
 		expect(mock.getActiveTools()).toEqual(
 			expect.arrayContaining(["a-only", "b-only"]),
 		);
-		tsA.disable(pi);
+		tsA.disable(pi, reader(pi));
 		expect(mock.getActiveTools()).not.toContain("a-only");
 		expect(mock.getActiveTools()).toContain("b-only");
-		tsB.disable(pi);
+		tsB.disable(pi, reader(pi));
 		expect(mock.getActiveTools()).not.toContain("a-only");
 		expect(mock.getActiveTools()).not.toContain("b-only");
 	});
@@ -912,16 +932,16 @@ describe("Peer composition (canonical test)", () => {
 			pi,
 			makeSpec({ id: "c", persistKey: "k:c", names: new Set(["c-tool"]) }),
 		);
-		tsA.enable(pi);
-		tsB.enable(pi);
-		tsC.enable(pi);
-		tsB.disable(pi);
+		tsA.enable(pi, reader(pi));
+		tsB.enable(pi, reader(pi));
+		tsC.enable(pi, reader(pi));
+		tsB.disable(pi, reader(pi));
 		expect(mock.getActiveTools()).toContain("a-tool");
 		expect(mock.getActiveTools()).not.toContain("b-tool");
 		expect(mock.getActiveTools()).toContain("c-tool");
-		tsC.disable(pi);
+		tsC.disable(pi, reader(pi));
 		expect(mock.getActiveTools()).not.toContain("c-tool");
-		tsA.disable(pi);
+		tsA.disable(pi, reader(pi));
 		expect(mock.getActiveTools()).not.toContain("a-tool");
 		expect(mock.getActiveTools()).not.toContain("b-tool");
 		expect(mock.getActiveTools()).not.toContain("c-tool");
@@ -998,10 +1018,10 @@ describe("getRegisteredToolsets", () => {
 		const entry = entries[0]!;
 		expect(entry.toolset.isEnabled(pi)).toBe(false);
 
-		entry.toolset.enable(pi);
+		entry.toolset.enable(pi, reader(pi));
 		expect(entry.toolset.isEnabled(pi)).toBe(true);
 
-		entry.toolset.disable(pi);
+		entry.toolset.disable(pi, reader(pi));
 		expect(entry.toolset.isEnabled(pi)).toBe(false);
 	});
 
@@ -1019,22 +1039,23 @@ describe("getRegisteredToolsets", () => {
 // ===================================================================
 
 describe("Default resolution mode", () => {
-	it("defaults to exclusion", () => {
-		expect(getDefaultResolutionMode()).toBe("exclusion");
+	it("empty branch resolves to exclusion (absent mode entry fails open to the ledger)", () => {
+		const { pi } = createEnv();
+		expect(readBranchModeState(reader(pi).getBranch()).mode).toBe("exclusion");
 	});
 
-	it("set and get exclusion mode", () => {
+	it("set exclusion mode appends a mode entry the branch read resolves", () => {
 		const { pi } = createEnv();
 		setDefaultResolutionMode(pi, "exclusion");
-		expect(getDefaultResolutionMode()).toBe("exclusion");
+		expect(readBranchModeState(reader(pi).getBranch()).mode).toBe("exclusion");
 	});
 
-	it("mode persists in globalThis shared state across calls", () => {
+	it("mode persists across successive setDefaultResolutionMode calls (last entry wins)", () => {
 		const { pi } = createEnv();
 		setDefaultResolutionMode(pi, "allowlist", ["some.web"]);
-		expect(getDefaultResolutionMode()).toBe("allowlist");
+		expect(readBranchModeState(reader(pi).getBranch()).mode).toBe("allowlist");
 		setDefaultResolutionMode(pi, "exclusion");
-		expect(getDefaultResolutionMode()).toBe("exclusion");
+		expect(readBranchModeState(reader(pi).getBranch()).mode).toBe("exclusion");
 	});
 
 	it("setDefaultResolutionMode appends a durable mode entry", () => {
@@ -1057,15 +1078,17 @@ describe("Default resolution mode", () => {
 // ===================================================================
 
 describe("Allowlist resolution mode", () => {
-	it("setDefaultResolutionMode persists the array; getActiveAllowlist reads it", () => {
+	it("setDefaultResolutionMode persists the array to the branch", () => {
 		const { mock, pi } = createEnv();
 		setDefaultResolutionMode(pi, "allowlist", [
 			"my-plugin.web",
 			"my-plugin.learn",
 		]);
 
-		expect(getDefaultResolutionMode()).toBe("allowlist");
-		expect(getActiveAllowlist()).toEqual(["my-plugin.web", "my-plugin.learn"]);
+		expect(readBranchModeState(reader(pi).getBranch())).toEqual({
+			mode: "allowlist",
+			allowlist: ["my-plugin.web", "my-plugin.learn"],
+		});
 		const entries = mock.getEntries("toolset-resolution-mode");
 		expect(entries).toHaveLength(1);
 		expect(entries[0]?.data).toEqual({
@@ -1140,7 +1163,7 @@ describe("Allowlist resolution mode", () => {
 		expect(mock.getActiveTools()).toEqual(["tool-a"]);
 
 		// Toolset installed AFTER focus was entered (a consumer's actuation
-		// path consults getActiveAllowlist() — the library has no actuation
+		// path consults readBranchModeState — the library has no actuation
 		// surface, so the consultation is simulated here).
 		defineToolset(
 			pi,
@@ -1151,7 +1174,9 @@ describe("Allowlist resolution mode", () => {
 				defaultEnabled: true,
 			}),
 		);
-		expect(getActiveAllowlist()).toEqual(["a"]); // b not in the array → off
+		expect(readBranchModeState(reader(pi).getBranch()).allowlist).toEqual([
+			"a",
+		]); // b not in the array → off
 
 		// Simulate actuation turning the new toolset on, then the next restore
 		// suppresses it.
@@ -1191,7 +1216,10 @@ describe("Allowlist resolution mode", () => {
 
 		// Focus lifted: exclusion supersedes the array; tiering resumes.
 		setDefaultResolutionMode(pi, "exclusion");
-		expect(getActiveAllowlist()).toBeUndefined();
+		expect(readBranchModeState(reader(pi).getBranch())).toEqual({
+			mode: "exclusion",
+			allowlist: [],
+		});
 
 		mock.setActiveTools(["tool-a", "tool-b"]);
 		mock.fireLifecycleEvent("session_start");
@@ -1212,7 +1240,9 @@ describe("Allowlist resolution mode", () => {
 		expect(() =>
 			setDefaultResolutionMode(pi, "allowlist", ["not-registered"]),
 		).not.toThrow();
-		expect(getActiveAllowlist()).toEqual(["not-registered"]);
+		expect(readBranchModeState(reader(pi).getBranch()).allowlist).toEqual([
+			"not-registered",
+		]);
 	});
 
 	it("changed-mirror companion never fires during allowlist restore (two-phase)", () => {
@@ -1239,8 +1269,8 @@ describe("Allowlist resolution mode", () => {
 		// Companion mirror on `changed` (the standard pattern).
 		pi.events.on(TOOLSET_EVENTS.changed, (data: any) => {
 			if (data.id === "base") {
-				if (data.enabled) comp.enable(pi);
-				else comp.disable(pi);
+				if (data.enabled) comp.enable(pi, reader(pi));
+				else comp.disable(pi, reader(pi));
 			}
 		});
 
@@ -1279,9 +1309,11 @@ describe("Allowlist resolution mode", () => {
 		mock.fireLifecycleEvent("session_start");
 
 		// Mode claim respected — not silently rewritten to "exclusion"...
-		expect(getDefaultResolutionMode()).toBe("allowlist");
-		// ...recovered to an empty array (consistent, not undefined)...
-		expect(getActiveAllowlist()).toEqual([]);
+		// ...recovered to an empty array (consistent, not "undefined")...
+		expect(readBranchModeState(reader(pi).getBranch())).toEqual({
+			mode: "allowlist",
+			allowlist: [],
+		});
 		// ...and the recovery fails CLOSED: nothing is on. (Recovering to
 		// "exclusion" instead would fail open — `defaultEnabled: true` would
 		// have turned tool-a on.)
@@ -1309,8 +1341,10 @@ describe("Allowlist resolution mode", () => {
 
 		mock.fireLifecycleEvent("session_start");
 
-		expect(getDefaultResolutionMode()).toBe("allowlist");
-		expect(getActiveAllowlist()).toEqual([]);
+		expect(readBranchModeState(reader(pi).getBranch())).toEqual({
+			mode: "allowlist",
+			allowlist: [],
+		});
 		expect(mock.getActiveTools()).toEqual([]);
 	});
 
@@ -1341,8 +1375,10 @@ describe("Allowlist resolution mode", () => {
 		mock.fireLifecycleEvent("session_start");
 
 		// Fall through to "exclusion" — no mode resurrection from the stale entry.
-		expect(getDefaultResolutionMode()).toBe("exclusion");
-		expect(getActiveAllowlist()).toBeUndefined();
+		expect(readBranchModeState(reader(pi).getBranch())).toEqual({
+			mode: "exclusion",
+			allowlist: [],
+		});
 		// Per-toolset tiering resumes: no entry, no pin → exclusion floor
 		// (`defaultEnabled ?? true`).
 		expect(mock.getActiveTools()).toEqual(["tool-a"]);
@@ -1366,8 +1402,7 @@ describe("Allowlist resolution mode", () => {
 
 		mock.fireLifecycleEvent("session_start");
 
-		expect(getDefaultResolutionMode()).toBe("exclusion");
-		expect(getActiveAllowlist()).toBeUndefined();
+		expect(readBranchModeState(reader(pi).getBranch()).mode).toBe("exclusion");
 		expect(mock.getActiveTools()).toEqual(["tool-a"]);
 	});
 });
@@ -1544,7 +1579,7 @@ describe("before_agent_start disabled-leak re-assert", () => {
 		// the user disables the ask toolset (writes a branch entry).
 		mock.fireLifecycleEvent("session_start");
 		expect(pi.getActiveTools()).toEqual(["search.web", "ask_user_question"]);
-		askTs.disable(pi);
+		askTs.disable(pi, reader(pi));
 		expect(pi.getActiveTools()).toEqual(["search.web"]);
 
 		// Simulate the reconciler punching through on the next turn.
@@ -1566,7 +1601,7 @@ describe("before_agent_start disabled-leak re-assert", () => {
 
 		// Effectively on: re-assert is a no-op — a default-on toolset is not
 		// a hard constraint, so the force-added tool is NOT removed.
-		askTs.enable(pi);
+		askTs.enable(pi, reader(pi));
 		mock.setActiveTools(["search.web", "ask_user_question"]);
 		changedSpy.mockClear();
 		mock.fireLifecycleEvent("before_agent_start");
@@ -1579,8 +1614,8 @@ describe("before_agent_start disabled-leak re-assert", () => {
 		mock.registerTool({ name: "tool-a", description: "" });
 		mock.registerTool({ name: "tool-b", description: "" });
 		const ts = defineToolset(pi, makeSpec());
-		ts.enable(pi);
-		ts.disable(pi);
+		ts.enable(pi, reader(pi));
+		ts.disable(pi, reader(pi));
 		expect(pi.getActiveTools()).toEqual([]);
 
 		const changedSpy = vi.fn();
@@ -1620,7 +1655,7 @@ describe("before_agent_start disabled-leak re-assert", () => {
 		// Tier 1 beats tier 2: an explicit branch entry `enabled: true` flips
 		// it back on — effectively on, so re-assert does not force-remove.
 		setDefaultsOverride({});
-		ts.enable(pi);
+		ts.enable(pi, reader(pi));
 		expect(pi.getActiveTools()).toEqual(["tool-a", "tool-b"]);
 		changedSpy.mockClear();
 		mock.fireLifecycleEvent("before_agent_start");
@@ -1641,10 +1676,10 @@ describe("before_agent_start disabled-leak re-assert", () => {
 			pi,
 			makeSpec({ id: "B", persistKey: "k:B", names: new Set(["b1"]) }),
 		);
-		tsA.enable(pi);
-		tsA.disable(pi);
-		tsB.enable(pi);
-		tsB.disable(pi);
+		tsA.enable(pi, reader(pi));
+		tsA.disable(pi, reader(pi));
+		tsB.enable(pi, reader(pi));
+		tsB.disable(pi, reader(pi));
 		expect(pi.getActiveTools()).toEqual([]);
 
 		// Only B's tool leaks back in; A's tools never return. The emit loop
@@ -1682,7 +1717,7 @@ describe("Dependency cascade on enable", () => {
 				requires: ["B"],
 			}),
 		);
-		tsL.enable(pi);
+		tsL.enable(pi, reader(pi));
 		expect(mock.getActiveTools()).toContain("b-tool");
 		expect(mock.getActiveTools()).toContain("l-tool");
 		expect(tsB.isEnabled(pi)).toBe(true);
@@ -1706,10 +1741,10 @@ describe("Dependency cascade on enable", () => {
 				requires: ["B"],
 			}),
 		);
-		tsL.enable(pi);
+		tsL.enable(pi, reader(pi));
 		expect(tsB.isEnabled(pi)).toBe(true);
 		expect(tsL.isEnabled(pi)).toBe(true);
-		tsB.disable(pi);
+		tsB.disable(pi, reader(pi));
 		expect(tsB.isEnabled(pi)).toBe(false);
 		expect(tsL.isEnabled(pi)).toBe(false);
 		expect(mock.getActiveTools()).not.toContain("b-tool");
@@ -1733,11 +1768,11 @@ describe("Dependency cascade on enable", () => {
 				requires: ["B"],
 			}),
 		);
-		tsB.enable(pi);
+		tsB.enable(pi, reader(pi));
 		expect(tsB.isEnabled(pi)).toBe(true);
-		tsB.disable(pi);
+		tsB.disable(pi, reader(pi));
 		expect(tsB.isEnabled(pi)).toBe(false);
-		tsL.enable(pi);
+		tsL.enable(pi, reader(pi));
 		expect(tsB.isEnabled(pi)).toBe(true);
 		expect(tsL.isEnabled(pi)).toBe(true);
 		expect(mock.getActiveTools()).toContain("b-tool");
@@ -1761,7 +1796,7 @@ describe("Dependency cascade on enable", () => {
 				requires: ["B"],
 			}),
 		);
-		tsL.enable(pi);
+		tsL.enable(pi, reader(pi));
 		expect(tsB.isEnabled(pi)).toBe(true);
 		// Directly remove B's tool (simulates external interference)
 		const withoutB = mock.getActiveTools().filter((n: string) => n !== "b-tool");
@@ -1769,7 +1804,7 @@ describe("Dependency cascade on enable", () => {
 		expect(tsB.isEnabled(pi)).toBe(false);
 		expect(tsL.isEnabled(pi)).toBe(true);
 		// Re-enable L restores the invariant
-		tsL.enable(pi);
+		tsL.enable(pi, reader(pi));
 		expect(tsB.isEnabled(pi)).toBe(true);
 	});
 
@@ -1790,7 +1825,7 @@ describe("Dependency cascade on enable", () => {
 				requires: ["B"],
 			}),
 		);
-		tsL.enable(pi);
+		tsL.enable(pi, reader(pi));
 		const bEntries = mock.getEntries("k:B");
 		expect(bEntries).toHaveLength(1);
 		expect(bEntries[0]?.data).toEqual({ enabled: true });
@@ -1813,7 +1848,7 @@ describe("Dependency cascade on enable", () => {
 				requires: ["B", "B"],
 			}),
 		);
-		tsL.enable(pi);
+		tsL.enable(pi, reader(pi));
 		expect(mock.getActiveTools()).toContain("b-tool");
 		expect(mock.getActiveTools()).toContain("l-tool");
 		const bEntries = mock.getEntries("k:B");
@@ -1843,7 +1878,7 @@ describe("Cascade appendEntry consistency", () => {
 				requires: ["B"],
 			}),
 		);
-		tsL.enable(pi);
+		tsL.enable(pi, reader(pi));
 		expect(mock.getEntries("k:L")).toHaveLength(1);
 		expect(mock.getEntries("k:B")).toHaveLength(1);
 	});
@@ -1865,8 +1900,8 @@ describe("Cascade appendEntry consistency", () => {
 				requires: ["B"],
 			}),
 		);
-		tsL.enable(pi);
-		tsB.disable(pi);
+		tsL.enable(pi, reader(pi));
+		tsB.disable(pi, reader(pi));
 		const lEntries = mock.getEntries("k:L");
 		expect(lEntries).toHaveLength(2);
 		expect(lEntries[1]?.data).toEqual({ enabled: false });
@@ -1911,10 +1946,11 @@ describe("Cycle detection on enable", () => {
 				requires: ["B"],
 			}),
 		);
-		expect(() => tsA.enable(pi)).toThrow("Cycle detected");
+		const err = catchByName(() => tsA.enable(pi, reader(pi)));
+		expect(err.name).toBe("CycleError");
 	});
 
-	it("cycle error message includes the full path", () => {
+	it("detects a three-node cycle (A → B → C → A) as a CycleError", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "a-tool", description: "" });
 		mock.registerTool({ name: "b-tool", description: "" });
@@ -1954,14 +1990,104 @@ describe("Cycle detection on enable", () => {
 				requires: ["B"],
 			}),
 		);
-		let error: Error | undefined;
-		try {
-			tsA.enable(pi);
-		} catch (e) {
-			error = e as Error;
+		const err = catchByName(() => tsA.enable(pi, reader(pi)));
+		// Messages are diagnostics, not contract — pin the error identity only.
+		expect(err.name).toBe("CycleError");
+	});
+
+	it("cycle throw precedes all writes and emits (enable direction)", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "a-tool", description: "" });
+		mock.registerTool({ name: "b-tool", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "A",
+				persistKey: "k:A",
+				names: new Set(["a-tool"]),
+				requires: ["B"],
+			}),
+		);
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "B",
+				persistKey: "k:B",
+				names: new Set(["b-tool"]),
+				requires: ["A"],
+			}),
+		);
+		const tsA = defineToolset(
+			pi,
+			makeSpec({
+				id: "A",
+				persistKey: "k:A",
+				names: new Set(["a-tool"]),
+				requires: ["B"],
+			}),
+		);
+		let emits = 0;
+		const off = pi.events.on(TOOLSET_EVENTS.changed, () => {
+			emits++;
+		});
+		const err = catchByName(() => tsA.enable(pi, reader(pi)));
+		expect(err.name).toBe("CycleError");
+		// Atomic: the planner throws before any loadout write, branch entry,
+		// or emit — a caught refusal means "refused, nothing changed".
+		expect(mock.getEntries()).toHaveLength(0);
+		expect(emits).toBe(0);
+		expect(mock.getActiveTools()).toEqual([]);
+		off();
+	});
+
+	it("sibling-subtree cycle leaves the clean sibling unapplied", () => {
+		const { mock, pi } = createEnv();
+		for (const name of ["a-tool", "b-tool", "c-tool", "d-tool"]) {
+			mock.registerTool({ name, description: "" });
 		}
-		expect(error).toBeDefined();
-		expect(error!.message).toMatch(/A → B → C → A/);
+		// A requires [B, C]; B is clean; C ↔ D cycle.
+		defineToolset(
+			pi,
+			makeSpec({ id: "B", persistKey: "k:B", names: new Set(["b-tool"]) }),
+		);
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "C",
+				persistKey: "k:C",
+				names: new Set(["c-tool"]),
+				requires: ["D"],
+			}),
+		);
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "D",
+				persistKey: "k:D",
+				names: new Set(["d-tool"]),
+				requires: ["C"],
+			}),
+		);
+		const tsA = defineToolset(
+			pi,
+			makeSpec({
+				id: "A",
+				persistKey: "k:A",
+				names: new Set(["a-tool"]),
+				requires: ["B", "C"],
+			}),
+		);
+		let emits = 0;
+		const off = pi.events.on(TOOLSET_EVENTS.changed, () => {
+			emits++;
+		});
+		const err = catchByName(() => tsA.enable(pi, reader(pi)));
+		expect(err.name).toBe("CycleError");
+		// B's subtree did NOT apply — the plan threw before any execution.
+		expect(mock.getEntries()).toHaveLength(0);
+		expect(emits).toBe(0);
+		expect(mock.getActiveTools()).toEqual([]);
+		off();
 	});
 
 	it("does not throw on diamond pattern (shared dependency)", () => {
@@ -2010,7 +2136,7 @@ describe("Cycle detection on enable", () => {
 				requires: ["B", "C"],
 			}),
 		);
-		expect(() => tsA.enable(pi)).not.toThrow();
+		expect(() => tsA.enable(pi, reader(pi))).not.toThrow();
 		expect(mock.getActiveTools()).toContain("a-tool");
 		expect(mock.getActiveTools()).toContain("b-tool");
 		expect(mock.getActiveTools()).toContain("c-tool");
@@ -2029,7 +2155,7 @@ describe("Cycle detection on enable", () => {
 				requires: ["A"],
 			}),
 		);
-		expect(() => tsA.enable(pi)).toThrow("Cycle detected");
+		expect(() => tsA.enable(pi, reader(pi))).toThrow("Cycle detected");
 	});
 });
 
@@ -2050,7 +2176,7 @@ describe("Forward references", () => {
 				requires: ["B"],
 			}),
 		);
-		expect(() => tsA.enable(pi)).not.toThrow();
+		expect(() => tsA.enable(pi, reader(pi))).not.toThrow();
 		expect(tsA.isEnabled(pi)).toBe(true);
 	});
 
@@ -2067,14 +2193,14 @@ describe("Forward references", () => {
 				requires: ["B"],
 			}),
 		);
-		tsA.enable(pi);
+		tsA.enable(pi, reader(pi));
 		expect(mock.getActiveTools()).toEqual(["a-tool"]);
 		const tsB = defineToolset(
 			pi,
 			makeSpec({ id: "B", persistKey: "k:B", names: new Set(["b-tool"]) }),
 		);
 		expect(tsB.isEnabled(pi)).toBe(false);
-		tsA.enable(pi);
+		tsA.enable(pi, reader(pi));
 		expect(tsB.isEnabled(pi)).toBe(true);
 		expect(mock.getActiveTools()).toContain("a-tool");
 		expect(mock.getActiveTools()).toContain("b-tool");
@@ -2113,11 +2239,11 @@ describe("Reverse cascade on disable", () => {
 				requires: ["B"],
 			}),
 		);
-		tsA.enable(pi);
+		tsA.enable(pi, reader(pi));
 		expect(tsA.isEnabled(pi)).toBe(true);
 		expect(tsB.isEnabled(pi)).toBe(true);
 		expect(tsC.isEnabled(pi)).toBe(true);
-		tsB.disable(pi);
+		tsB.disable(pi, reader(pi));
 		expect(tsB.isEnabled(pi)).toBe(false);
 		expect(tsA.isEnabled(pi)).toBe(false);
 		expect(tsC.isEnabled(pi)).toBe(true);
@@ -2140,11 +2266,11 @@ describe("Reverse cascade on disable", () => {
 				requires: ["B"],
 			}),
 		);
-		tsL.enable(pi);
-		tsB.disable(pi);
+		tsL.enable(pi, reader(pi));
+		tsB.disable(pi, reader(pi));
 		const entryCount = mock.getEntries().length;
 		const activeAfterFirst = mock.getActiveTools();
-		tsB.disable(pi);
+		tsB.disable(pi, reader(pi));
 		expect(mock.getEntries().length).toBe(entryCount);
 		expect(mock.getActiveTools()).toEqual(activeAfterFirst);
 	});
@@ -2176,11 +2302,11 @@ describe("Reverse cascade on disable", () => {
 				requires: ["A"],
 			}),
 		);
-		tsX.enable(pi);
+		tsX.enable(pi, reader(pi));
 		expect(tsX.isEnabled(pi)).toBe(true);
 		expect(tsA.isEnabled(pi)).toBe(true);
 		expect(tsB.isEnabled(pi)).toBe(true);
-		tsB.disable(pi);
+		tsB.disable(pi, reader(pi));
 		expect(tsB.isEnabled(pi)).toBe(false);
 		expect(tsA.isEnabled(pi)).toBe(false);
 		expect(tsX.isEnabled(pi)).toBe(false);
@@ -2192,40 +2318,6 @@ describe("Reverse cascade on disable", () => {
 // ===================================================================
 
 describe("Cycle detection on disable", () => {
-	it("throws on enable of a toolset in a cycle", () => {
-		const { mock, pi } = createEnv();
-		mock.registerTool({ name: "a-tool", description: "" });
-		mock.registerTool({ name: "b-tool", description: "" });
-		defineToolset(
-			pi,
-			makeSpec({
-				id: "A",
-				persistKey: "k:A",
-				names: new Set(["a-tool"]),
-				requires: ["B"],
-			}),
-		);
-		defineToolset(
-			pi,
-			makeSpec({
-				id: "B",
-				persistKey: "k:B",
-				names: new Set(["b-tool"]),
-				requires: ["A"],
-			}),
-		);
-		const tsA = defineToolset(
-			pi,
-			makeSpec({
-				id: "A",
-				persistKey: "k:A",
-				names: new Set(["a-tool"]),
-				requires: ["B"],
-			}),
-		);
-		expect(() => tsA.enable(pi)).toThrow("Cycle detected");
-	});
-
 	it("throws on disable of a toolset in a reverse cycle", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "a-tool", description: "" });
@@ -2257,12 +2349,542 @@ describe("Cycle detection on disable", () => {
 				requires: ["B"],
 			}),
 		);
-		// Note: _applyDisable(self) for A runs before the throw (a side effect),
-		// but the assertion is only on the throw, which is fine.
-		expect(() => tsA.disable(pi)).toThrow("Cycle detected on disable");
+		let emits = 0;
+		const off = pi.events.on(TOOLSET_EVENTS.changed, () => {
+			emits++;
+		});
+		const err = catchByName(() => tsA.disable(pi, reader(pi)));
+		expect(err.name).toBe("CycleError");
+		// Atomic in the disable direction too: the plan throws before the
+		// self-apply — no branch write, no emit, no loadout write.
+		expect(mock.getEntries()).toHaveLength(0);
+		expect(emits).toBe(0);
+		expect(mock.getActiveTools()).toEqual([]);
+		off();
 	});
 });
 
+// ===================================================================
+// Contradiction detection (planner-level)
+//
+// The refusal forms are multi-op — unreachable through the single-op
+// wrappers — so these pin the planner directly. The planner is pure: the
+// throw precedes every write by construction, and the end-to-end no-write
+// pins through a public multi-op entry point land with the batch export.
+// All refusals are asserted by `err.name`, never by message text.
+// ===================================================================
+
+describe("Contradiction detection (planner-level)", () => {
+	it("refuses the direct contradiction (enable X + disable Y, X requires Y)", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "x-tool", description: "" });
+		mock.registerTool({ name: "y-tool", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({ id: "Y", persistKey: "k:Y", names: new Set(["y-tool"]) }),
+		);
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "X",
+				persistKey: "k:X",
+				names: new Set(["x-tool"]),
+				requires: ["Y"],
+			}),
+		);
+		const ops: BatchOp[] = [
+			{ id: "X", desired: true },
+			{ id: "Y", desired: false },
+		];
+		const err = catchByName(() => planBatch(ops));
+		expect(err.name).toBe("ContradictionError");
+		// Sanity: the coherent one-op forms against the same graph still plan.
+		expect(planBatch([{ id: "X", desired: true }]).intent.get("X")).toBe(true);
+		expect(planBatch([{ id: "Y", desired: false }]).intent.get("Y")).toBe(false);
+	});
+
+	it("refuses the explicit-enable-over-implied-off collision (disable Y + enable X, X requires Y)", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "x-tool", description: "" });
+		mock.registerTool({ name: "y-tool", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({ id: "Y", persistKey: "k:Y", names: new Set(["y-tool"]) }),
+		);
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "X",
+				persistKey: "k:X",
+				names: new Set(["x-tool"]),
+				requires: ["Y"],
+			}),
+		);
+		// Op-order mirror of the direct form: disable Y first pulls X toward
+		// off via the dependents cascade, then the explicit enable of X
+		// overrides that implied value at revisit — the closure check must
+		// still refuse the incoherent override ({X: true, Y: false}).
+		const ops: BatchOp[] = [
+			{ id: "Y", desired: false },
+			{ id: "X", desired: true },
+		];
+		const err = catchByName(() => planBatch(ops));
+		expect(err.name).toBe("ContradictionError");
+	});
+
+	it("refuses the transitive contradiction a direct-edge rule would miss (A/B/D)", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "a-tool", description: "" });
+		mock.registerTool({ name: "b-tool", description: "" });
+		mock.registerTool({ name: "d-tool", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({ id: "A", persistKey: "k:A", names: new Set(["a-tool"]) }),
+		);
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "B",
+				persistKey: "k:B",
+				names: new Set(["b-tool"]),
+				requires: ["A"],
+			}),
+		);
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "D",
+				persistKey: "k:D",
+				names: new Set(["d-tool"]),
+				requires: ["B"],
+			}),
+		);
+		// No explicit pair shares a direct requires edge, yet closure
+		// resolution pulls B toward off (disable A's dependents cascade) and
+		// toward on (enable D's requires closure) — the coherence invariant
+		// must refuse it, not silently resolve.
+		const ops: BatchOp[] = [
+			{ id: "A", desired: false },
+			{ id: "D", desired: true },
+		];
+		const err = catchByName(() => planBatch(ops));
+		expect(err.name).toBe("ContradictionError");
+	});
+
+	it("refuses a contradiction below an intermediate enabled id", () => {
+		const { mock, pi } = createEnv();
+		for (const name of ["a-tool", "b-tool", "c-tool"]) {
+			mock.registerTool({ name, description: "" });
+		}
+		defineToolset(
+			pi,
+			makeSpec({ id: "C", persistKey: "k:C", names: new Set(["c-tool"]) }),
+		);
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "B",
+				persistKey: "k:B",
+				names: new Set(["b-tool"]),
+				requires: ["C"],
+			}),
+		);
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "A",
+				persistKey: "k:A",
+				names: new Set(["a-tool"]),
+				requires: ["B"],
+			}),
+		);
+		// A → B → C: the disabled id sits two requires hops below the enabled
+		// target — the check must reach through the intermediate true id.
+		const ops: BatchOp[] = [
+			{ id: "A", desired: true },
+			{ id: "C", desired: false },
+		];
+		const err = catchByName(() => planBatch(ops));
+		expect(err.name).toBe("ContradictionError");
+	});
+
+	it("refuses conflicting explicit duplicates on one id (zero-hop)", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "x-tool", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({ id: "X", persistKey: "k:X", names: new Set(["x-tool"]) }),
+		);
+		const ops: BatchOp[] = [
+			{ id: "X", desired: true },
+			{ id: "X", desired: false },
+		];
+		const err = catchByName(() => planBatch(ops));
+		expect(err.name).toBe("ContradictionError");
+	});
+
+	it("refuses conflicting explicit duplicates after an implied visit (zero-hop via override)", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "f-tool", description: "" });
+		mock.registerTool({ name: "d-tool", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({ id: "F", persistKey: "k:F", names: new Set(["f-tool"]) }),
+		);
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "D",
+				persistKey: "k:D",
+				names: new Set(["d-tool"]),
+				requires: ["F"],
+			}),
+		);
+		// disable F pulls D off implied; the explicit enable and the explicit
+		// disable of D then conflict — the third op's overwrite would also
+		// erase the intermediate {F: false, D: true} state the coherence pass
+		// catches, so the claim ledger must refuse before it can.
+		const ops: BatchOp[] = [
+			{ id: "F", desired: false },
+			{ id: "D", desired: true },
+			{ id: "D", desired: false },
+		];
+		const err = catchByName(() => planBatch(ops));
+		expect(err.name).toBe("ContradictionError");
+	});
+
+	it("dedupes same-value duplicate ops silently", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "x-tool", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({ id: "X", persistKey: "k:X", names: new Set(["x-tool"]) }),
+		);
+		const plan = planBatch([
+			{ id: "X", desired: true },
+			{ id: "X", desired: true },
+		]);
+		expect(plan.intent.get("X")).toBe(true);
+		expect(plan.order).toEqual(["X"]);
+	});
+
+	it("coherent explicit-beats-implied does not throw (enable Y + disable Z, Z requires Y)", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "y-tool", description: "" });
+		mock.registerTool({ name: "z-tool", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({ id: "Y", persistKey: "k:Y", names: new Set(["y-tool"]) }),
+		);
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "Z",
+				persistKey: "k:Z",
+				names: new Set(["z-tool"]),
+				requires: ["Y"],
+			}),
+		);
+		// An off toolset imposes no requirement on its own dependencies, so
+		// {Y: true, Z: false} is a legal resolution — the explicit enable of
+		// Y is not clobbered by disabling its dependent.
+		const plan = planBatch([
+			{ id: "Y", desired: true },
+			{ id: "Z", desired: false },
+		]);
+		expect(plan.intent.get("Y")).toBe(true);
+		expect(plan.intent.get("Z")).toBe(false);
+	});
+
+	it("a disable does not drag its requirement off — the explicit enable overrides the implied-off pull (disable A + enable B, A requires B)", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "a-tool", description: "" });
+		mock.registerTool({ name: "b-tool", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "A",
+				persistKey: "k:A",
+				names: new Set(["a-tool"]),
+				requires: ["B"],
+			}),
+		);
+		defineToolset(
+			pi,
+			makeSpec({ id: "B", persistKey: "k:B", names: new Set(["b-tool"]) }),
+		);
+		// Disabling A must not drag its requirement B off with it — B stays
+		// explicitly on and the batch resolves {A: false, B: true}.
+		const plan = planBatch([
+			{ id: "A", desired: false },
+			{ id: "B", desired: true },
+		]);
+		expect(plan.intent.get("A")).toBe(false);
+		expect(plan.intent.get("B")).toBe(true);
+	});
+
+	it("exposes ContradictionError with the name-based catch contract", () => {
+		expect(new ContradictionError("x").name).toBe("ContradictionError");
+	});
+});
+
+// ===================================================================
+// ===================================================================
+// Batch execution + emit-after-execution (executor-level)
+// ===================================================================
+
+describe("Batch execution (executor-level)", () => {
+	/** Shared rig: C ← A (A requires C), B independent. */
+	function rig() {
+		const { mock, pi } = createEnv();
+		for (const n of ["c-tool", "a-tool", "b-tool"]) {
+			mock.registerTool({ name: n, description: "" });
+		}
+		defineToolset(pi, makeSpec({ id: "C", persistKey: "k:C", names: new Set(["c-tool"]) }));
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "A",
+				persistKey: "k:A",
+				names: new Set(["a-tool"]),
+				requires: ["C"],
+			}),
+		);
+		defineToolset(pi, makeSpec({ id: "B", persistKey: "k:B", names: new Set(["b-tool"]) }));
+		return { mock, pi };
+	}
+
+	function execute(mock: MockPI, ops: BatchOp[]) {
+		const branch = mock.branchReader().getBranch();
+		return executeBatchPlan(
+			planBatch(ops),
+			mock as unknown as ExtensionAPI,
+			branch,
+			readMergedToolsetDefaults(),
+		);
+	}
+
+	it("cross-target overlap dedupes exactly-once: shared dep applied and reported once", () => {
+		const { mock } = rig();
+		const results = execute(mock, [
+			{ id: "A", desired: true },
+			{ id: "B", desired: true },
+		]);
+		// Discovery order [C, A, B] — C reached once despite two pullers.
+		expect(results.map((r) => r.id)).toEqual(["C", "A", "B"]);
+		expect(mock.getEntries("k:C")).toHaveLength(1);
+		expect(mock.getActiveTools()).toEqual(
+			expect.arrayContaining(["c-tool", "a-tool", "b-tool"]),
+		);
+	});
+
+	it("an op already in its desired state is absent from the returned delta", () => {
+		const { mock } = rig();
+		mock.appendEntry("k:A", { enabled: true }); // A already on...
+		mock.setActiveTools(["a-tool"]); // ...including its loadout
+		const results = execute(mock, [
+			{ id: "C", desired: true },
+			{ id: "A", desired: true },
+		]);
+		expect(results).toEqual([{ id: "C", enabled: true }]);
+		expect(mock.getEntries("k:A")).toHaveLength(1); // no duplicate persist for A
+	});
+
+	it("emits fire only after ALL writes, in plan.order", () => {
+		const { mock } = rig();
+		const observed: { id: string; activeAtEmit: string[] }[] = [];
+		mock.events.on(TOOLSET_EVENTS.changed, (payload: any) => {
+			observed.push({ id: payload.id, activeAtEmit: mock.getActiveTools() });
+		});
+		const results = execute(mock, [
+			{ id: "A", desired: true },
+			{ id: "B", desired: true },
+		]);
+		// Event order = plan.order = write/report order.
+		expect(observed.map((o) => o.id)).toEqual(results.map((r) => r.id));
+		// The FIRST emit already observes the final active set — no library
+		// event fired mid-batch, so no listener can see an intermediate state.
+		const final = mock.getActiveTools();
+		for (const o of observed) {
+			expect(o.activeAtEmit).toEqual(final);
+		}
+	});
+
+	it("cascade emit timing: a dependency's emit fires after its dependents are written (disable)", () => {
+		const { mock, pi } = createEnv();
+		for (const n of ["a-tool", "b-tool", "c-tool"]) {
+			mock.registerTool({ name: n, description: "" });
+		}
+		defineToolset(pi, makeSpec({ id: "A", persistKey: "k:A", names: new Set(["a-tool"]) }));
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "B",
+				persistKey: "k:B",
+				names: new Set(["b-tool"]),
+				requires: ["A"],
+			}),
+		);
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "C",
+				persistKey: "k:C",
+				names: new Set(["c-tool"]),
+				requires: ["A"],
+			}),
+		);
+		// Bring everything on, then disable the root A — dependents B, C fall.
+		execute(mock, [
+			{ id: "A", desired: true },
+			{ id: "B", desired: true },
+			{ id: "C", desired: true },
+		]);
+		const activeAtEmit: Record<string, string[]> = {};
+		mock.events.on(TOOLSET_EVENTS.changed, (payload: any) => {
+			activeAtEmit[payload.id] = mock.getActiveTools();
+		});
+		const results = execute(mock, [{ id: "A", desired: false }]);
+		// Discovery order: A self-first, then dependents in registry order.
+		expect(results.map((r) => r.id)).toEqual(["A", "B", "C"]);
+		// A's emit observes B and C already off — the new post-execution
+		// timing (per-apply emits would have shown B, C still active).
+		expect(activeAtEmit["A"]).toEqual([]);
+	});
+
+	it("the executor never re-reads the branch — the boundary's read is threaded", () => {
+		const { mock, pi } = rig();
+		// Public toggle path: exactly one getBranch() call per toggle, even
+		// with a cascade (B's enable pulls A).
+		const inner = mock.branchReader();
+		let reads = 0;
+		const counting = {
+			getBranch: () => {
+				reads++;
+				return inner.getBranch();
+			},
+		};
+		getRegisteredToolsets().find((e) => e.spec.id === "B")!.toolset.enable(
+			pi,
+			counting,
+		);
+		expect(reads).toBe(1);
+	});
+});
+
+// ===================================================================
+// Racing-writer residuals (pinned per plan Coverage)
+// ===================================================================
+
+describe("Racing-writer residuals", () => {
+	/** Graph: A ← B (B requires A), both fresh (off). */
+	function rig() {
+		const { mock, pi } = createEnv();
+		for (const n of ["a-tool", "b-tool"]) {
+			mock.registerTool({ name: n, description: "" });
+		}
+		defineToolset(pi, makeSpec({ id: "A", persistKey: "k:A", names: new Set(["a-tool"]) }));
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "B",
+				persistKey: "k:B",
+				names: new Set(["b-tool"]),
+				requires: ["A"],
+			}),
+		);
+		return { mock, pi };
+	}
+
+	function execute(mock: MockPI, ops: BatchOp[]) {
+		const branch = mock.branchReader().getBranch();
+		return executeBatchPlan(
+			planBatch(ops),
+			mock as unknown as ExtensionAPI,
+			branch,
+			readMergedToolsetDefaults(),
+		);
+	}
+
+	it("post-execution-emit listener write: emitted payload carries plan.intent; the listener's entry wins at the next restore", () => {
+		const { mock } = rig();
+		// A changed listener reacting to the batch's post-execution emit
+		// appends "disable B" right after the batch enabled it.
+		let emitted: unknown;
+		mock.events.on(TOOLSET_EVENTS.changed, (payload: any) => {
+			if (payload.id === "B") {
+				emitted = payload;
+				mock.appendEntry("k:B", { enabled: false });
+			}
+		});
+		const results = execute(mock, [{ id: "B", desired: true }]);
+		// The emitted payload carried the batch's intent (enabled: true) —
+		// stale relative to the listener's later same-key write. A appears in
+		// the delta as B's implied enable-closure dep.
+		expect(emitted).toMatchObject({ id: "B", enabled: true });
+		expect(results).toEqual([
+			{ id: "A", enabled: true },
+			{ id: "B", enabled: true },
+		]);
+		// Last-writer-wins: the listener's entry is the newest k:B entry —
+		// restore honors it at the next session start (A stays on).
+		mock.fireLifecycleEvent("session_start");
+		expect(mock.getActiveTools()).not.toContain("b-tool");
+		expect(mock.getActiveTools()).toContain("a-tool");
+	});
+
+	it("prepareLoadout hook writes mid-batch: not repaired, not reported, wins at next restore", () => {
+		const { mock } = rig();
+		// A tool whose prepareLoadout hook (reached inside setActiveTools,
+		// between batch writes) appends "disable A". A is written and
+		// persisted BEFORE B's actuation runs the hook, so the hook's entry
+		// is the newest k:A entry — the delta gate (computed pre-execution)
+		// never observes it: no repair, no extra report entry.
+		mock.registerTool({
+			name: "b-tool",
+			description: "",
+			prepareLoadout: () => {
+				mock.appendEntry("k:A", { enabled: false });
+			},
+		});
+		const results = execute(mock, [{ id: "B", desired: true }]);
+		// The batch's report carries plan.intent for both ids.
+		expect(results).toEqual([
+			{ id: "A", enabled: true },
+			{ id: "B", enabled: true },
+		]);
+		// The hook's mid-batch entry is newest — last-writer-wins: restore
+		// honors it (A off even though the batch reported A enabled: true).
+		mock.fireLifecycleEvent("session_start");
+		expect(mock.getActiveTools()).not.toContain("a-tool");
+		expect(mock.getActiveTools()).toContain("b-tool");
+	});
+
+	it("entry_appended listener writes mid-batch: land in the ledger, not repaired/reported, win at next restore", () => {
+		const { mock } = rig();
+		// pi-core channel: a session-event handler appending "disable A"
+		// during a mid-batch append (fires synchronously on every appendEntry;
+		// one-shot guard — the handler's own append re-fires it).
+		let fired = false;
+		const unsub = mock.on("entry_appended", () => {
+			if (fired) return;
+			fired = true;
+			mock.appendEntry("k:A", { enabled: false });
+		});
+		const results = execute(mock, [{ id: "B", desired: true }]);
+		unsub();
+		// The batch's report carries plan.intent; the handler's mid-batch
+		// write was not observed by the delta gate (no repair, no report).
+		expect(results).toEqual([
+			{ id: "A", enabled: true },
+			{ id: "B", enabled: true },
+		]);
+		// The handler's entry is newest — restore honors it.
+		mock.fireLifecycleEvent("session_start");
+		expect(mock.getActiveTools()).not.toContain("a-tool");
+		expect(mock.getActiveTools()).toContain("b-tool");
+	});
+});
 // ===================================================================
 // Restore — persistence round-trip
 // ===================================================================
@@ -2272,8 +2894,8 @@ describe("Restore — persistence round-trip", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		const ts = defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
-		ts.enable(pi);
-		ts.disable(pi);
+		ts.enable(pi, reader(pi));
+		ts.disable(pi, reader(pi));
 		const entries = mock.getEntries("toolset-state:test.toolset");
 		const last = entries[entries.length - 1];
 		expect(last?.data).toEqual({ enabled: false });
@@ -2283,8 +2905,8 @@ describe("Restore — persistence round-trip", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		const ts = defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
-		ts.enable(pi);
-		ts.disable(pi);
+		ts.enable(pi, reader(pi));
+		ts.disable(pi, reader(pi));
 		const emitSpy = vi.spyOn(mock.events, "emit");
 		mock.fireLifecycleEvent("session_start");
 		expect(mock.getActiveTools()).not.toContain("tool-a");
@@ -2301,12 +2923,12 @@ describe("Restore — persistence round-trip", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		const ts = defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
-		ts.enable(pi);
+		ts.enable(pi, reader(pi));
 		mock.fireLifecycleEvent("session_start");
 		expect(mock.getActiveTools()).toContain("tool-a");
 	});
 
-	it("restore disable removes spec members, preserves non-member tools (matching _applyDisable)", () => {
+	it("restore disable removes spec members, preserves non-member tools (matching actuateRemove)", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		mock.registerTool({ name: "tool-b", description: "" });
@@ -2320,7 +2942,7 @@ describe("Restore — persistence round-trip", () => {
 				names: new Set(["tool-a", "tool-b"]),
 			}),
 		);
-		ts.enable(pi);
+		ts.enable(pi, reader(pi));
 		mock.setActiveTools(["tool-a", "tool-b", "outsider"]);
 		expect(mock.getActiveTools()).toEqual(["tool-a", "tool-b", "outsider"]);
 
@@ -2459,7 +3081,7 @@ describe("Restore — event split changed vs restored", () => {
 		mock.registerTool({ name: "tool-a", description: "" });
 		const emitSpy = vi.spyOn(mock.events, "emit");
 		const ts = defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
-		ts.enable(pi);
+		ts.enable(pi, reader(pi));
 		const changedCalls = emitSpy.mock.calls.filter(
 			([c]) => c === TOOLSET_EVENTS.changed,
 		);
@@ -2475,9 +3097,9 @@ describe("Restore — event split changed vs restored", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		const ts = defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
-		ts.enable(pi);
+		ts.enable(pi, reader(pi));
 		const emitSpy = vi.spyOn(mock.events, "emit");
-		ts.disable(pi);
+		ts.disable(pi, reader(pi));
 		const changedCalls = emitSpy.mock.calls.filter(
 			([c]) => c === TOOLSET_EVENTS.changed,
 		);
@@ -2517,7 +3139,7 @@ describe("Restore — event split changed vs restored", () => {
 				names: new Set(["tool-a"]),
 			}),
 		);
-		ts.enable(pi);
+		ts.enable(pi, reader(pi));
 		const emitSpy = vi.spyOn(mock.events, "emit");
 		mock.fireLifecycleEvent("session_start");
 		const restoredCalls = emitSpy.mock.calls.filter(
@@ -2539,7 +3161,7 @@ describe("Restore — idempotent / last-writer-wins", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		const ts = defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
-		ts.enable(pi);
+		ts.enable(pi, reader(pi));
 		mock.fireLifecycleEvent("session_start");
 		const stateAfterFirst = [...mock.getActiveTools()];
 		mock.fireLifecycleEvent("session_start");
@@ -2562,8 +3184,8 @@ describe("Restore — idempotent / last-writer-wins", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		const ts = defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
-		ts.enable(pi);
-		ts.disable(pi);
+		ts.enable(pi, reader(pi));
+		ts.disable(pi, reader(pi));
 		mock.fireLifecycleEvent("session_start");
 		expect(mock.getActiveTools()).not.toContain("tool-a");
 	});
@@ -2594,8 +3216,8 @@ describe("Restore — session_tree", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		const ts = defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
-		ts.enable(pi);
-		ts.disable(pi);
+		ts.enable(pi, reader(pi));
+		ts.disable(pi, reader(pi));
 		const emitSpy = vi.spyOn(mock.events, "emit");
 		mock.fireLifecycleEvent("session_tree");
 		expect(mock.getActiveTools()).not.toContain("tool-a");
@@ -2663,7 +3285,7 @@ describe("Restore independence — does not cascade", () => {
 		);
 		// Enable both, then manually persist an "incoherent" combo
 		// that the live cascade would prevent but restore should honor.
-		tsB.enable(pi);
+		tsB.enable(pi, reader(pi));
 		// Manually inject persisted entries for B (disabled) and L (enabled)
 		mock.appendEntry("k:B", { enabled: false });
 		mock.appendEntry("k:L", { enabled: true });
@@ -2710,13 +3332,14 @@ describe("Entry-point exports", () => {
 	it("all public exports resolve from the package entry", () => {
 		expect(typeof defineToolset).toBe("function");
 		expect(typeof setDefaultResolutionMode).toBe("function");
-		expect(typeof getDefaultResolutionMode).toBe("function");
+		expect(typeof readBranchModeState).toBe("function");
 
 		expect(typeof TOOLSET_EVENTS).toBe("object");
 		expect(typeof TOOLSET_EVENTS.changed).toBe("string");
 		expect(typeof TOOLSET_EVENTS.restored).toBe("string");
 
 		expect(typeof effectiveEnabled).toBe("function");
+		expect(typeof toggleBatch).toBe("function");
 	});
 });
 
@@ -3444,8 +4067,8 @@ describe("Null-tombstone — toolset restore", () => {
 
 		pi.events.on(TOOLSET_EVENTS.changed, (data: any) => {
 			if (data.id === "base") {
-				if (data.enabled) comp.enable(pi);
-				else comp.disable(pi);
+				if (data.enabled) comp.enable(pi, reader(pi));
+				else comp.disable(pi, reader(pi));
 			}
 		});
 
@@ -3579,10 +4202,10 @@ describe("Tombstone helpers", () => {
 });
 
 // ===================================================================
-// applyToolsetEnabled
+// forceToolsetEnabled
 // ===================================================================
 
-describe("applyToolsetEnabled", () => {
+describe("forceToolsetEnabled", () => {
 	it("applies state and emits changed, no appendEntry", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
@@ -3594,7 +4217,7 @@ describe("applyToolsetEnabled", () => {
 		mock.events.on(TOOLSET_EVENTS.changed, (data: any) => changed.push(data));
 		mock.events.on(TOOLSET_EVENTS.restored, (data: any) => restored.push(data));
 
-		applyToolsetEnabled(pi, spec, true);
+		forceToolsetEnabled(pi, spec, true);
 
 		expect(mock.getActiveTools()).toContain("tool-a");
 		expect(changed).toEqual([{ id: "test.toolset", enabled: true }]);
@@ -3602,7 +4225,7 @@ describe("applyToolsetEnabled", () => {
 		expect(mock.getEntries("toolset-state:test.toolset")).toHaveLength(0);
 	});
 
-	it("applyToolsetEnabled(false) deactivates without persisting", () => {
+	it("forceToolsetEnabled(false) deactivates without persisting", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
 		mock.setActiveTools(["tool-a"]);
@@ -3612,7 +4235,7 @@ describe("applyToolsetEnabled", () => {
 		const changed: { id: string; enabled: boolean }[] = [];
 		mock.events.on(TOOLSET_EVENTS.changed, (data: any) => changed.push(data));
 
-		applyToolsetEnabled(pi, spec, false);
+		forceToolsetEnabled(pi, spec, false);
 
 		expect(mock.getActiveTools()).not.toContain("tool-a");
 		expect(changed).toEqual([{ id: "test.toolset", enabled: false }]);
@@ -3621,7 +4244,7 @@ describe("applyToolsetEnabled", () => {
 });
 
 // ===================================================================
-// hidden-exposure members (witness gates)
+// hidden-exposure members
 // ===================================================================
 
 describe("hidden-exposure — mixed toolset", () => {
@@ -3632,7 +4255,7 @@ describe("hidden-exposure — mixed toolset", () => {
 		const spec = makeSpec({ names: new Set(["tool-a", "tool-b"]) });
 		const ts = defineToolset(pi, spec);
 
-		ts.enable(pi);
+		ts.enable(pi, reader(pi));
 
 		expect(pi.getActiveTools()).toEqual(["tool-a"]);
 		expect(ts.isEnabled(pi)).toBe(true);
@@ -3647,8 +4270,8 @@ describe("hidden-exposure — mixed toolset", () => {
 		const spec = makeSpec({ names: new Set(["tool-a", "tool-b"]) });
 		const ts = defineToolset(pi, spec);
 
-		ts.enable(pi);
-		ts.disable(pi);
+		ts.enable(pi, reader(pi));
+		ts.disable(pi, reader(pi));
 
 		expect(pi.getActiveTools()).toEqual([]);
 		const entries = mock.getEntries("toolset-state:test.toolset");
@@ -3658,20 +4281,20 @@ describe("hidden-exposure — mixed toolset", () => {
 });
 
 describe("hidden-exposure — inert toolset (intent vs observation)", () => {
-	function inertEnv() {
+	function inertEnv(overrides?: Partial<Parameters<typeof makeSpec>[0]>) {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "", exposure: "hidden" });
-		const spec = makeSpec({ names: new Set(["tool-a"]) });
+		const spec = makeSpec({ names: new Set(["tool-a"]), ...overrides });
 		const ts = defineToolset(pi, spec);
 		return { mock, pi, spec, ts };
 	}
 
-	it("enable persists intent and emits while issuing zero setActiveTools calls; isEnabled stays false", () => {
-		const { mock, pi, ts } = inertEnv();
+	it("enable on a default-off inert toolset persists intent and emits with zero setActiveTools calls; isEnabled stays false", () => {
+		const { mock, pi, ts } = inertEnv({ defaultEnabled: false });
 		const changed: { id: string; enabled: boolean }[] = [];
 		mock.events.on(TOOLSET_EVENTS.changed, (data: any) => changed.push(data));
 
-		ts.enable(pi);
+		ts.enable(pi, reader(pi));
 
 		expect(mock.getSetActiveCalls()).toHaveLength(0);
 		expect(mock.getEntries("toolset-state:test.toolset")).toEqual([
@@ -3681,12 +4304,25 @@ describe("hidden-exposure — inert toolset (intent vs observation)", () => {
 		expect(ts.isEnabled(pi)).toBe(false);
 	});
 
+	it("enable on a default-on inert toolset is a same-value toggle — silent", () => {
+		const { mock, pi, ts } = inertEnv();
+		const changed: { id: string; enabled: boolean }[] = [];
+		mock.events.on(TOOLSET_EVENTS.changed, (data: any) => changed.push(data));
+
+		const results = ts.enable(pi, reader(pi));
+
+		expect(results).toEqual([]);
+		expect(mock.getSetActiveCalls()).toHaveLength(0);
+		expect(mock.getEntries("toolset-state:test.toolset")).toEqual([]);
+		expect(changed).toEqual([]);
+	});
+
 	it("disable on the same inert toolset persists the off entry and emits, also with zero calls", () => {
 		const { mock, pi, ts } = inertEnv();
 		const changed: { id: string; enabled: boolean }[] = [];
 		mock.events.on(TOOLSET_EVENTS.changed, (data: any) => changed.push(data));
 
-		ts.disable(pi);
+		ts.disable(pi, reader(pi));
 
 		expect(pi.getActiveTools()).toEqual([]);
 		expect(mock.getSetActiveCalls()).toHaveLength(0);
@@ -3697,8 +4333,8 @@ describe("hidden-exposure — inert toolset (intent vs observation)", () => {
 	});
 
 	it("after members become actuatable, the next restore actuates from the persisted entry", () => {
-		const { mock, pi, ts } = inertEnv();
-		ts.enable(pi);
+		const { mock, pi, ts } = inertEnv({ defaultEnabled: false });
+		ts.enable(pi, reader(pi));
 		expect(pi.getActiveTools()).toEqual([]);
 
 		// MCP server connects: the same name is re-registered actuatatable
@@ -3716,7 +4352,7 @@ describe("hidden-exposure — inert toolset (intent vs observation)", () => {
 
 	it("persisted off on an inert toolset keeps it suppressed once members become actuatable", () => {
 		const { mock, pi, ts } = inertEnv();
-		ts.disable(pi);
+		ts.disable(pi, reader(pi));
 		mock.registerTool({ name: "tool-a", description: "" });
 
 		mock.fireLifecycleEvent("session_tree");
@@ -3725,12 +4361,12 @@ describe("hidden-exposure — inert toolset (intent vs observation)", () => {
 		expect(mock.getEntries("toolset-state:test.toolset")).toHaveLength(1);
 	});
 
-	it("applyToolsetEnabled emits but writes no entry (inert, unchanged contract)", () => {
+	it("forceToolsetEnabled emits but writes no entry (inert, unchanged contract)", () => {
 		const { mock, pi, spec } = inertEnv();
 		const changed: { id: string; enabled: boolean }[] = [];
 		mock.events.on(TOOLSET_EVENTS.changed, (data: any) => changed.push(data));
 
-		applyToolsetEnabled(pi, spec, true);
+		forceToolsetEnabled(pi, spec, true);
 
 		expect(changed).toEqual([{ id: "test.toolset", enabled: true }]);
 		expect(mock.getEntries("toolset-state:test.toolset")).toHaveLength(0);
@@ -3739,14 +4375,14 @@ describe("hidden-exposure — inert toolset (intent vs observation)", () => {
 });
 
 describe("hidden-exposure — partially-connected toolset", () => {
-	it("enable persists intent (witness gate is not vacuously satisfied)", () => {
+	it("enable persists intent even though the toolset is only partially connected", () => {
 		const { mock, pi } = createEnv();
 		// tool-a connected, tool-b not yet (server connecting).
 		mock.registerTool({ name: "tool-a", description: "" });
 		const spec = makeSpec({ names: new Set(["tool-a", "tool-b"]) });
 		const ts = defineToolset(pi, spec);
 
-		ts.enable(pi);
+		ts.enable(pi, reader(pi));
 
 		expect(pi.getActiveTools()).toEqual(["tool-a"]);
 		expect(mock.getEntries("toolset-state:test.toolset")).toEqual([
@@ -3762,7 +4398,7 @@ describe("hidden-exposure — partially-connected toolset", () => {
 
 		const changed: { id: string; enabled: boolean }[] = [];
 		mock.events.on(TOOLSET_EVENTS.changed, (data: any) => changed.push(data));
-		ts.disable(pi);
+		ts.disable(pi, reader(pi));
 
 		// Nothing active, so no loadout write — but intent is persisted and
 		// announced (the old observational gate silently dropped the "off").
@@ -3904,6 +4540,896 @@ describe("effectiveEnabled", () => {
 		expect(effectiveEnabled(spec, branchOf(mock), {})).toEqual({
 			enabled: true,
 			persistedEntry: false,
+		});
+	});
+});
+
+// ===================================================================
+// Intent-delta gate — branch-threaded reads, ToggleResult[]
+// ===================================================================
+
+describe("intent-delta gate", () => {
+	/** Simulate another extension's setActiveTools replacing the whole
+	 *  active set while this toolset's recorded intent stays on. */
+	function clobberOff(mock: MockPI, names: string[]): void {
+		mock.setActiveTools(names);
+	}
+
+	it("clobber repair: clobbered-active toolset, user toggles off → off entry + emit, no setActiveTools", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		const ts = defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
+		ts.enable(pi, reader(pi)); // intent on, member active
+		clobberOff(mock, []); // external removal — intent still on
+		expect(pi.getActiveTools()).toEqual([]);
+
+		const changed: { id: string; enabled: boolean }[] = [];
+		mock.events.on(TOOLSET_EVENTS.changed, (data: any) => changed.push(data));
+		const callsBefore = mock.getSetActiveCalls().length;
+
+		const results = ts.disable(pi, reader(pi));
+
+		// The bug fix: the off toggle is no longer dropped in the clobbered
+		// window — intent delta fires, no redundant loadout write. (The enable's
+		// on entry precedes the off entry.)
+		expect(results).toEqual([{ id: "test.toolset", enabled: false }]);
+		expect(mock.getEntries("toolset-state:test.toolset")).toHaveLength(2);
+		expect(mock.getEntries("toolset-state:test.toolset").at(-1)).toEqual({
+			customType: "toolset-state:test.toolset",
+			data: { enabled: false },
+		});
+		expect(changed).toEqual([{ id: "test.toolset", enabled: false }]);
+		expect(mock.getSetActiveCalls()).toHaveLength(callsBefore);
+		expect(pi.getActiveTools()).toEqual([]);
+	});
+
+	it("repeat off is silent: no entry, no emit, no setActiveTools", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		const ts = defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
+		ts.enable(pi, reader(pi));
+		ts.disable(pi, reader(pi)); // on + off entries recorded
+		const entriesBefore = mock.getEntries("toolset-state:test.toolset").length;
+
+		const changed: { id: string; enabled: boolean }[] = [];
+		mock.events.on(TOOLSET_EVENTS.changed, (data: any) => changed.push(data));
+		const callsBefore = mock.getSetActiveCalls().length;
+
+		const results = ts.disable(pi, reader(pi));
+
+		expect(results).toEqual([]);
+		expect(mock.getEntries("toolset-state:test.toolset")).toHaveLength(
+			entriesBefore,
+		);
+		expect(changed).toEqual([]);
+		expect(mock.getSetActiveCalls()).toHaveLength(callsBefore);
+	});
+
+	it("repeat on is silent: no entry, no emit, no setActiveTools", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		const ts = defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
+		ts.enable(pi, reader(pi)); // on entry written, member active
+
+		const changed: { id: string; enabled: boolean }[] = [];
+		mock.events.on(TOOLSET_EVENTS.changed, (data: any) => changed.push(data));
+		const callsBefore = mock.getSetActiveCalls().length;
+
+		const results = ts.enable(pi, reader(pi));
+
+		expect(results).toEqual([]);
+		expect(mock.getEntries("toolset-state:test.toolset")).toHaveLength(1);
+		expect(changed).toEqual([]);
+		expect(mock.getSetActiveCalls()).toHaveLength(callsBefore);
+	});
+
+	it("enable after clobber is a loud repair: loadout write + entry + emit", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		const ts = defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
+		ts.enable(pi, reader(pi));
+		clobberOff(mock, []); // clobbered off externally, intent still on
+
+		const changed: { id: string; enabled: boolean }[] = [];
+		mock.events.on(TOOLSET_EVENTS.changed, (data: any) => changed.push(data));
+		const callsBefore = mock.getSetActiveCalls().length;
+
+		const results = ts.enable(pi, reader(pi));
+
+		// Loud repair: the loadout write (toAdd) is the rule pair's second
+		// disjunct — entry + emit fire even though the intent value is
+		// unchanged. Exactly one NEW write beyond the clobber.
+		expect(results).toEqual([{ id: "test.toolset", enabled: true }]);
+		expect(mock.getSetActiveCalls()).toHaveLength(callsBefore + 1);
+		expect(pi.getActiveTools()).toEqual(["tool-a"]);
+		expect(mock.getEntries("toolset-state:test.toolset")).toEqual([
+			{ customType: "toolset-state:test.toolset", data: { enabled: true } },
+			{ customType: "toolset-state:test.toolset", data: { enabled: true } },
+		]);
+		expect(changed).toEqual([{ id: "test.toolset", enabled: true }]);
+	});
+
+	it("residue: resolved off, member still active → removal + re-affirmed off entry + emit", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		mock.registerTool({ name: "unrelated", description: "" });
+		const ts = defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
+		ts.disable(pi, reader(pi)); // resolved off, nothing active — silent
+		expect(mock.getEntries("toolset-state:test.toolset")).toHaveLength(1);
+
+		// A stray member appears (external force-add) while intent is off.
+		mock.setActiveTools(["tool-a", "unrelated"]);
+		const changed: { id: string; enabled: boolean }[] = [];
+		mock.events.on(TOOLSET_EVENTS.changed, (data: any) => changed.push(data));
+
+		const results = ts.disable(pi, reader(pi));
+
+		// Loadout write fires; the off entry is re-affirmed (no NEW value —
+		// still {enabled: false}); enabled reports post-state.
+		expect(results).toEqual([{ id: "test.toolset", enabled: false }]);
+		expect(pi.getActiveTools()).toEqual(["unrelated"]);
+		expect(mock.getEntries("toolset-state:test.toolset")).toEqual([
+			{ customType: "toolset-state:test.toolset", data: { enabled: false } },
+			{ customType: "toolset-state:test.toolset", data: { enabled: false } },
+		]);
+		expect(changed).toEqual([{ id: "test.toolset", enabled: false }]);
+	});
+
+	it("external branch write is visible: focusRelease-style direct false write, then enable fires", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		const ts = defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
+
+		// External writer appends the intent directly (tbox focusRelease shape).
+		pi.appendEntry("toolset-state:test.toolset", { enabled: false });
+
+		const changed: { id: string; enabled: boolean }[] = [];
+		mock.events.on(TOOLSET_EVENTS.changed, (data: any) => changed.push(data));
+
+		const results = ts.enable(pi, reader(pi));
+
+		expect(results).toEqual([{ id: "test.toolset", enabled: true }]);
+		expect(mock.getEntries("toolset-state:test.toolset")).toHaveLength(2);
+		expect(changed).toEqual([{ id: "test.toolset", enabled: true }]);
+	});
+
+	it("external branch write is visible: direct true write, then disable fires", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		const ts = defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
+		pi.appendEntry("toolset-state:test.toolset", { enabled: true });
+
+		const results = ts.disable(pi, reader(pi));
+
+		expect(results).toEqual([{ id: "test.toolset", enabled: false }]);
+		expect(mock.getEntries("toolset-state:test.toolset")).toHaveLength(2);
+	});
+
+	it("settings-pin delta: pin off, repeat off silent, toggle on persists", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		setDefaultsOverride({ "toolset-state:test.toolset": { enabled: false } });
+		const ts = defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
+
+		// Repeat off against the pin: resolved off, delta zero — silent.
+		expect(ts.disable(pi, reader(pi))).toEqual([]);
+		expect(mock.getEntries("toolset-state:test.toolset")).toHaveLength(0);
+
+		// Toggle on: delta vs the pin → entry persists, overriding the pin.
+		const results = ts.enable(pi, reader(pi));
+		expect(results).toEqual([{ id: "test.toolset", enabled: true }]);
+		expect(mock.getEntries("toolset-state:test.toolset")).toEqual([
+			{ customType: "toolset-state:test.toolset", data: { enabled: true } },
+		]);
+	});
+
+	it("cascade shares one settings snapshot: hub + dependent pinned on, no branch entries → one call persists both, second call silent", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "hub-a", description: "" });
+		mock.registerTool({ name: "dep-b", description: "" });
+		// Both pinned on via settings, no branch entries: resolved on.
+		setDefaultsOverride({ "k:hub": { enabled: true }, "k:dep": { enabled: true } });
+		const ts = defineToolset(
+			pi,
+			makeSpec({ id: "hub", persistKey: "k:hub", names: new Set(["hub-a"]) }),
+		);
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "dep",
+				persistKey: "k:dep",
+				names: new Set(["dep-b"]),
+				requires: ["hub"],
+			}),
+		);
+
+		const first = ts.disable(pi, reader(pi));
+		expect(first).toEqual([
+			{ id: "hub", enabled: false },
+			{ id: "dep", enabled: false },
+		]);
+
+		// Delta zero for the whole cascade against the one snapshot.
+		const second = ts.disable(pi, reader(pi));
+		expect(second).toEqual([]);
+		expect(mock.getEntries("k:hub")).toHaveLength(1);
+		expect(mock.getEntries("k:dep")).toHaveLength(1);
+	});
+
+	it("empty branch is a legitimate state: settings pin supplies the resolved tier", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		setDefaultsOverride({ "toolset-state:test.toolset": { enabled: true } });
+		const ts = defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
+
+		// A reader over a fresh session: getBranch() genuinely returns []
+		// pre-write; after the off entry is appended the live read sees it.
+		const results = ts.disable(pi, reader(pi));
+
+		// Tier chain, not a branchless convention: the pin resolves on, so the
+		// off toggle is a real delta and persists. The report is the value the
+		// call persisted and emitted — `false`, matching the off entry.
+		expect(results).toEqual([{ id: "test.toolset", enabled: false }]);
+		expect(mock.getEntries("toolset-state:test.toolset")).toEqual([
+			{ customType: "toolset-state:test.toolset", data: { enabled: false } },
+		]);
+	});
+
+	it("cascade diamond (per-call applied set): enable(A) writes exactly one entry per toolset, D once in the result", () => {
+		const { mock, pi } = createEnv();
+		for (const name of ["a", "b", "c", "d"]) {
+			mock.registerTool({ name, description: "" });
+		}
+		const tsA = defineToolset(
+			pi,
+			makeSpec({ id: "A", persistKey: "k:A", names: new Set(["a"]), requires: ["B", "C"] }),
+		);
+		defineToolset(
+			pi,
+			makeSpec({ id: "B", persistKey: "k:B", names: new Set(["b"]), requires: ["D"] }),
+		);
+		defineToolset(
+			pi,
+			makeSpec({ id: "C", persistKey: "k:C", names: new Set(["c"]), requires: ["D"] }),
+		);
+		const tsD = defineToolset(
+			pi,
+			makeSpec({ id: "D", persistKey: "k:D", names: new Set(["d"]) }),
+		);
+
+		const results = tsA.enable(pi, reader(pi));
+
+		// Exactly one entry per toolset in the result — D reached twice via
+		// B and C, its second reach is skipped by the per-call `applied` set.
+		expect(results).toEqual([
+			{ id: "D", enabled: true },
+			{ id: "B", enabled: true },
+			{ id: "C", enabled: true },
+			{ id: "A", enabled: true },
+		]);
+		// Exactly one branch entry per toolset.
+		for (const key of ["k:A", "k:B", "k:C", "k:D"]) {
+			expect(mock.getEntries(key)).toHaveLength(1);
+		}
+		// The falsifier for the "exactly once" rule: D's own disable right
+		// after is a real delta (off), and its cascade over B and C — resolved
+		// off by the entries above — stays silent for the already-off deps.
+		expect(tsD.disable(pi, reader(pi))).toEqual([
+			{ id: "D", enabled: false },
+			{ id: "B", enabled: false },
+			{ id: "A", enabled: false },
+			{ id: "C", enabled: false },
+		]);
+		for (const key of ["k:A", "k:B", "k:C", "k:D"]) {
+			expect(mock.getEntries(key)).toHaveLength(2);
+		}
+	});
+
+	it("disable mirror: shared grandchild-dependent gets exactly one entry", () => {
+		const { mock, pi } = createEnv();
+		for (const name of ["a", "b", "c", "d"]) {
+			mock.registerTool({ name, description: "" });
+		}
+		const tsA = defineToolset(
+			pi,
+			makeSpec({ id: "A", persistKey: "k:A", names: new Set(["a"]) }),
+		);
+		const tsB = defineToolset(
+			pi,
+			makeSpec({ id: "B", persistKey: "k:B", names: new Set(["b"]), requires: ["A"] }),
+		);
+		defineToolset(
+			pi,
+			makeSpec({ id: "C", persistKey: "k:C", names: new Set(["c"]), requires: ["A"] }),
+		);
+		defineToolset(
+			pi,
+			makeSpec({ id: "D", persistKey: "k:D", names: new Set(["d"]), requires: ["B", "C"] }),
+		);
+
+		const results = tsA.disable(pi, reader(pi));
+
+		// D is a dependent of both B and C: the second reach is skipped by the
+		// per-call `applied` set — one row, one entry.
+		expect(results).toEqual([
+			{ id: "A", enabled: false },
+			{ id: "B", enabled: false },
+			{ id: "D", enabled: false },
+			{ id: "C", enabled: false },
+		]);
+		for (const key of ["k:A", "k:B", "k:C", "k:D"]) {
+			expect(mock.getEntries(key)).toHaveLength(1);
+		}
+		// A dependent's own toggle immediately after the cascade: delta zero.
+		expect(tsB.disable(pi, reader(pi))).toEqual([]);
+	});
+
+	it("sequential toggles share one reader: learn's cascade does not re-append web", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "web-a", description: "" });
+		mock.registerTool({ name: "learn-a", description: "" });
+		const web = defineToolset(
+			pi,
+			makeSpec({ id: "web", persistKey: "k:web", names: new Set(["web-a"]) }),
+		);
+		const learn = defineToolset(
+			pi,
+			makeSpec({ id: "learn", persistKey: "k:learn", names: new Set(["learn-a"]), requires: ["web"] }),
+		);
+
+		const shared = reader(pi);
+		const r1 = web.enable(pi, shared);
+		const r2 = learn.enable(pi, shared);
+
+		expect(r1).toEqual([{ id: "web", enabled: true }]);
+		expect(r2).toEqual([{ id: "learn", enabled: true }]);
+		// Exactly one on entry per toolset — learn's cascade re-applying web
+		// re-invokes the reader, sees web's entry, and stays silent.
+		expect(mock.getEntries("k:web")).toHaveLength(1);
+		expect(mock.getEntries("k:learn")).toHaveLength(1);
+	});
+
+	it("one branch read per toggle call, taken at the call's own boundary", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		const ts = defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
+
+		let branchReads = 0;
+		const spyReader = {
+			getBranch: () => {
+				branchReads++;
+				return reader(pi).getBranch();
+			},
+		};
+
+		// Resolved on (default), member active: the disable's delta fires, so
+		// the call reads the branch — exactly once, at its own boundary. All
+		// reads occur during the call itself — none is deferred, cached, or
+		// re-invoked after it returns (the cascade machinery itself never
+		// dereferences the reader).
+		ts.disable(pi, spyReader);
+		expect(branchReads).toBe(1);
+	});
+});
+
+// ===================================================================
+// Allowlist boundary — every interactive toggle under allowlist
+// governance throws AllowlistModeError, atomically (nothing runs)
+// ===================================================================
+
+describe("allowlist boundary — toggle refusal", () => {
+	function setupBoundary(allowlist: string[]) {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "in-a", description: "" });
+		mock.registerTool({ name: "out-b", description: "" });
+		const listed = defineToolset(
+			pi,
+			makeSpec({
+				id: "in.web",
+				persistKey: "k:in",
+				names: new Set(["in-a"]),
+				defaultEnabled: true,
+			}),
+		);
+		const unlisted = defineToolset(
+			pi,
+			makeSpec({
+				id: "out.web",
+				persistKey: "k:out",
+				names: new Set(["out-b"]),
+				defaultEnabled: true,
+			}),
+		);
+		if (allowlist.length > 0) {
+			setDefaultResolutionMode(pi, "allowlist", allowlist);
+		}
+		const changed: unknown[] = [];
+		pi.events.on(TOOLSET_EVENTS.changed, (d: unknown) => changed.push(d));
+		return { mock, pi, listed, unlisted, changed };
+	}
+
+	it("throws AllowlistModeError for all four quadrants — atomic, byte-identical state", () => {
+		// Four quadrants (enable/disable × listed/unlisted), each pinned with
+		// members both active and inactive — the refusal must not depend on
+		// either the requested value or the observed state.
+		for (const activeFirst of [true, false]) {
+			for (const useEnable of [true, false]) {
+				for (const inList of [true, false]) {
+					const { mock, pi, listed, unlisted, changed } =
+						setupBoundary(["in.web"]);
+					if (activeFirst) {
+						mock.setActiveTools(inList ? ["in-a"] : ["out-b"]);
+					} else {
+						mock.setActiveTools([]);
+					}
+					const before = mock.getActiveTools();
+					const ts = inList ? listed : unlisted;
+					const err = catchByName(() =>
+						useEnable
+							? ts.enable(pi, reader(pi))
+							: ts.disable(pi, reader(pi)),
+					);
+					expect(err?.name).toBe("AllowlistModeError");
+					// Atomicity pins, every quadrant: no entry, no emit, no
+					// loadout write — the check precedes the cascade.
+					expect(mock.getEntries("k:in")).toHaveLength(0);
+					expect(mock.getEntries("k:out")).toHaveLength(0);
+					expect(changed).toHaveLength(0);
+					expect(mock.getActiveTools()).toEqual(before);
+				}
+			}
+		}
+	});
+
+	it("the cascade never starts: enable(A) with A listed and requiring B leaves B untouched", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "a-tool", description: "" });
+		mock.registerTool({ name: "b-tool", description: "" });
+		const tsA = defineToolset(
+			pi,
+			makeSpec({
+				id: "A",
+				persistKey: "k:A",
+				names: new Set(["a-tool"]),
+				requires: ["B"],
+			}),
+		);
+		defineToolset(
+			pi,
+			makeSpec({ id: "B", persistKey: "k:B", names: new Set(["b-tool"]) }),
+		);
+		setDefaultResolutionMode(pi, "allowlist", ["A"]);
+		mock.setActiveTools(["a-tool"]);
+		const before = mock.getActiveTools();
+
+		const err = catchByName(() => tsA.enable(pi, reader(pi)));
+		expect(err?.name).toBe("AllowlistModeError");
+
+		// Zero branch entries anywhere (the mode entry from setup excepted),
+		// B untouched, active set byte-identical.
+		expect(mock.getEntries("k:A")).toHaveLength(0);
+		expect(mock.getEntries("k:B")).toHaveLength(0);
+		expect(mock.getActiveTools()).toEqual(before);
+	});
+
+	it("mode source is the branch, not module state: a raw-appended mode entry throws with no setDefaultResolutionMode call", () => {
+		const { mock, pi, listed } = setupBoundary([]);
+		// No setDefaultResolutionMode — the branch carries no mode entry yet.
+		expect(readBranchModeState(reader(pi).getBranch()).mode).toBe("exclusion");
+		mock.appendEntry("toolset-resolution-mode", {
+			mode: "allowlist",
+			allowlist: ["in.web"],
+		});
+		const err = catchByName(() => listed.enable(pi, reader(pi)));
+		expect(err?.name).toBe("AllowlistModeError");
+		expect(mock.getEntries("k:in")).toHaveLength(0);
+	});
+
+	it("empty branch does not throw — absent mode entry resolves to exclusion", () => {
+		const { mock, pi, listed } = setupBoundary([]);
+		const results = listed.enable(pi, reader(pi));
+		expect(results).toEqual([{ id: "in.web", enabled: true }]);
+		expect(mock.getEntries("k:in")).toHaveLength(1);
+	});
+
+	it("forceToolsetEnabled stays live under allowlist — still applies and emits", () => {
+		const { mock, pi, changed } = setupBoundary(["in.web"]);
+		forceToolsetEnabled(
+			pi,
+			{ id: "out.web", persistKey: "k:out", names: new Set(["out-b"]) },
+			true,
+		);
+		expect(mock.getActiveTools()).toEqual(["out-b"]);
+		expect(changed).toEqual([{ id: "out.web", enabled: true }]);
+	});
+
+	it("AllowlistModeError object contract: name, specId, one-sentence message", () => {
+		const err = new AllowlistModeError("out.web");
+		expect(err.name).toBe("AllowlistModeError");
+		expect(err.specId).toBe("out.web");
+		expect(err.message).toContain("out.web");
+		expect(err.message).toContain("allowlist");
+	});
+});
+
+// ===================================================================
+// toggleBatch — public batch boundary (the sole toggle actuation path;
+// the two-method surface is single-op wrappers delegating to it)
+// ===================================================================
+
+describe("toggleBatch — public batch boundary", () => {
+	function setupBatch(allowlist: string[] = []) {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "a-tool", description: "" });
+		mock.registerTool({ name: "b-tool", description: "" });
+		// A resolves off by default, B on — a fresh rig has one of each
+		// direction available for a mixed batch.
+		const tsA = defineToolset(
+			pi,
+			makeSpec({
+				id: "A",
+				persistKey: "k:A",
+				names: new Set(["a-tool"]),
+				defaultEnabled: false,
+			}),
+		);
+		const tsB = defineToolset(
+			pi,
+			makeSpec({
+				id: "B",
+				persistKey: "k:B",
+				names: new Set(["b-tool"]),
+				defaultEnabled: true,
+			}),
+		);
+		if (allowlist.length > 0) {
+			setDefaultResolutionMode(pi, "allowlist", allowlist);
+		}
+		const changed: unknown[] = [];
+		pi.events.on(TOOLSET_EVENTS.changed, (d: unknown) => changed.push(d));
+		return { mock, pi, tsA, tsB, changed };
+	}
+
+	it("allowlist refusal covers the whole batch in one throw — atomic, no specId", () => {
+		const { mock, pi, changed } = setupBatch(["A"]);
+		mock.setActiveTools(["a-tool", "b-tool"]);
+		const before = mock.getActiveTools();
+		const err = catchByName(() =>
+			toggleBatch(pi, reader(pi), [
+				{ id: "A", desired: true },
+				{ id: "B", desired: false },
+			]),
+		);
+		expect(err?.name).toBe("AllowlistModeError");
+		// Mode-global refusal attributes nothing — the caller knows its own
+		// op list.
+		expect(err?.specId).toBeUndefined();
+		// Atomicity: no entry, no emit, no loadout write.
+		expect(mock.getEntries("k:A")).toHaveLength(0);
+		expect(mock.getEntries("k:B")).toHaveLength(0);
+		expect(changed).toHaveLength(0);
+		expect(mock.getActiveTools()).toEqual(before);
+	});
+
+	it("empty ops returns [] before the mode check — silent no-op under allowlist governance too", () => {
+		const { mock, pi, changed } = setupBatch(["A"]);
+		expect(toggleBatch(pi, reader(pi), [])).toEqual([]);
+		expect(mock.getEntries("k:A")).toHaveLength(0);
+		expect(changed).toHaveLength(0);
+	});
+
+	it("deferring child: batch returns [] before the mode check", () => {
+		const { mock, pi, changed } = setupBatch(["A"]);
+		mock.setActiveTools(["a-tool", "b-tool"]);
+		process.env["PI_TOOLMASKING_DEFER"] = "999999"; // foreign pid — defer
+		try {
+			expect(
+				toggleBatch(pi, reader(pi), [{ id: "A", desired: true }]),
+			).toEqual([]);
+		} finally {
+			delete process.env["PI_TOOLMASKING_DEFER"];
+		}
+		expect(mock.getEntries("k:A")).toHaveLength(0);
+		expect(changed).toHaveLength(0);
+		expect(mock.getActiveTools()).toEqual(["a-tool", "b-tool"]);
+	});
+
+	it("explicit op naming an unregistered id throws atomically — nothing written, nothing emitted", () => {
+		const { mock, pi, changed } = setupBatch();
+		const err = catchByName(() =>
+			toggleBatch(pi, reader(pi), [{ id: "ghost", desired: true }]),
+		);
+		expect(err?.name).not.toBe("AllowlistModeError");
+		expect(err?.name).not.toBe("CycleError");
+		expect(err?.name).not.toBe("ContradictionError");
+		expect(mock.getEntries("k:A")).toHaveLength(0);
+		expect(mock.getEntries("k:B")).toHaveLength(0);
+		expect(changed).toHaveLength(0);
+	});
+
+	it("mixed multi-op batch: flattened intent delta, entries + emits in discovery order", () => {
+		const { mock, pi, changed } = setupBatch();
+		// before: A off (default), B on (default) — the batch flips both,
+		// one up and one down.
+		const results = toggleBatch(pi, reader(pi), [
+			{ id: "A", desired: true },
+			{ id: "B", desired: false },
+		]);
+		expect(results).toEqual([
+			{ id: "A", enabled: true },
+			{ id: "B", enabled: false },
+		]);
+		expect(mock.getEntries("k:A").map((e) => e.data)).toEqual([{ enabled: true }]);
+		expect(mock.getEntries("k:B").map((e) => e.data)).toEqual([{ enabled: false }]);
+		expect(changed).toEqual([
+			{ id: "A", enabled: true },
+			{ id: "B", enabled: false },
+		]);
+		expect(mock.getActiveTools()).toEqual(["a-tool"]);
+	});
+
+	it("duplicate ops dedupe silently; an op already in its desired state is absent from the delta", () => {
+		const { mock, pi, changed } = setupBatch();
+		// before: A off, B on — disabling A is already-in-state (silent),
+		// enabling B is the only delta; the duplicate op dedupes.
+		const results = toggleBatch(pi, reader(pi), [
+			{ id: "A", desired: false },
+			{ id: "B", desired: true },
+			{ id: "B", desired: true },
+		]);
+		expect(results).toEqual([{ id: "B", enabled: true }]);
+		expect(mock.getEntries("k:A")).toHaveLength(0); // no re-persist
+		expect(mock.getEntries("k:B").map((e) => e.data)).toEqual([{ enabled: true }]);
+		expect(changed).toEqual([{ id: "B", enabled: true }]);
+	});
+
+	it("wrapper delegation: Toolset.enable(pi, sm) ≡ toggleBatch(pi, sm, [{ id, desired: true }])", () => {
+		const runEnable = (
+			via: "wrapper" | "batch",
+		): { entries: unknown[]; changed: unknown[]; tools: string[] } => {
+			const { mock, pi, tsA, changed } = setupBatch();
+			if (via === "wrapper") {
+				tsA.enable(pi, reader(pi));
+			} else {
+				toggleBatch(pi, reader(pi), [{ id: "A", desired: true }]);
+			}
+			return {
+				entries: mock.getEntries("k:A").map((e) => e.data),
+				changed: [...changed],
+				tools: mock.getActiveTools(),
+			};
+		};
+		const viaWrapper = runEnable("wrapper");
+		const viaBatch = runEnable("batch");
+		expect(viaWrapper).toEqual(viaBatch);
+		expect(viaBatch.entries).toEqual([{ enabled: true }]);
+		expect(viaBatch.tools).toEqual(["a-tool"]);
+	});
+
+	it("wrapper delegation (disable mirror): Toolset.disable(pi, sm) ≡ toggleBatch(pi, sm, [{ id, desired: false }])", () => {
+		const runDisable = (
+			via: "wrapper" | "batch",
+		): { entries: unknown[]; changed: unknown[]; tools: string[] } => {
+			const { mock, pi, tsB, changed } = setupBatch();
+			if (via === "wrapper") {
+				tsB.disable(pi, reader(pi));
+			} else {
+				toggleBatch(pi, reader(pi), [{ id: "B", desired: false }]);
+			}
+			return {
+				entries: mock.getEntries("k:B").map((e) => e.data),
+				changed: [...changed],
+				tools: mock.getActiveTools(),
+			};
+		};
+		const viaWrapper = runDisable("wrapper");
+		const viaBatch = runDisable("batch");
+		expect(viaWrapper).toEqual(viaBatch);
+		expect(viaBatch.entries).toEqual([{ enabled: false }]);
+		expect(viaBatch.tools).toEqual([]);
+	});
+
+	it("through the wrappers the refusal keeps its specId — bit-identical to the single-toggle contract", () => {
+		const { mock, pi, tsA } = setupBatch(["A"]);
+		mock.setActiveTools(["a-tool"]);
+		const err = catchByName(() => tsA.enable(pi, reader(pi)));
+		expect(err?.name).toBe("AllowlistModeError");
+		expect(err?.specId).toBe("A");
+	});
+
+	it("cycle reachable from any op throws CycleError before any write or emit", () => {
+		const { mock, pi, changed } = setupBatch();
+		mock.registerTool({ name: "c1-tool", description: "" });
+		mock.registerTool({ name: "c2-tool", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "C1",
+				persistKey: "k:C1",
+				names: new Set(["c1-tool"]),
+				requires: ["C2"],
+			}),
+		);
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "C2",
+				persistKey: "k:C2",
+				names: new Set(["c2-tool"]),
+				requires: ["C1"],
+			}),
+		);
+		const err = catchByName(() =>
+			toggleBatch(pi, reader(pi), [
+				{ id: "C1", desired: true },
+				{ id: "B", desired: false },
+			]),
+		);
+		expect(err?.name).toBe("CycleError");
+		expect(mock.getEntries("k:A")).toHaveLength(0);
+		expect(mock.getEntries("k:B")).toHaveLength(0);
+		expect(mock.getEntries("k:C1")).toHaveLength(0);
+		expect(mock.getEntries("k:C2")).toHaveLength(0);
+		expect(changed).toHaveLength(0);
+	});
+
+	// Public-path mirror of the CycleError pin above: the README's "nothing
+	// is written" promise covers the contradiction refusal too.
+	it("contradictory batch throws ContradictionError before any write or emit", () => {
+		const { mock, pi, changed } = setupBatch();
+		mock.registerTool({ name: "x-tool", description: "" });
+		mock.registerTool({ name: "y-tool", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "X",
+				persistKey: "k:X",
+				names: new Set(["x-tool"]),
+				requires: ["Y"],
+			}),
+		);
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "Y",
+				persistKey: "k:Y",
+				names: new Set(["y-tool"]),
+			}),
+		);
+		const before = mock.getActiveTools();
+		const err = catchByName(() =>
+			toggleBatch(pi, reader(pi), [
+				{ id: "X", desired: true },
+				{ id: "Y", desired: false },
+			]),
+		);
+		expect(err?.name).toBe("ContradictionError");
+		expect(mock.getEntries("k:X")).toHaveLength(0);
+		expect(mock.getEntries("k:Y")).toHaveLength(0);
+		expect(changed).toHaveLength(0);
+		expect(mock.getActiveTools()).toEqual(before);
+	});
+});
+
+// ===================================================================
+// Branch-read unification — dispatcher arm selection + copy semantics
+// ===================================================================
+
+describe("branch-read unification — dispatcher arm + copy semantics", () => {
+	/** Two toolsets, registered but with NO restore and NO mode entry — the
+	 *  fresh-process/no-restore window where arm selection must come from the
+	 *  branch alone (an absent entry resolves to exclusion). */
+	function setupFresh(): { mock: MockPI; pi: ExtensionAPI } {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "search.web", description: "" });
+		mock.registerTool({ name: "leak.tool", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "search.web",
+				persistKey: "tbox.tool@search",
+				names: new Set(["search.web"]),
+			}),
+		);
+		defineToolset(
+			pi,
+			makeSpec({
+				id: "leak.web",
+				persistKey: "k:leak",
+				names: new Set(["leak.tool"]),
+			}),
+		);
+		return { mock, pi };
+	}
+
+	it("a raw-appended allowlist mode entry selects the allowlist arm — enforced from the first turn, no restore, no module write", () => {
+		const { mock, pi } = setupFresh();
+		// Raw branch write — setDefaultResolutionMode is never called, so no
+		// library API has touched this mode before. A module-state mirror would
+		// read empty here; the branch read must win.
+		mock.appendEntry("toolset-resolution-mode", {
+			mode: "allowlist",
+			allowlist: ["search.web"],
+		});
+		mock.setActiveTools(["search.web", "leak.tool"]);
+		const changedSpy = vi.fn();
+		pi.events.on(TOOLSET_EVENTS.changed, changedSpy);
+
+		mock.fireLifecycleEvent("before_agent_start");
+
+		// Allowlist arm: the leak is removed, changed emitted for the
+		// suppressed toolset.
+		expect(pi.getActiveTools()).toEqual(["search.web"]);
+		expect(changedSpy).toHaveBeenCalledTimes(1);
+		expect(changedSpy).toHaveBeenCalledWith({ id: "leak.web", enabled: false });
+	});
+
+	it("no mode entry selects the exclusion arm — branch tier enforced from raw entries alone", () => {
+		const { mock, pi } = setupFresh();
+		// No mode entry anywhere; a raw branch entry pins leak.web off.
+		mock.appendEntry("k:leak", { enabled: false });
+		mock.setActiveTools(["search.web", "leak.tool"]);
+		const changedSpy = vi.fn();
+		pi.events.on(TOOLSET_EVENTS.changed, changedSpy);
+
+		mock.fireLifecycleEvent("before_agent_start");
+
+		// Exclusion arm: effectively-off toolset's force-added tool removed.
+		expect(pi.getActiveTools()).toEqual(["search.web"]);
+		expect(changedSpy).toHaveBeenCalledTimes(1);
+		expect(changedSpy).toHaveBeenCalledWith({ id: "leak.web", enabled: false });
+	});
+
+	it("corrupt allowlist array fails closed to [] — every registered toolset suppressed", () => {
+		const { mock, pi } = setupFresh();
+		mock.appendEntry("toolset-resolution-mode", {
+			mode: "allowlist",
+			allowlist: "garbage",
+		});
+		mock.setActiveTools(["search.web", "leak.tool"]);
+
+		mock.fireLifecycleEvent("before_agent_start");
+
+		expect(pi.getActiveTools()).toEqual([]);
+	});
+
+	it("read-side copy: the returned allowlist is fresh every call — mutating it never touches the branch", () => {
+		const { mock, pi } = setupFresh();
+		mock.appendEntry("toolset-resolution-mode", {
+			mode: "allowlist",
+			allowlist: ["search.web"],
+		});
+		const branch = reader(pi).getBranch();
+
+		const first = readBranchModeState(branch);
+		expect(first.mode).toBe("allowlist");
+		expect(first.allowlist).toEqual(["search.web"]);
+		first.allowlist.push("leak.web");
+
+		// Second call is unaffected, and the branch entry data is untouched.
+		const second = readBranchModeState(branch);
+		expect(second.allowlist).toEqual(["search.web"]);
+		const modeEntry = mock.getEntries("toolset-resolution-mode")[0];
+		expect(modeEntry?.data).toEqual({
+			mode: "allowlist",
+			allowlist: ["search.web"],
+		});
+	});
+
+	it("write-side copy: mutating the array after setDefaultResolutionMode never edits the branch", () => {
+		const { mock, pi } = setupFresh();
+		const allowlist = ["search.web"];
+		setDefaultResolutionMode(pi, "allowlist", allowlist);
+
+		// Caller mutates the array AFTER the call — persisted governance must
+		// not follow (pi stores entry data by reference; the write site owns
+		// the value).
+		allowlist.push("leak.web");
+
+		const modeEntry = mock.getEntries("toolset-resolution-mode")[0];
+		expect(modeEntry?.data).toEqual({
+			mode: "allowlist",
+			allowlist: ["search.web"],
 		});
 	});
 });
