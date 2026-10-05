@@ -1,7 +1,6 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { RegistryEntry } from "../index.js";
 import { describe, it, expect } from "vitest";
-import { MockPI } from "./mock-pi.js";
-import { cleanRegistry, REGISTRY_KEY } from "./helpers.js";
+import { cleanRegistry, REGISTRY_KEY, createEnv, reader } from "./helpers.js";
 
 // ---------------------------------------------------------------------------
 // GlobalThis registry convergence tests
@@ -14,11 +13,6 @@ import { cleanRegistry, REGISTRY_KEY } from "./helpers.js";
 // If someone refactors the registry to module-level state, every test in this
 // file must fail.
 // ---------------------------------------------------------------------------
-
-function createEnv(): { mock: MockPI; pi: ExtensionAPI } {
-	const mock = new MockPI();
-	return { mock, pi: mock as unknown as ExtensionAPI };
-}
 
 beforeEach(() => {
 	cleanRegistry();
@@ -95,10 +89,55 @@ describe("GlobalThis registry convergence", () => {
 			persistKey: "k:actionable.test",
 		});
 
-		ts2.enable(p2);
+		ts2.enable(p2, reader(p2));
 		expect(m2.getActiveTools()).toContain("action");
 
-		ts2.disable(p2);
+		ts2.disable(p2, reader(p2));
 		expect(m2.getActiveTools()).not.toContain("action");
+	});
+
+	// getRegisteredToolsets returns a copy of the array but live entries —
+	// the documented raw-mutation contract depends on this property.
+	it("getRegisteredToolsets() entries are live: mutating spec.names reaches the registry", async () => {
+		const { defineToolset, getRegisteredToolsets } = await import(
+			/* @vite-ignore */ `../index.ts?live-${Date.now()}`
+		);
+
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "a", description: "" });
+		mock.registerTool({ name: "b", description: "" });
+		defineToolset(pi, {
+			id: "live.test",
+			names: new Set(["a"]),
+			persistKey: "k:live.test",
+		});
+
+		// The dynamic import specifier is non-literal, so the binding is `any`
+		// without an explicit type here.
+		const before: readonly RegistryEntry[] = getRegisteredToolsets();
+		const entry = before.find((t) => t.spec.id === "live.test");
+		expect(entry).toBeDefined();
+
+		// Raw mutation contract: assign a fresh Set on the live entry.
+		entry!.spec.names = new Set(["b"]);
+
+		const after: readonly RegistryEntry[] = getRegisteredToolsets();
+		expect(
+			after.find((t) => t.spec.id === "live.test")?.spec.names,
+		).toEqual(
+			new Set(["b"]),
+		);
+		// Same instance, no warn-and-replace.
+		expect(
+			after.find((t) => t.spec.id === "live.test")?.toolset,
+		).toBe(entry!.toolset);
+		// The array is a copy: elements are live entries (so the mutation is
+		// visible through `before` too) but the array itself is not shared.
+		expect(
+			before.find((t) => t.spec.id === "live.test")?.spec.names,
+		).toEqual(
+			new Set(["b"]),
+		);
+		expect(before).not.toBe(after);
 	});
 });

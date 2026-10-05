@@ -4,9 +4,20 @@ import { MockPI } from "./mock-pi.js";
 import {
 	defineToolset,
 	TOOLSET_EVENTS,
-	setSettingsOverrideForTests,
+	setDefaultResolutionMode,
+	writeToolsetDefaults,
+	clearToolsetDefaults,
+	clearToolsetEntry,
+	clearAllToolsetEntries,
+	forceToolsetEnabled,
+	isDeferredChild,
+	readToolsetDefaults,
 } from "../index.js";
-import { cleanGlobalKeys, cleanRegistry } from "./helpers.js";
+import { cleanGlobalKeys, cleanRegistry, REGISTRY_KEY, catchByName, createEnv, reader, useTempSettingsDir } from "./helpers.js";
+
+// Temp settings dirs, file-wide: global settings live in a fresh mkdtemp
+// agent dir per test, project settings under a temp cwd — never ~/.pi.
+const tmpSettings = useTempSettingsDir();
 
 // ---------------------------------------------------------------------------
 // Child-policy defer — piToolMasking.childPolicy + PI_TOOLMASKING_DEFER
@@ -20,13 +31,16 @@ import { cleanGlobalKeys, cleanRegistry } from "./helpers.js";
 // ---------------------------------------------------------------------------
 
 const DEFER_ENV = "PI_TOOLMASKING_DEFER";
-const MODULE_STATE_KEY = "__piToolMaskingModuleState";
 const FOREIGN_PID = String(process.pid + 12345);
 const MODE_PERSIST_KEY = "toolset-resolution-mode";
 
-function createEnv(): { mock: MockPI; pi: ExtensionAPI } {
-	const mock = new MockPI();
-	return { mock, pi: mock as unknown as ExtensionAPI };
+/** Look up a registered toolset handle by spec id (the toggle surface the
+ *  library actually exposes). */
+function toolsetById(id: string): {
+	enable(pi: ExtensionAPI, sm: unknown): unknown;
+	disable(pi: ExtensionAPI, sm: unknown): unknown;
+} {
+	return (globalThis as any)[REGISTRY_KEY].get(id).toolset;
 }
 
 function makeSpec(overrides: {
@@ -39,6 +53,25 @@ function makeSpec(overrides: {
 		names: new Set(overrides.names),
 		id: overrides.id,
 		persistKey: overrides.persistKey,
+		...(overrides.defaultEnabled === undefined
+			? {}
+			: { defaultEnabled: overrides.defaultEnabled }),
+	};
+}
+
+/** makeSpec extended with `requires` for cascade rows. */
+function makeSpecReq(overrides: {
+	id: string;
+	persistKey: string;
+	names: string[];
+	requires: string[];
+	defaultEnabled?: boolean;
+}) {
+	return {
+		names: new Set(overrides.names),
+		id: overrides.id,
+		persistKey: overrides.persistKey,
+		requires: overrides.requires,
 		...(overrides.defaultEnabled === undefined
 			? {}
 			: { defaultEnabled: overrides.defaultEnabled }),
@@ -71,9 +104,40 @@ function setupTwoToolsets(mock: MockPI, pi: ExtensionAPI): void {
 	);
 }
 
-// Compose per-scope settings in ONE seam call: optional web pin-off plus the
-// childPolicy values. One seam feeds all readers, so pins and policy must be
-// set together or the later call silently drops the earlier one.
+function collectMaskEvents(mock: MockPI): () => { type: string; id: string }[] {
+	const spy = vi.spyOn(mock.events, "emit");
+	return () =>
+		spy.mock.calls
+			.filter(
+				([c]) => c === TOOLSET_EVENTS.restored || c === TOOLSET_EVENTS.changed,
+			)
+			.map(([c, p]) => ({
+				type: c as string,
+				id: (p as { id: string }).id,
+			}));
+}
+
+// Process-global state (env var + the globalThis library keys + the once-per-
+// process warn-dedup flag) pollutes subsequent cases if left dirty — the
+// env-passthrough suite's save/restore discipline, plus a sweep of the
+// CHILD_POLICY_WARNED_KEY dedup flag: without it the invalid-value warn
+// assertion would be order-dependent rather than testing the warn behavior.
+let savedDeferVar: string | undefined;
+
+beforeEach(() => {
+	savedDeferVar = process.env[DEFER_ENV];
+	cleanRegistry();
+});
+
+afterEach(() => {
+	if (savedDeferVar === undefined) delete process.env[DEFER_ENV];
+	else process.env[DEFER_ENV] = savedDeferVar;
+	vi.restoreAllMocks();
+	cleanGlobalKeys();
+});
+
+// Compose per-scope settings files: optional web pin-off plus the
+// childPolicy values, written to the temp global/project settings.json.
 function settings(
 	opts: {
 		pinWebOff?: boolean;
@@ -97,43 +161,13 @@ function settings(
 	} else if (opts.emptyProjectPiToolMasking) {
 		project["piToolMasking"] = {};
 	}
-	setSettingsOverrideForTests({ global, project });
+	if (Object.keys(global).length > 0) {
+		tmpSettings.writeJson(tmpSettings.globalSettings, global);
+	}
+	if (Object.keys(project).length > 0) {
+		tmpSettings.writeJson(tmpSettings.projectSettings, project);
+	}
 }
-
-function collectMaskEvents(mock: MockPI): () => { type: string; id: string }[] {
-	const spy = vi.spyOn(mock.events, "emit");
-	return () =>
-		spy.mock.calls
-			.filter(
-				([c]) => c === TOOLSET_EVENTS.restored || c === TOOLSET_EVENTS.changed,
-			)
-			.map(([c, p]) => ({
-				type: c as string,
-				id: (p as { id: string }).id,
-			}));
-}
-
-// Process-global state (env var + globalThis module state + the once-per-
-// process warn-dedup flag) pollutes subsequent cases if left dirty — the
-// env-passthrough suite's save/restore discipline, plus a sweep of the
-// CHILD_POLICY_WARNED_KEY dedup flag (same precedent as cleanRegistry's
-// DEPRECATION_WARNED_KEY delete): without it the invalid-value warn
-// assertion would be order-dependent rather than testing the warn behavior.
-let savedDeferVar: string | undefined;
-
-beforeEach(() => {
-	savedDeferVar = process.env[DEFER_ENV];
-	cleanRegistry();
-	setSettingsOverrideForTests({ global: {}, project: {} });
-});
-
-afterEach(() => {
-	setSettingsOverrideForTests(null);
-	if (savedDeferVar === undefined) delete process.env[DEFER_ENV];
-	else process.env[DEFER_ENV] = savedDeferVar;
-	vi.restoreAllMocks();
-	cleanGlobalKeys();
-});
 
 // ===================================================================
 // Defer at restore
@@ -242,12 +276,16 @@ describe("defer at re-assert", () => {
 		});
 		expect(mock.getActiveTools()).toEqual(["search-web", "web-search"]);
 
-		// Allowlist path: seed module state as if an allowlist mask were
-		// active (a resumed child branch could carry one) — still a no-op.
-		(globalThis as any)[MODULE_STATE_KEY] = {
-			defaultResolutionMode: "allowlist",
-			activeAllowlist: [],
-		};
+		// Allowlist path: a raw-appended allowlist mode entry (a resumed child
+		// branch could carry one) — still a no-op. The seed is a branch
+		// entry: the dispatcher's arm source IS the branch:
+		// this pins that the defer guard precedes arm selection on the
+		// allowlist arm specifically (the exclusion half above covers the
+		// other arm).
+		mock.appendEntry(MODE_PERSIST_KEY, {
+			mode: "allowlist",
+			allowlist: [],
+		});
 		mock.setActiveTools(["web-search", "web-fetch", "search-web"]);
 		mock.fireLifecycleEvent("before_agent_start", {
 			type: "before_agent_start",
@@ -518,5 +556,223 @@ describe("var passthrough", () => {
 		// at its next restore — the exact republish trap.
 		expect(process.env[DEFER_ENV]).toBe(FOREIGN_PID);
 		expect(events()).toEqual([]);
+	});
+});
+
+// ===================================================================
+// isDeferredChild — the exported env-only predicate. Consumers gate their
+// own actuation paths with this, so its fail-closed contract is pinned
+// directly rather than only through the restore/toggle gates.
+// ===================================================================
+
+describe("isDeferredChild", () => {
+	it("fails closed: absent, empty, and own-pid vars are not deferred; only a foreign pid is", () => {
+		delete process.env[DEFER_ENV];
+		expect(isDeferredChild()).toBe(false);
+
+		process.env[DEFER_ENV] = "";
+		expect(isDeferredChild()).toBe(false);
+
+		process.env[DEFER_ENV] = String(process.pid);
+		expect(isDeferredChild()).toBe(false);
+
+		process.env[DEFER_ENV] = FOREIGN_PID;
+		expect(isDeferredChild()).toBe(true);
+	});
+});
+
+// ===================================================================
+// Defer gate — toggle boundary. A deferring child enacts no governance:
+// implicit ledger/mode writes are silent noops; deliberate write/actuation
+// APIs stay live; the gate keys on the foreign var alone (never policy).
+// ===================================================================
+
+/** Raw-appended allowlist mode entry — the mode-source mechanism: no
+ *  setDefaultResolutionMode call; only the branch carries the governance
+ *  entry. */
+function seedAllowlistBranch(mock: MockPI): void {
+	mock.appendEntry(MODE_PERSIST_KEY, {
+		mode: "allowlist",
+		allowlist: ["lean.web", "lean.search"],
+	});
+}
+
+describe("defer gate — toggle boundary", () => {
+	it("toggles are silent [] in a deferring child under allowlist — no throw, no cascade, no write, no emit", () => {
+		const { mock, pi } = createEnv();
+		setupTwoToolsets(mock, pi);
+		mock.registerTool({ name: "learn-a", description: "" });
+		const learn = defineToolset(
+			pi,
+			makeSpecReq({
+				id: "lean.learn",
+				persistKey: "toolset-state:lean.learn",
+				names: ["learn-a"],
+				requires: ["lean.web"],
+			}),
+		);
+		process.env[DEFER_ENV] = FOREIGN_PID;
+		seedAllowlistBranch(mock);
+		mock.setActiveTools(["web-search", "web-fetch", "search-web", "learn-a"]);
+		const beforeTools = mock.getActiveTools();
+		const beforeEntries = mock.getEntries();
+		const events = collectMaskEvents(mock);
+
+		// The defer gate precedes the mode check — [] rather than a throw.
+		expect(learn.enable(pi, reader(pi))).toEqual([]);
+		// Also the plain enable/disable of a listed toolset.
+		const web = toolsetById("lean.web");
+		expect(web.disable(pi, reader(pi))).toEqual([]);
+		expect(web.enable(pi, reader(pi))).toEqual([]);
+
+		// Byte-identical everything — including the requires dep: the
+		// cascade never ran.
+		expect(mock.getActiveTools()).toEqual(beforeTools);
+		expect(mock.getEntries()).toEqual(beforeEntries);
+		expect(events()).toEqual([]);
+	});
+
+	it("setDefaultResolutionMode in a deferring child: validate-then-suppress", () => {
+		const { mock, pi } = createEnv();
+		setupTwoToolsets(mock, pi);
+		process.env[DEFER_ENV] = FOREIGN_PID;
+		const beforeEntries = mock.getEntries();
+
+		// Valid call: the governance authority switch is suppressed — no
+		// branch write, no throw.
+		setDefaultResolutionMode(pi, "allowlist", ["lean.web"]);
+		expect(mock.getEntries()).toEqual(beforeEntries);
+
+		// Input validation survives suppression: invalid mode still throws,
+		// branch byte-identical across the throw.
+		expect(() => setDefaultResolutionMode(pi, "banana" as any)).toThrow(
+			"Invalid defaultResolutionMode",
+		);
+		expect(() =>
+			setDefaultResolutionMode(pi, "allowlist", []),
+		).toThrow("non-empty allowlist");
+		expect(mock.getEntries()).toEqual(beforeEntries);
+	});
+
+	it("clearToolsetEntry and clearAllToolsetEntries noop in a deferring child", () => {
+		const { mock, pi } = createEnv();
+		setupTwoToolsets(mock, pi);
+		process.env[DEFER_ENV] = FOREIGN_PID;
+		// A real prior entry exists — the dedup read would write a tombstone.
+		mock.appendEntry("toolset-state:lean.web", { enabled: true });
+		const beforeEntries = mock.getEntries();
+		const branch = reader(pi).getBranch();
+
+		clearToolsetEntry(pi, "toolset-state:lean.web", branch);
+		clearAllToolsetEntries(pi, branch);
+
+		expect(mock.getEntries()).toEqual(beforeEntries);
+	});
+
+	it("forceToolsetEnabled stays live in a deferring child — still applies and emits", () => {
+		const { mock, pi } = createEnv();
+		setupTwoToolsets(mock, pi);
+		process.env[DEFER_ENV] = FOREIGN_PID;
+		seedAllowlistBranch(mock);
+		mock.setActiveTools(["web-search", "web-fetch", "search-web"]);
+		const events = collectMaskEvents(mock);
+		const spec = {
+			id: "lean.search",
+			persistKey: "toolset-state:lean.search",
+			names: new Set(["search-web"]),
+		};
+
+		forceToolsetEnabled(pi, spec, false);
+
+		expect(mock.getActiveTools()).toEqual(["web-search", "web-fetch"]);
+		expect(events()).toEqual([{ type: "toolset:changed", id: "lean.search" }]);
+	});
+
+	it("settings writers stay live in a deferring child (the deliberate-write carve-out)", () => {
+		const { mock, pi } = createEnv();
+		setupTwoToolsets(mock, pi);
+		process.env[DEFER_ENV] = FOREIGN_PID;
+
+		writeToolsetDefaults(
+			{ "toolset-state:lean.web": { enabled: false } },
+			"global",
+		);
+		expect(readToolsetDefaults("global")).toEqual({
+			"toolset-state:lean.web": { enabled: false },
+		});
+
+		clearToolsetDefaults("global");
+		expect(readToolsetDefaults("global")).toEqual({});
+	});
+
+	it("the gate keys on the foreign var alone, never policy: policy settings + foreign var still noops", () => {
+		const { mock, pi } = createEnv();
+		setupTwoToolsets(mock, pi);
+		settings({ globalPolicy: "settings" });
+		process.env[DEFER_ENV] = FOREIGN_PID;
+		seedAllowlistBranch(mock);
+		const beforeEntries = mock.getEntries();
+		const web = toolsetById("lean.web");
+
+		// No restore has run in this process — the var is foreign and the
+		// gate is env-only, so the toggle noops even though the (unread)
+		// policy says "settings".
+		expect(web.disable(pi, reader(pi))).toEqual([]);
+		expect(mock.getEntries()).toEqual(beforeEntries);
+	});
+
+	it("a defer-publisher parent (own-pid var) still gets enforcing toggles — throws under allowlist", () => {
+		const { mock, pi } = createEnv();
+		setupTwoToolsets(mock, pi);
+		process.env[DEFER_ENV] = String(process.pid);
+		seedAllowlistBranch(mock);
+		const web = toolsetById("lean.web");
+
+		expect(catchByName(() => web.enable(pi, reader(pi))).name).toBe(
+			"AllowlistModeError",
+		);
+	});
+
+	it("an empty-string defer var fails closed to enforcing — toggles throw, never silently noop", () => {
+		const { mock, pi } = createEnv();
+		setupTwoToolsets(mock, pi);
+		process.env[DEFER_ENV] = "";
+		seedAllowlistBranch(mock);
+		const web = toolsetById("lean.web");
+
+		expect(catchByName(() => web.disable(pi, reader(pi))).name).toBe(
+			"AllowlistModeError",
+		);
+	});
+
+	it("mid-session policy flip to settings: suspension holds between restores; the child's own restore releases it", () => {
+		const { mock, pi } = createEnv();
+		setupTwoToolsets(mock, pi);
+		settings({ globalPolicy: "defer" });
+		process.env[DEFER_ENV] = FOREIGN_PID;
+		seedAllowlistBranch(mock);
+
+		// Restore under defer: skips everything, foreign var untouched.
+		mock.fireLifecycleEvent("session_start", {
+			type: "session_start",
+			reason: "startup",
+		});
+		expect(process.env[DEFER_ENV]).toBe(FOREIGN_PID);
+
+		// Flip the policy mid-session: the between-restores window keeps BOTH
+		// the re-assert skip and the toggle noop (the gate is env-only).
+		settings({ globalPolicy: "settings" });
+		const beforeEntries = mock.getEntries();
+		const web = toolsetById("lean.web");
+		expect(web.enable(pi, reader(pi))).toEqual([]);
+		expect(mock.getEntries()).toEqual(beforeEntries);
+
+		// The child's own restore under policy "settings" deletes the var
+		// (publish/consume split) and enforces — the toggle now throws.
+		mock.fireLifecycleEvent("session_tree", { type: "session_tree" });
+		expect(process.env[DEFER_ENV]).toBeUndefined();
+		expect(
+			catchByName(() => web.enable(pi, reader(pi))).name,
+		).toBe("AllowlistModeError");
 	});
 });

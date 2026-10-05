@@ -2,16 +2,158 @@
 
 ## [Unreleased]
 
+This is a breaking release centered on one idea: toggles are a **batch-first,
+exclusion-mode-only operation resolved from a branch read at each call's
+boundary**. Migration surface: `Toolset.enable`/`.disable` gain a required
+`sessionManager` argument (pass `ctx.sessionManager` itself, never a bare
+`getBranch` method reference); `applyToolsetEnabled` is renamed
+`forceToolsetEnabled`; the `"inclusion"` mode, `getDefaultResolutionMode()`,
+`getActiveAllowlist()`, and `ToolsetSpec.description` / `emitMemberEvents` are
+gone; test-only internals moved under `__internal`.
+
+### Added
+
+- **`toggleBatch(pi, sessionManager, ops)`** — toggle a batch of toolsets in one
+  call; the sole toggle actuation path, with `Toolset.enable`/`.disable` kept as
+  one-line single-op wrappers delegating to it. One batch is one coherent
+  intent: the pure planner resolves explicit targets plus their `requires`
+  cascade closures into a final state per id and returns a flattened
+  `ToggleResult[]` delta (an op already in its desired state is absent).
+  Refusals are atomic and pre-write: a reachable cycle throws `CycleError`
+  (carries `cyclePath`), an incoherent batch (an id enabled while a transitive
+  `requires` dep is disabled by the same batch) throws `ContradictionError`, an
+  explicit unknown id throws; implied unregistered closure deps are leniently
+  skipped, duplicate ops dedupe when consistent and throw when conflicting. Gate
+  order: defer → empty `ops` → allowlist refusal → plan → settings snapshot →
+  execute. See README for the full contract.
+- **Named error classes — `CycleError`, `ContradictionError`,
+  `PersistKeyCollisionError`, `AllowlistModeError`.** Catch all four by
+  `err?.name`, never `instanceof` (handles may belong to a different physical
+  library copy via the shared `globalThis` registry — the setup the registry
+  exists to support); messages are diagnostics, never string-matched.
+  `PersistKeyCollisionError` is thrown by `defineToolset` when another toolset
+  already claims the spec's `persistKey` (previously a plain `Error` with no
+  identifying surface); atomic — registration writes nothing.
+  `AllowlistModeError` is the allowlist toggle refusal (see Changed); it carries
+  `specId` on single-op wrapper refusals and is `undefined` on batch-path
+  refusals (the refusal is mode-global and attributes nothing).
+  `MalformedSettingsError` deliberately keeps its `instanceof` contract (its
+  throwers are same-module imports).
+- **`readBranchModeState(branch)`** — the governance decision read shared by
+  restore, the resolver, the re-assert dispatcher, and the toggle refusal:
+  returns `{ mode, allowlist }` (absent entry → `"exclusion"`; corrupt array
+  fails closed → `[]` with non-string members dropped). Copy-on-read in both
+  directions — `setDefaultResolutionMode` copies its input before `appendEntry`
+  (pi stores entry `data` by reference). For consumer decision/authoring paths
+  only — **never** a toggle pre-check: call the toggle and catch
+  `AllowlistModeError`.
+- **`effectiveEnabled(spec, branch, defaults)`** — exported resolver for a
+  toolset's persisted intent: allowlist override → chat-branch entry → settings
+  pin → `defaultEnabled ?? true`; returns `{ enabled, persistedEntry }`
+  (`persistedEntry` is true only for a boolean `enabled` entry — a `null`
+  tombstone or no entry reports `false`). The read side stays mode-dependent by
+  design. Consumer rule: display surfaces read intent (`effectiveEnabled`),
+  declaration-sensitive surfaces read observation (`isEnabled()`), and nothing
+  gates a toggle with it.
+- **`isDeferredChild()`** — the env-only defer predicate (`PI_TOOLMASKING_DEFER`
+  foreign-pid check, never settings) shared by the re-assert dispatcher and the
+  toggle gate, exported so consumers gate their own actuation and
+  governance-authoring flows with the identical signal.
+- **Actuatable-member filtering.** Loadout writes and masks filter through
+  registered, non-`hidden`-exposure tool names (`getActuatableNames`); a
+  `hidden`-exposure member can never be active and is never handed to
+  `setActiveTools` (on pi builds without `exposure`, all registered names count
+  as actuatable). A toolset with zero actuatable members is *inert*: toggles
+  persist/emit intent, but `isEnabled()` stays false while `effectiveEnabled()`
+  reports the recorded state — pick the right signal.
+
+### Changed
+
+- **Breaking: `Toolset.enable`/`.disable` take a required `sessionManager`
+  branch reader and return a change report (`ToggleResult[]`; `[]` = silent
+  no-op).** In practice pass `ctx.sessionManager` — the reader object itself,
+  never a bare `getBranch` method reference (the `BranchReader` type makes that
+  a compile error; an unbound method would throw). The library reads the branch
+  once per toggle call, at that call's boundary, so one reader passed once per
+  command stays correct across cascades and loops; external branch writes before
+  the call are visible by construction. There is no branchless fallback. This
+  also fixes the clobbered-active drop: a user's off toggle on a toolset whose
+  members were removed from the active set by another extension now persists the
+  off entry and emits instead of being silently dropped.
+- **Breaking: toggles are an exclusion-mode operation — under allowlist
+  governance every toggle throws `AllowlistModeError`, atomically (no branch
+  entry, no emit, no loadout write).** This removes the legal-but-incoherent
+  allowlist toggle rows (shadowed enables, never-silent repeats, event/report
+  disagreement). Immediate actuation under focus is `forceToolsetEnabled`, the
+  documented primary actuation path; convergence after a refusal is the per-turn
+  re-assert's job. The re-assert's arm selection also joins the branch read, so
+  every governance decision in the library reads one source.
+- **Breaking: `applyToolsetEnabled` is renamed `forceToolsetEnabled(pi, spec,
+  enabled)`.** Same contract — never persists, no cascade, always applies,
+  always emits. The `force…` name marks it as the actuation primitive that
+  bypasses the intent gate.
+- **Breaking: emits moved from per-apply to post-execution.** A `changed`
+  listener on a dependency now fires after its dependents are written, so
+  `pi.getActiveTools()` observed inside that listener differs from earlier
+  releases; no library-emitted event fires until every write in the call has
+  completed. Report/emit order is the planner's discovery order (identical to
+  the legacy order for every single-op call). Residual: racing writers on
+  channels outside the library's events (`prepareLoadout` hooks) can still
+  append mid-call; such a write for an id whose intent already matched wins at
+  the next restore by last-writer-wins.
+- **Breaking: cycle throws are atomic and named.** Previously a cycle detected
+  mid-cascade could leave prior cascade writes standing; now `CycleError` is
+  thrown by the pure planner before any write or emit. Catch by `err?.name`,
+  never message text.
+- **Same-value toggles go silent:** persist + emit iff the intent changes **or**
+  a loadout write occurred. A toggle whose resolved intent already matches and
+  that needs no loadout write returns `[]` (previously every same-value toggle
+  on an inert or partially-registered toolset re-persisted and re-emitted).
+  Enable-after-clobber stays loud on purpose: the loadout repair fires, so the
+  on entry and `changed` emit fire with it. Cascade repeats are silent by
+  construction (the planner's visited set yields each id exactly once per call).
+- **In a deferring child (`isDeferredChild()`), every public API that implicitly
+  writes branch governance state is a silent no-op** (no throw, no write, no
+  emit, no notify channel): every toggle returns `[]`,
+  `setDefaultResolutionMode` is validate-then-suppress (invalid input still
+  throws), and the tombstone helpers write nothing. Deliberate write/actuation
+  APIs stay live: `forceToolsetEnabled`, raw `appendEntry`, and the settings
+  writers. Gate order is part of the contract (see `toggleBatch`).
+- **`defineToolset` reserves the resolution-mode branch key:** a spec whose
+  `persistKey` is `"toolset-resolution-mode"` now throws a validation `Error` at
+  registration — its `{ enabled }` toggle entries would otherwise supersede the
+  branch's resolution-mode entry (and vice versa) via last-writer-wins, silently
+  dropping allowlist governance. No legitimate consumer key is affected.
+
 ### Removed
 
-- **The `"inclusion"` resolution mode** — the `DefaultResolutionMode` union
-  member, its `setDefaultResolutionMode` acceptance, and the resolver mode
-  floor. `"allowlist"` is the focus-style substitute (a finite,
-  branch-persisted set resilient to toolsets installed later). Legacy
-  sessions carrying `{ mode: "inclusion" }` branch entries restore as
-  `"exclusion"` — the entry is ignored, not migrated, so previously-
-  suppressed unpinned toolsets come back at the default-on floor (the same
-  default every fresh session starts from). No error is raised at restore.
+- **`getActiveAllowlist()` and `getDefaultResolutionMode()`** — with every
+  governance decision reading the branch via `readBranchModeState(branch)`, both
+  parameterless mirrors are strictly worse duplicates of the read restore itself
+  resolves from (and the parameterless shape is what let consumer guards
+  silently pass on a stale read). Migrate decision reads to
+  `readBranchModeState(ctx.sessionManager.getBranch())`. If a genuine
+  parameterless display need surfaces later, re-adding an export is additive —
+  but it would reintroduce a module-state mirror.
+- **The `"inclusion"` resolution mode** (the union member, its
+  `setDefaultResolutionMode` acceptance, and the resolver mode floor).
+  `"allowlist"` is the focus-style substitute (a finite, branch-persisted set
+  resilient to toolsets installed later). Legacy sessions carrying `{ mode:
+  "inclusion" }` restore as `"exclusion"` — the entry is ignored, not migrated,
+  so previously-suppressed unpinned toolsets come back at the default-on floor.
+  No error is raised at restore.
+- **`emitMemberEvents` and the per-member event fan-out** — the
+  `ToolsetSpec.emitMemberEvents` flag and the optional `member` field on
+  `ToolsetChangedEvent`. A toggle now emits exactly one event per toolset,
+  always; consumers needing per-tool granularity can diff members via
+  `getRegisteredToolsets()`.
+- **`ToolsetSpec.description`** — presenters fall back to `label`/`id` as they
+  already did when the field was absent.
+- **Top-level test-only internals** — `setSettingsOverrideForTests`,
+  `setSettingsWriterOverrideForTests`, and `parseToolsetDefaults` are no longer
+  top-level exports; test helpers (`planBatch`, `executeBatchPlan`,
+  `parseToolsetDefaults`) live under the single `__internal` export and may
+  change or vanish between any releases.
 
 ## [1.3.0] - 2026-09-02
 
@@ -151,7 +293,8 @@
 
   Restore is atomic and two-phase — the full
   desired active-tools set is applied with a single `setActiveTools` call
-  before any per-toolset `restored` event fires, so a companion mirroring
+  before any per-toolset `restored` event fires (the write is skipped
+  entirely when the set already matches), so a companion mirroring
   on `TOOLSET_EVENTS.changed` cannot `appendEntry` mid-loop and desync
   the final state. Non-toolset tools in the current active set are
   preserved (the short-circuit computes a delta, not a rebuild).
