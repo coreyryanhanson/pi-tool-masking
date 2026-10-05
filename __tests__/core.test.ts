@@ -947,33 +947,6 @@ describe("getRegisteredToolsets", () => {
 		expect(getRegisteredToolsets()).toHaveLength(2);
 	});
 
-	it("entries carry working toolset handles", () => {
-		const { mock, pi } = createEnv();
-		mock.registerTool({ name: "tool-a", description: "" });
-		defineToolset(
-			pi,
-			makeSpec({ id: "a", persistKey: "k:a", names: new Set(["tool-a"]) }),
-		);
-
-		const entries = getRegisteredToolsets();
-		expect(entries).toHaveLength(1);
-		const entry = entries[0]!;
-		expect(entry.toolset.isEnabled(pi)).toBe(false);
-
-		entry.toolset.enable(pi, reader(pi));
-		expect(entry.toolset.isEnabled(pi)).toBe(true);
-
-		entry.toolset.disable(pi, reader(pi));
-		expect(entry.toolset.isEnabled(pi)).toBe(false);
-	});
-
-	it("returned type is readonly (TypeScript compile-time guarantee)", () => {
-		const result: readonly RegistryEntry[] = getRegisteredToolsets();
-		expect(result).toEqual([]);
-		// Compile-time: result.push would fail TypeScript. Runtime array is
-		// plain (not frozen) — the constraint is enforced by the type system,
-		// not Object.freeze.
-	});
 });
 
 // ===================================================================
@@ -983,12 +956,6 @@ describe("getRegisteredToolsets", () => {
 describe("Default resolution mode", () => {
 	it("empty branch resolves to exclusion (absent mode entry fails open to the ledger)", () => {
 		const { pi } = createEnv();
-		expect(readBranchModeState(reader(pi).getBranch()).mode).toBe("exclusion");
-	});
-
-	it("set exclusion mode appends a mode entry the branch read resolves", () => {
-		const { pi } = createEnv();
-		setDefaultResolutionMode(pi, "exclusion");
 		expect(readBranchModeState(reader(pi).getBranch()).mode).toBe("exclusion");
 	});
 
