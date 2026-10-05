@@ -528,13 +528,15 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 	// branch entry IS user intent but is equally unprotected from
 	// force-removal; force-removal reconcilers are rarer than force-add
 	// ones and this has not been reported.)
-	const reassertDisabled = (_event: unknown, ctx: ExtensionContext): void => {
+	const reassertDisabled = (branch: readonly SessionEntry[]): void => {
 		const registry = getRegistry();
 		const current = pi.getActiveTools();
 
-		// Read settings + branch once per turn; same tier chain as restore.
+		// Settings read once per turn; same tier chain as restore. The branch
+		// is threaded in from the dispatcher — the mode decision and the tier
+		// chain are provably made against the same snapshot (one getBranch()
+		// read per turn).
 		const settingsDefaults = readMergedToolsetDefaults();
-		const branch = ctx.sessionManager.getBranch();
 
 		// Suppress set = union of names over toolsets whose effective state
 		// is off.
@@ -581,7 +583,7 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 	// registration — the suite asserts `handlerCount("before_agent_start") ===
 	// 1`. One registration, the defer guard and two mode-shaped re-asserters
 	// behind it.
-	const onBeforeAgentStart = (event: unknown, ctx: ExtensionContext): void => {
+	const onBeforeAgentStart = (_event: unknown, ctx: ExtensionContext): void => {
 		// Deferring child: no re-assert at all — the spawner owns the child's
 		// tools for the session, on BOTH dispatch paths (a resumed child branch
 		// could carry an allowlist mask; the dispatcher placement guarantees it
@@ -598,12 +600,13 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		// re-assert over allowlisted state). Fail-open/fail-closed edge cases
 		// (absent entry → exclusion, corrupt allowlist → fail-closed: non-array
 		// → `[]`, non-string members dropped) come with
-		// `readBranchModeState`'s contract and now govern this call site.
-		const { mode, allowlist } = readBranchModeState(
-			ctx.sessionManager.getBranch(),
-		);
+		// `readBranchModeState`'s contract and now govern this call site. The
+		// snapshot is threaded to the exclusion arm, so one getBranch() read
+		// covers the whole turn.
+		const branch = ctx.sessionManager.getBranch();
+		const { mode, allowlist } = readBranchModeState(branch);
 		if (mode === "exclusion") {
-			reassertDisabled(event, ctx);
+			reassertDisabled(branch);
 		} else {
 			reassertAllowlist(allowlist);
 		}
