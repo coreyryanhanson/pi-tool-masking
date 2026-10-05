@@ -130,20 +130,9 @@ const MODE_PERSIST_KEY = "toolset-resolution-mode";
  * — no payload, no per-toolset data. Set by a defer-policy parent at
  * restore, inherited by spawned children via the default parent env. */
 const DEFER_ENV = "PI_TOOLMASKING_DEFER";
-/** Is this process a governance-deferring child? Env-only — the defer var
- * is the durable fact (value = the publisher's pid); a FOREIGN pid means
- * an ancestor suspended governance here. An absent, EMPTY, or our OWN pid
- * var all mean "enforce": presence-only would defer the parent's own
- * restore/re-assert, and an empty value is garbage no legitimate producer
- * writes (publish always stores a pid), so it fails CLOSED (enforce).
- * Never reads settings — a mid-session policy flip must not flip a child
- * that restored under defer to enforcing between restores; the policy is
- * consulted only at the var's creation/deletion site (doRestore's
- * publish/consume decision). Shared by the re-assert dispatcher, the
- * toggle gate, and consumers' own actuation/authoring gates.
- *
- * @public — exported so consumers gate their own actuation paths with the
- * identical signal the library's dispatcher and toggle gate use. */
+/** True when a FOREIGN pid defer tag is set (an ancestor suspended
+ *  governance here); absent, empty, or our own pid all mean enforce —
+ *  fail-closed. Env-only, never settings. See README §isDeferredChild. */
 export function isDeferredChild(): boolean {
 	const v = process.env[DEFER_ENV];
 	return v !== undefined && v !== "" && v !== String(process.pid);
@@ -156,14 +145,9 @@ const CHILD_POLICY_WARNED_KEY = "__piToolMaskingChildPolicyWarned";
 // Registered tool names — hoisted scan shared by mask/re-assert/apply paths
 // ---------------------------------------------------------------------------
 
-/** One getAllTools() pass collecting the actuatable subset: present in the
- *  tool registry and not `hidden`-exposure
- *  (pi's setActiveTools silently drops hidden names, so they can never be
- *  active). Pre-0.99 pi has no `exposure` field — absent reads as actuatable,
- *  i.e. exactly the pre-fix behaviour. The read keeps a defensive cast even
- *  under the ^1.0.3 devDependency: this library ships raw TS source, so every
- *  consumer's tsc compiles it against THEIR installed pi types, and pre-0.99
- *  types have no `exposure` (TS2339 on a plain read). */
+/** One getAllTools() pass collecting tools that can actually be active:
+ *  registered and not `hidden`-exposure. The cast keeps consumers whose pi
+ *  types pre-date `exposure` compiling (this library ships raw TS). */
 function getActuatableNames(pi: ExtensionAPI): Set<string> {
 	const actuatable = new Set<string>();
 	for (const tool of pi.getAllTools()) {
@@ -203,6 +187,15 @@ function computeAllowlistDesired(
 		}
 	}
 	return [...desired].filter((n) => actuatable.has(n));
+}
+
+/** Do two tool-name lists contain exactly the same names (order-insensitive)?
+ *  The shared allowlist delta gate — length alone can't tell "no drift" from
+ *  "a leak removed AND a member re-added". */
+function isSameNameSet(a: readonly string[], b: readonly string[]): boolean {
+	if (a.length !== b.length) return false;
+	const bSet = new Set(b);
+	return a.every((n) => bSet.has(n));
 }
 
 // ---------------------------------------------------------------------------
@@ -408,7 +401,9 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 				actuatable,
 				registry,
 			);
-			pi.setActiveTools(desired);
+			if (!isSameNameSet(desired, current)) {
+				pi.setActiveTools(desired);
+			}
 
 			// Phase 2: notify AFTER state is final. `restored` for every
 			// registered toolset — the whole pass is a branch replay of the
@@ -484,10 +479,8 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		const currentSet = new Set(current);
 		const actuatable = getActuatableNames(pi);
 		const next = computeAllowlistDesired(allow, current, actuatable, registry);
-		// Delta gate — no-op unless the active set actually changed. `next`/`current`
-		// may share a length while differing (a leak removed AND a member re-added),
-		// so compare length AND that every desired tool is already current.
-		if (next.length === current.length && next.every((n) => currentSet.has(n))) {
+		// Delta gate — no-op unless the active set actually changed.
+		if (isSameNameSet(next, current)) {
 			return;
 		}
 		pi.setActiveTools(next);
@@ -750,15 +743,10 @@ export interface BatchPlan {
 	order: string[];
 }
 
-/**
- * Error thrown by {@link planBatch} when the registry graph contains a cycle
- * reachable from any requested op. Atomic: the planner is pure and writes
- * nothing, so the throw precedes every write and emit. Catch with
- * `err?.name === "CycleError"`, NOT `instanceof` — same rationale as
- * {@link AllowlistModeError} (throwers may belong to a different physical
- * copy of this library). The message carries the discovered cycle path but
- * is a diagnostic, not contract: never string-match it.
- */
+/** Cycle in the toggle batch's `requires`/dependents graph — thrown by the
+ *  pure planner, before any write. Catch by `err?.name === "CycleError"`,
+ *  never `instanceof` (throwers may belong to another library copy).
+ *  `cyclePath` (e.g. "A → B → A") is a diagnostic, not contract. */
 export class CycleError extends Error {
 	/** The discovered cycle path, e.g. "A → B → A". */
 	readonly cyclePath: string;
@@ -770,17 +758,11 @@ export class CycleError extends Error {
 	}
 }
 
-/**
- * Error thrown by {@link planBatch} when the resolved batch intent is
- * incoherent: an id would end up enabled while a transitive `requires`
- * dependency of it is disabled by the same batch (the zero-hop form — two
- * conflicting explicit ops on one id — throws the same error). Atomic: the
- * planner is pure and writes nothing, so the throw precedes every write and
- * emit. Catch with `err?.name === "ContradictionError"`, NOT `instanceof` —
- * same rationale as {@link AllowlistModeError} (throwers may belong to a
- * different physical copy of this library). The message is a diagnostic,
- * not contract: never string-match it.
- */
+/** The batch's resolved intent is incoherent: an id enabled while a
+ *  transitive `requires` dependency of it is disabled by the same batch
+ *  (conflicting duplicate ops on one id are the zero-hop form). Thrown by
+ *  the pure planner, before any write; catch by `err?.name`, never
+ *  `instanceof`. Full rule: README §toggleBatch. */
 export class ContradictionError extends Error {
 	constructor(detail: string) {
 		super(`[pi-tool-masking] contradictory toggle batch: ${detail}`);
@@ -788,36 +770,13 @@ export class ContradictionError extends Error {
 	}
 }
 
-/**
- * Compute the batch plan for toggle ops against the registry — pure, no
- * writes, so it can run before any effect and throw atomically (a cycle or
- * a contradiction anywhere reachable from the ops throws here, not during
- * execution). Closure semantics: an enable pulls its `requires` closure on
- * (deps first, in declaration order — the legacy enable walker's traversal,
- * recorded as discovery order); a disable pulls its dependents closure off
- * (self first, then dependents in registry order — the legacy disable
- * walker's traversal). Explicit targets win over implied values, and the
- * shared visited set makes every id appear exactly once in `order`.
- * Unregistered ids: an explicit op throws (a deliberate claim by the caller
- * — silently skipping it would swallow the bug class the refusal contract
- * exists for); an implied closure dep keeps the lenient skip
- * (forward-referenced `requires` entries stay tolerated).
- *
- * Contradiction rule (checked after closure resolution, over transitive
- * closures — not direct `requires` edges): no id resolved to enabled may
- * have an id resolved to disabled in its transitive `requires` closure.
- * Both explicit/implied collision directions reduce to this invariant: an
- * explicit enable over an implied-off pull leaves the disabling target off
- * inside the enabled id's closure, and an explicit disable over an
- * implied-on pull leaves the disabled id inside the enabling target's
- * closure — either way the invariant fires. The one-hop special case
- * (explicit enable X + explicit disable Y, X requires Y) and the zero-hop
- * form (conflicting duplicate ops on one id) throw the same error; there is
- * no winner-picking and no off-wins fallback — a caught refusal means
- * "refused, nothing changed". The coherent explicit-beats-implied shape
- * survives because the check only inspects enabled ids' closures: an off
- * toolset imposes no requirement on its own dependencies (`enable Y` +
- * `disable Z`, Z requires Y → {Y: true, Z: false} is legal).
+/** Pure planner for a batch of toggle ops: resolves explicit targets plus
+ *  their cascade closures into a final intent per id and a duplicate-free
+ *  write order; throws (CycleError, ContradictionError, unknown id) before
+ *  any write. Closure and contradiction semantics: README §toggleBatch.
+ *  The `explicitIntent` ledger is load-bearing — every explicit op must
+ *  re-record its claim even over an implied value, or a second conflicting
+ *  explicit op would overwrite silently instead of throwing.
  *
  * @internal — exported for planner-level tests; not a public API commitment.
  */
@@ -914,34 +873,14 @@ export function planBatch(ops: readonly BatchOp[]): BatchPlan {
 	return { intent, order };
 }
 
-/**
- * Execute a plan from {@link planBatch} — the sole toggle actuation path.
- *
- * Snapshot discipline: the caller threads the ONE branch value its boundary
- * already read (the allowlist check's) plus one settings snapshot; this
- * function derives `before` (pre-call resolved state, via the same
- * `resolveExclusionTier` restore and consumers read) from that snapshot and
- * never re-reads the branch. One public toggle call = one branch read and
- * one settings read; a plan-time and execute-time disjoint snapshot is
- * unreachable by construction.
- *
- * Delta gate — persist iff the plan's intent differs from `before` or a
- * loadout write occurred. Inside a call the plan is the intent authority:
- * the delta resolves against `before` instead of a fresh branch re-read.
- * Loop correctness survives because each public call re-reads at its own
- * boundary; clobber-repair and the disable residue case stay LOUD (wrote ⇒
- * persist + report + emit fire with it); same-value repeats are silent.
- * Exactly-once per call is structural: planBatch's global visited set makes
- * `plan.order` contain each id exactly once.
- *
- * Emits fire only after ALL writes complete (payload per id from
- * `plan.intent`, in `plan.order`) — one coherent transition per listener; no
- * library-emitted `changed` event fires mid-batch, so a synchronous listener
- * cannot intercept through the library's own event channel. Racing writers
- * on other channels (`prepareLoadout` hooks reached inside `setActiveTools`)
- * can still append mid-batch; such a
- * write for an id whose intent already matched is neither repaired nor
- * reported and wins at the next restore by last-writer-wins.
+/** Execute a plan from {@link planBatch} — the sole toggle actuation path.
+ *  Derives the delta's `before` basis from the caller's threaded branch +
+ *  settings snapshots (one read per public call, never re-read) and
+ *  persists/emits only ids whose intent differs from `before` or whose
+ *  loadout wrote; emits fire only after all writes, in `plan.order`. A
+ *  racing external append (e.g. a prepareLoadout hook) for an id whose
+ *  intent already matched is neither repaired nor reported — it wins at
+ *  the next restore by last-writer-wins.
  *
  * @internal — exported for executor-level tests; not a public API commitment.
  */
@@ -989,23 +928,14 @@ export function executeBatchPlan(
 // AllowlistModeError — the toggle boundary's refusal type
 // ---------------------------------------------------------------------------
 
-/**
- * Error thrown when a toggle is attempted under allowlist governance
- * (toggles are an exclusion-mode operation). Atomic: the throw precedes
- * the cascade — no branch entry, no emit, no loadout write; a caught
- * refusal means "refused, nothing changed". Catch with
- * `err?.name === "AllowlistModeError"`, NOT `instanceof`: handles come
- * from the `globalThis` registry and may belong to a different physical
- * copy of this library (deliberately unlike {@link MalformedSettingsError},
- * whose throwers and catchers share a module instance — see its JSDoc).
- */
+/** Thrown when a toggle runs under allowlist governance; atomic — the
+ *  throw precedes the cascade (nothing written, nothing emitted). Catch
+ *  by `err?.name`, never `instanceof` (throwers may belong to another
+ *  library copy — deliberately unlike {@link MalformedSettingsError}). */
 export class AllowlistModeError extends Error {
-	/** The refused toolset's spec.id. Set on single-op refusals (through the
-	 *  {@link Toolset.enable}/`.disable` wrappers); absent (`undefined`) on
-	 *  batch-path refusals — the refusal is mode-global and attributes
-	 *  nothing, so batch callers render it from their own op list. The
-	 *  refusal does not depend on the requested value, so there are no
-	 *  `requested`/`effective` fields. */
+	/** The refused toolset's spec.id — set on single-op refusals (the
+	 *  {@link Toolset.enable}/`.disable` wrappers), absent on batch-path
+	 *  refusals (mode-global, attributes nothing). */
 	specId?: string;
 
 	constructor(specId?: string) {
@@ -1158,6 +1088,14 @@ export function defineToolset(pi: ExtensionAPI, spec: ToolsetSpec): Toolset {
 	if (typeof spec.persistKey !== "string" || spec.persistKey.trim() === "") {
 		throw new Error(
 			"[pi-tool-masking] spec.persistKey must be a non-empty string",
+		);
+	}
+	if (spec.persistKey === MODE_PERSIST_KEY) {
+		// The mode entry shares this key's entry stream; a toolset toggling
+		// under it would supersede the governance entry (last-writer-wins) and
+		// vice versa — each write silently corrupting the other's read.
+		throw new Error(
+			`[pi-tool-masking] spec.persistKey "${MODE_PERSIST_KEY}" is reserved for the resolution-mode branch entry; pick another key.`,
 		);
 	}
 

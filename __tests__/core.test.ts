@@ -145,6 +145,13 @@ describe("defineToolset — validation", () => {
 		);
 	});
 
+	it("throws on the reserved resolution-mode persistKey", () => {
+		const { pi } = createEnv();
+		expect(() =>
+			defineToolset(pi, makeSpec({ persistKey: "toolset-resolution-mode" })),
+		).toThrow("is reserved for the resolution-mode branch entry");
+	});
+
 	it("valid spec does not throw", () => {
 		const { pi } = createEnv();
 		expect(() => defineToolset(pi, makeSpec())).not.toThrow();
@@ -1180,6 +1187,31 @@ describe("Allowlist resolution mode", () => {
 		mock.fireLifecycleEvent("session_start");
 
 		expect(mock.getActiveTools()).toEqual(["tool-a"]);
+	});
+
+	it("allowlist restore with nothing drifted skips the redundant setActiveTools write", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		mock.registerTool({ name: "tool-b", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({ id: "a", persistKey: "k:a", names: new Set(["tool-a"]) }),
+		);
+		defineToolset(
+			pi,
+			makeSpec({ id: "b", persistKey: "k:b", names: new Set(["tool-b"]) }),
+		);
+
+		setDefaultResolutionMode(pi, "allowlist", ["a"]);
+		// Active set already matches the allowlist — restore must not rewrite it
+		// (a redundant write forces pi to rebuild the system prompt).
+		mock.setActiveTools(["tool-a"]);
+		const callsBefore = mock.getSetActiveCalls().length;
+
+		mock.fireLifecycleEvent("session_start");
+
+		expect(mock.getActiveTools()).toEqual(["tool-a"]);
+		expect(mock.getSetActiveCalls()).toHaveLength(callsBefore);
 	});
 
 	it("non-toolset tools preserved during allowlist restore", () => {

@@ -113,7 +113,7 @@ defer → empty `ops` → allowlist refusal → plan → settings snapshot → e
 |---|---|
 | `AllowlistModeError` | Allowlist governance (mode-global, no `specId` on this path) |
 | `CycleError` | Any cycle reachable from any op — thrown before any write (carries the cycle path as `err.cyclePath`) |
-| `ContradictionError` | The resolved intent is incoherent — an id enabled while a transitive `requires` dependency of it is disabled by the same batch; conflicting duplicate ops on one id are the zero-hop form |
+| `ContradictionError` | The resolved intent is incoherent — an id enabled while a transitive `requires` dependency of it is disabled by the same batch; conflicting duplicate ops on one id are the zero-hop form. The check only inspects **enabled** ids' closures, so an off toolset imposes no requirement on its own dependencies: `enable Y` + `disable Z` (Z requires Y) is legal |
 | plain `Error` | An explicit op naming an unregistered id |
 
 ### `setDefaultResolutionMode(pi, mode, allowlist?)`
@@ -166,8 +166,8 @@ This is what display surfaces should read (see [Intent vs observation](#intent-v
 
 | Event | When |
 |---|---|
-| `changed` | A toolset was toggled by a consumer |
-| `restored` | A toolset's state was restored from persisted session state |
+| `changed` | A toggle, a re-assert, or `forceToolsetEnabled` applied a state; exclusion-mode restore also emits it for a toolset with no persisted entry (settings/packaged fallback) |
+| `restored` | Exclusion-mode restore of a persisted branch entry; allowlist-mode restore of **every** registered toolset (a branch replay of the allowlist, not a live toggle) |
 
 ### Types
 
@@ -184,7 +184,7 @@ This is what display surfaces should read (see [Intent vs observation](#intent-v
 | `AllowlistModeError` | Thrown by every toggle under allowlist governance (`enable`/`disable` and `toggleBatch`). Catch by `err?.name === "AllowlistModeError"`, **never** `instanceof` — handles come from the shared `globalThis` registry and may belong to a different physical copy of the library, so cross-instance `instanceof` fails silently. `specId` is set on single-op refusals (through the `enable`/`disable` wrappers), absent (`undefined`) on batch refusals — the refusal is mode-global and attributes nothing. |
 | `CycleError` | Thrown by the planner when a cycle is reachable from any requested op, **before any write or emit**. Catch by `err?.name === "CycleError"`, same name-based contract as `AllowlistModeError`; messages are diagnostics, never string-matched. Carries the cycle path as `cyclePath`. |
 | `ContradictionError` | Thrown by the planner when the resolved batch intent is incoherent (see [`toggleBatch`](#togglebatchpi-sessionmanager-ops)). Catch by `err?.name === "ContradictionError"`, same name-based contract; messages are diagnostics, never string-matched. |
-| `PersistKeyCollisionError` | Thrown by `defineToolset` when a different registered toolset already claims the spec's `persistKey` (atomic — registration writes nothing). Catch by `err?.name === "PersistKeyCollisionError"`, same name-based contract; messages are diagnostics, never string-matched. Carries `persistKey` and the `existingId` that owns it. |
+| `PersistKeyCollisionError` | Thrown by `defineToolset` when a different registered toolset already claims the spec's `persistKey` (atomic — registration writes nothing). Catch by `err?.name === "PersistKeyCollisionError"`, same name-based contract; messages are diagnostics, never string-matched. Carries `persistKey` and the `existingId` that owns it. The library's own branch key `toolset-resolution-mode` is likewise reserved — a spec claiming it as `persistKey` throws a plain validation `Error` (its `{ enabled }` entries would otherwise clobber the resolution-mode entry, and vice versa). |
 | `BatchOp` | `{ id, desired }` — one requested toggle in a [`toggleBatch`](#togglebatchpi-sessionmanager-ops) call |
 
 ---

@@ -98,6 +98,12 @@
 
 ### Changed
 
+- **`defineToolset` reserves the resolution-mode branch key.** A spec whose
+  `persistKey` is `"toolset-resolution-mode"` now throws a validation
+  `Error` at registration — its `{ enabled }` toggle entries would otherwise
+  supersede the branch's resolution-mode entry (and vice versa) via
+  last-writer-wins, silently dropping allowlist governance. No legitimate
+  consumer key is affected.
 - **Breaking: `toggleBatch` added as the sole toggle actuation path;
   `Toolset.enable`/`.disable` are now wrappers over it.** Behavior through
   the wrappers is unchanged (same signatures, same `ToggleResult[]`, same
