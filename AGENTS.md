@@ -130,9 +130,10 @@ Not a full API reference — see `README.md`.
   re-assert dispatcher, and the toggle refusal all read the branch via
   `readBranchModeState`.
 - Persistence: `pi.appendEntry(persistKey, { enabled })` +
-  `pi.sessionManager.getBranch()`. Restore runs on `session_start`/`session_tree`
-  (per-event guard dedupes). A `null` tombstone falls through to the
-  settings/packaged tier.
+  `pi.sessionManager.getBranch()`. Restore runs on every
+  `session_start`/`session_tree` (one handler pair installed per `pi`, deduped
+  by a WeakSet — restore itself re-runs on each event). A `null` tombstone
+  falls through to the settings/packaged tier.
 - `before_agent_start` re-asserts each turn, arm chosen from the branch:
   allowlist mode undoes both drift directions (removes non-allowlisted
   force-adds, restores force-removed allowlisted members); exclusion mode removes

@@ -1092,6 +1092,30 @@ describe("Allowlist resolution mode", () => {
 		expect(mock.getActiveTools()).toEqual(["tool-a", "orphan-tool"]);
 	});
 
+	it("allowlist re-assert detects drift even when the active-set length is unchanged", () => {
+		const { mock, pi } = createEnv();
+		mock.registerTool({ name: "tool-a", description: "" });
+		mock.registerTool({ name: "tool-b", description: "" });
+		defineToolset(
+			pi,
+			makeSpec({ id: "a", persistKey: "k:a", names: new Set(["tool-a"]) }),
+		);
+		defineToolset(
+			pi,
+			makeSpec({ id: "b", persistKey: "k:b", names: new Set(["tool-b"]) }),
+		);
+
+		setDefaultResolutionMode(pi, "allowlist", ["a"]);
+
+		// Simulated force-re-add: allowlisted tool-a is missing while
+		// non-allowlisted tool-b is active. Same length as desired, so only
+		// the per-name comparison (not the length shortcut) can spot the swap.
+		mock.setActiveTools(["tool-b"]);
+		mock.fireLifecycleEvent("session_start");
+
+		expect(mock.getActiveTools()).toEqual(["tool-a"]);
+	});
+
 	it("future-install suppression — toolset registered after allowlist is off", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
