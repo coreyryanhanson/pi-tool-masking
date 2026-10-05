@@ -1385,7 +1385,7 @@ describe("before_agent_start allowlist re-assert", () => {
 	it("removes a tool force-added after focus entered, emits changed, and is a no-op outside allowlist mode", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "search.web", description: "" });
-		mock.registerTool({ name: "ask_user_question", description: "" });
+		mock.registerTool({ name: "ask.tool", description: "" });
 
 		const search = makeSpec({
 			id: "search.web",
@@ -1393,21 +1393,21 @@ describe("before_agent_start allowlist re-assert", () => {
 			names: new Set(["search.web"]),
 		});
 		const ask = makeSpec({
-			id: "k:ask",
+			id: "ask.tool",
 			persistKey: "k:ask",
-			names: new Set(["ask_user_question"]),
+			names: new Set(["ask.tool"]),
 		});
 		defineToolset(pi, search);
 		defineToolset(pi, ask);
 
 		// Enter allowlist mode allowing only search.web.
 		setDefaultResolutionMode(pi, "allowlist", ["search.web"]);
-		// doRestore applies the allowlist: ask_user_question is removed.
+		// doRestore applies the allowlist: ask.tool is removed.
 		mock.fireLifecycleEvent("session_start");
 		expect(pi.getActiveTools()).toEqual(["search.web"]);
 
 		// Simulate the reconciler punching through on the next turn.
-		mock.setActiveTools(["search.web", "ask_user_question"]);
+		mock.setActiveTools(["search.web", "ask.tool"]);
 		expect(pi.getActiveTools()).toHaveLength(2);
 
 		const changedSpy = vi.fn();
@@ -1419,16 +1419,16 @@ describe("before_agent_start allowlist re-assert", () => {
 		expect(pi.getActiveTools()).toEqual(["search.web"]);
 		expect(changedSpy).toHaveBeenCalledTimes(1);
 		expect(changedSpy).toHaveBeenCalledWith({
-			id: "k:ask",
+			id: "ask.tool",
 			enabled: false,
 		});
 
 		// Outside allowlist mode: re-assert is a no-op.
 		setDefaultResolutionMode(pi, "exclusion");
-		mock.setActiveTools(["search.web", "ask_user_question"]);
+		mock.setActiveTools(["search.web", "ask.tool"]);
 		changedSpy.mockClear();
 		mock.fireLifecycleEvent("before_agent_start");
-		expect(pi.getActiveTools()).toEqual(["search.web", "ask_user_question"]);
+		expect(pi.getActiveTools()).toEqual(["search.web", "ask.tool"]);
 		expect(changedSpy).not.toHaveBeenCalled();
 	});
 
@@ -1530,7 +1530,7 @@ describe("before_agent_start disabled-leak re-assert", () => {
 	it("removes a disabled toolset's tool force-added mid-session, emits changed, and is a no-op when the toolset is effectively on", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "search.web", description: "" });
-		mock.registerTool({ name: "ask_user_question", description: "" });
+		mock.registerTool({ name: "ask.tool", description: "" });
 
 		const search = makeSpec({
 			id: "search.web",
@@ -1538,9 +1538,9 @@ describe("before_agent_start disabled-leak re-assert", () => {
 			names: new Set(["search.web"]),
 		});
 		const ask = makeSpec({
-			id: "k:ask",
+			id: "ask.tool",
 			persistKey: "k:ask",
-			names: new Set(["ask_user_question"]),
+			names: new Set(["ask.tool"]),
 		});
 		defineToolset(pi, search);
 		const askTs = defineToolset(pi, ask);
@@ -1548,12 +1548,12 @@ describe("before_agent_start disabled-leak re-assert", () => {
 		// Exclusion mode (the default). Restore brings both toolsets on, then
 		// the user disables the ask toolset (writes a branch entry).
 		mock.fireLifecycleEvent("session_start");
-		expect(pi.getActiveTools()).toEqual(["search.web", "ask_user_question"]);
+		expect(pi.getActiveTools()).toEqual(["search.web", "ask.tool"]);
 		askTs.disable(pi, reader(pi));
 		expect(pi.getActiveTools()).toEqual(["search.web"]);
 
 		// Simulate the reconciler punching through on the next turn.
-		mock.setActiveTools(["search.web", "ask_user_question"]);
+		mock.setActiveTools(["search.web", "ask.tool"]);
 		expect(pi.getActiveTools()).toHaveLength(2);
 
 		const changedSpy = vi.fn();
@@ -1565,17 +1565,17 @@ describe("before_agent_start disabled-leak re-assert", () => {
 		expect(pi.getActiveTools()).toEqual(["search.web"]);
 		expect(changedSpy).toHaveBeenCalledTimes(1);
 		expect(changedSpy).toHaveBeenCalledWith({
-			id: "k:ask",
+			id: "ask.tool",
 			enabled: false,
 		});
 
 		// Effectively on: re-assert is a no-op — a default-on toolset is not
 		// a hard constraint, so the force-added tool is NOT removed.
 		askTs.enable(pi, reader(pi));
-		mock.setActiveTools(["search.web", "ask_user_question"]);
+		mock.setActiveTools(["search.web", "ask.tool"]);
 		changedSpy.mockClear();
 		mock.fireLifecycleEvent("before_agent_start");
-		expect(pi.getActiveTools()).toEqual(["search.web", "ask_user_question"]);
+		expect(pi.getActiveTools()).toEqual(["search.web", "ask.tool"]);
 		expect(changedSpy).not.toHaveBeenCalled();
 	});
 
@@ -4180,7 +4180,7 @@ describe("intent-delta gate", () => {
 		mock.registerTool({ name: "tool-a", description: "" });
 		const ts = defineToolset(pi, makeSpec({ names: new Set(["tool-a"]) }));
 
-		// External writer appends the intent directly (an external focusRelease-style write).
+		// External writer appends the raw intent entry directly (no toggle API).
 		pi.appendEntry("toolset-state:test.toolset", { enabled: false });
 
 		const changed: { id: string; enabled: boolean }[] = [];
