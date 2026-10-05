@@ -334,9 +334,6 @@ interface ToolsetSpec {
  /** Human-readable name. Optional — falls back to id. */
  label?: string;
 
- /** One-line description. Optional — omitted when absent. */
- description?: string;
-
  /** Tool names this toolset governs. */
  names: Set<string>;
 

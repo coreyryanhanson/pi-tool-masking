@@ -18,8 +18,6 @@ export interface ToolsetSpec {
 	id: string;
 	/** Human-readable name for the group. Optional — presenters fall back to id. */
 	label?: string;
-	/** One-line description of what enabling the group does. Optional — presenters omit when absent. */
-	description?: string;
 	/** Tool names this toolset governs. */
 	names: Set<string>;
 	/** Primary persistence key the toolset writes, e.g. "toolset-state:my-plugin.web". */
