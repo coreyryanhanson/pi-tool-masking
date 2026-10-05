@@ -127,7 +127,7 @@ Switch how toolsets with no persisted state resolve on restore. Two modes:
 
 ### `readBranchModeState(branch)`
 
-Read the governance decision from a branch — the same shared read restore, the resolver, the re-assert dispatcher, and the toggle boundary use. Returns `{ mode, allowlist }`: `"allowlist"` with the listed ids, or `"exclusion"` (with `allowlist: []`) when no mode entry exists or the value is unrecognized; a corrupt allowlist array fails closed to `[]`.
+Read the governance decision from a branch — the same shared read restore, the resolver, the re-assert dispatcher, and the toggle boundary use. Returns `{ mode, allowlist }`: `"allowlist"` with the listed ids, or `"exclusion"` (with `allowlist: []`) when no mode entry exists or the value is unrecognized; a corrupt allowlist fails closed (non-array → `[]`, non-string members dropped).
 
 For **decision and authoring paths only** — consumer flows that never route through a toggle (a focus-release flush, pre-call UI shaping such as greying out a menu item) — **never a toggle pre-check**: call the toggle and catch `AllowlistModeError`; the throw is the toggle authority. Copy-on-read: the returned array is a fresh copy, never a reference into the branch (pi stores entry `data` by reference, so a reference-returning read would alias persisted governance).
 

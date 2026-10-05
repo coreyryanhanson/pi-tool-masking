@@ -1320,6 +1320,20 @@ describe("Allowlist resolution mode", () => {
 		expect(mock.getActiveTools()).toEqual([]);
 	});
 
+	it("corrupt allowlist members — non-string entries are dropped, string[] type holds", () => {
+		const { mock, pi } = createEnv();
+		// Hand-edited branch corruption: array present but holding non-strings.
+		// (pi stores entry data by reference, so cast a mixed array in.)
+		mock.appendEntry(
+			"toolset-resolution-mode",
+			{ mode: "allowlist", allowlist: ["a", 1, null] as unknown as string[] },
+		);
+		expect(readBranchModeState(reader(pi).getBranch())).toEqual({
+			mode: "allowlist",
+			allowlist: ["a"],
+		});
+	});
+
 	it("restore fail-closed — allowlist present but not an array → empty allowlist, everything off", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });

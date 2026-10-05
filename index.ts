@@ -213,9 +213,9 @@ function computeAllowlistDesired(
 // ---------------------------------------------------------------------------
 
 /** Persisted resolution state from the branch's LAST mode entry.
- *  Unrecognized modes → `"exclusion"`; an allowlist entry with a corrupt
- *  array recovers to an EMPTY allowlist (fail closed — "everything on" is
- *  the wrong recovery for a masking library). Write-time validation is the
+ *  Unrecognized modes → `"exclusion"`; a corrupt allowlist recovers fail-
+ *  closed — a non-array to EMPTY, non-string members dropped ("everything
+ *  on" is the wrong recovery for a masking library). Write-time validation is the
  *  asymmetric mirror: `setDefaultResolutionMode` rejects an empty array,
  *  restore recovers it. A governance decision/authoring read, NEVER a
  *  toggle pre-check — call the toggle and catch `AllowlistModeError`.
@@ -236,7 +236,11 @@ export function readBranchModeState(branch: readonly SessionEntry[]): {
 	return {
 		mode: last?.data?.mode === "allowlist" ? "allowlist" : "exclusion",
 		// Copy on read: never hand out a reference into the branch entry data.
-		allowlist: Array.isArray(rawAllowlist) ? [...rawAllowlist] : [],
+		// Drop non-string members (hand-edited corruption) so the `string[]`
+		// return type holds — no id matches a non-string, still fail-closed.
+		allowlist: Array.isArray(rawAllowlist)
+			? rawAllowlist.filter((v): v is string => typeof v === "string")
+			: [],
 	};
 }
 
@@ -592,7 +596,8 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 		// process before its first restore — there the branch read enforces the
 		// allowlist from the first turn instead of running the exclusion
 		// re-assert over allowlisted state). Fail-open/fail-closed edge cases
-		// (absent entry → exclusion, corrupt array → `[]`) come with
+		// (absent entry → exclusion, corrupt allowlist → fail-closed: non-array
+		// → `[]`, non-string members dropped) come with
 		// `readBranchModeState`'s contract and now govern this call site.
 		const { mode, allowlist } = readBranchModeState(
 			ctx.sessionManager.getBranch(),
