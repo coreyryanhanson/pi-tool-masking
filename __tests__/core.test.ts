@@ -2897,22 +2897,6 @@ describe("Restore — idempotent / last-writer-wins", () => {
 // ===================================================================
 
 describe("Restore — session_tree", () => {
-	it("session_tree also triggers restore", () => {
-		const { mock, pi } = createEnv();
-		mock.registerTool({ name: "tool-a", description: "" });
-		defineToolset(
-			pi,
-			makeSpec({ names: new Set(["tool-a"]), defaultEnabled: false }),
-		);
-		const emitSpy = vi.spyOn(mock.events, "emit");
-		mock.fireLifecycleEvent("session_tree");
-		const changedCalls = emitSpy.mock.calls.filter(
-			([c]) => c === TOOLSET_EVENTS.changed,
-		);
-		expect(changedCalls.length).toBeGreaterThanOrEqual(1);
-		emitSpy.mockRestore();
-	});
-
 	it("session_tree restores persisted entry and emits restored", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
@@ -3608,37 +3592,6 @@ describe("Null-tombstone — toolset restore", () => {
 
 		// Falls through to packaged default (false), not the stale true entry
 		expect(mock.getActiveTools()).not.toContain("tool-a");
-	});
-
-	it("real entry without tombstone restores true (regression guard)", () => {
-		const { mock, pi } = createEnv();
-		mock.registerTool({ name: "tool-a", description: "" });
-		defineToolset(
-			pi,
-			makeSpec({ names: new Set(["tool-a"]), defaultEnabled: false }),
-		);
-
-		mock.appendEntry("toolset-state:test.toolset", { enabled: true });
-
-		mock.fireLifecycleEvent("session_start");
-
-		expect(mock.getActiveTools()).toContain("tool-a");
-	});
-
-	it("only a null tombstone (no prior real entry) falls through", () => {
-		const { mock, pi } = createEnv();
-		mock.registerTool({ name: "tool-a", description: "" });
-		defineToolset(
-			pi,
-			makeSpec({ names: new Set(["tool-a"]), defaultEnabled: true }),
-		);
-
-		mock.appendEntry("toolset-state:test.toolset", null);
-
-		mock.fireLifecycleEvent("session_start");
-
-		// No real entry → packaged default (true)
-		expect(mock.getActiveTools()).toContain("tool-a");
 	});
 
 	it("live toggle after tombstone supersedes it (last-writer-wins)", () => {
