@@ -92,7 +92,6 @@ export const TOOLSET_EVENTS = {
 // ---------------------------------------------------------------------------
 
 const REGISTRY_KEY = "__piToolMaskingRegistry";
-const RESTORE_EVENT_KEY = "__piToolMaskingLastRestoreEvent";
 const HANDLERS_KEY = "__piToolMaskingHandlerInstalled";
 // Tracks which pi instances have had the restore/re-assert handlers installed.
 // `defineToolset` calls `ensureRestoreHandler` once per toolset; keying the
@@ -314,7 +313,7 @@ function resolveExclusionTier(
 
 // ---------------------------------------------------------------------------
 // Ensure session_start / session_tree restore handler is registered once
-// per pi (WeakSet), with a second runtime dedup by event-object identity
+// per pi (WeakSet)
 // ---------------------------------------------------------------------------
 
 function ensureRestoreHandler(pi: ExtensionAPI): void {
@@ -322,14 +321,7 @@ function ensureRestoreHandler(pi: ExtensionAPI): void {
 	if (getHandlerInstalled().has(pi)) return;
 	getHandlerInstalled().add(pi);
 
-	// Dedup by event-object identity. The runner passes the same event
-	// reference to every extension's handler in one emit() call, so the first
-	// handler wins and the rest skip. Each /reload constructs a fresh event
-	// object, so restore re-runs with the fresh pi.
-	const doRestore = (event: unknown, ctx: ExtensionContext): void => {
-		if ((globalThis as any)[RESTORE_EVENT_KEY] === event) return;
-		(globalThis as any)[RESTORE_EVENT_KEY] = event;
-
+	const doRestore = (_event: unknown, ctx: ExtensionContext): void => {
 		const registry = getRegistry();
 
 		// ---- Child-policy defer: read + publish/consume ----

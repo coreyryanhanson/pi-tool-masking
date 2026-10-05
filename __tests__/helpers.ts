@@ -23,7 +23,6 @@ export function reader(pi: ExtensionAPI): BranchReader {
 
 const GLOBAL_KEYS = [
 	"__piToolMaskingRegistry",
-	"__piToolMaskingLastRestoreEvent",
 	"__piToolMaskingChildPolicyWarned",
 	"__piToolMaskingHandlerInstalled",
 ] as const;
