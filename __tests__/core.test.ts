@@ -3223,6 +3223,30 @@ describe("writeToolsetDefaults & clearToolsetDefaults", () => {
 				enabled: false,
 			});
 		});
+
+		it("readers return {} on malformed files, never throw (both scopes)", () => {
+			writeFileSync(join(agentDir, "settings.json"), "{not valid");
+			writeFileSync(join(tmpDir, ".pi", "settings.json"), "[]");
+
+			expect(readToolsetDefaults("global")).toEqual({});
+			expect(readToolsetDefaults("project")).toEqual({});
+			expect(readMergedToolsetDefaults()).toEqual({});
+		});
+
+		it("a malformed project file does not poison global entries in the merge", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({
+					toolsetDefaults: { "toolset-state:g": { enabled: true } },
+				}),
+			);
+			writeFileSync(join(tmpDir, ".pi", "settings.json"), "{not valid");
+
+			expect(readToolsetDefaults("project")).toEqual({});
+			expect(readMergedToolsetDefaults()).toEqual({
+				"toolset-state:g": { enabled: true },
+			});
+		});
 	});
 
 	describe("malformed-file guard (disk)", () => {
