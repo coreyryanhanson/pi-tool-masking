@@ -233,15 +233,19 @@ export function readBranchModeState(branch: readonly SessionEntry[]): {
 			allowlist?: string[];
 		} | null
 	>(branch, MODE_PERSIST_KEY);
+	const isAllowlist = last?.data?.mode === "allowlist";
 	const rawAllowlist = last?.data?.allowlist;
 	return {
-		mode: last?.data?.mode === "allowlist" ? "allowlist" : "exclusion",
+		mode: isAllowlist ? "allowlist" : "exclusion",
 		// Copy on read: never hand out a reference into the branch entry data.
 		// Drop non-string members (hand-edited corruption) so the `string[]`
 		// return type holds — no id matches a non-string, still fail-closed.
-		allowlist: Array.isArray(rawAllowlist)
-			? rawAllowlist.filter((v): v is string => typeof v === "string")
-			: [],
+		// Exclusion mode always reports an empty allowlist, matching the
+		// documented shape (a stale non-empty allowlist is dead data there).
+		allowlist:
+			isAllowlist && Array.isArray(rawAllowlist)
+				? rawAllowlist.filter((v): v is string => typeof v === "string")
+				: [],
 	};
 }
 
@@ -1351,10 +1355,6 @@ function readSettingsJsonSafe(scope: "global" | "project"): ParsedSettings {
 	}
 }
 
-function readScopeSettings(scope: "global" | "project"): ParsedSettings {
-	return readSettingsJsonSafe(scope);
-}
-
 /**
  * Extract toolset defaults from a settings.json object.
  *
@@ -1394,8 +1394,8 @@ function parseToolsetDefaults(json: unknown): ToolsetDefaultsMap {
  */
 export function readMergedToolsetDefaults(): ToolsetDefaultsMap {
 	return {
-		...parseToolsetDefaults(readScopeSettings("global")),
-		...parseToolsetDefaults(readScopeSettings("project")),
+		...parseToolsetDefaults(readSettingsJsonSafe("global")),
+		...parseToolsetDefaults(readSettingsJsonSafe("project")),
 	};
 }
 
@@ -1411,7 +1411,7 @@ export function readMergedToolsetDefaults(): ToolsetDefaultsMap {
 export function readToolsetDefaults(
 	scope: "global" | "project",
 ): ToolsetDefaultsMap {
-	return parseToolsetDefaults(readScopeSettings(scope));
+	return parseToolsetDefaults(readSettingsJsonSafe(scope));
 }
 
 /** Valid values for `piToolMasking.childPolicy`. */
@@ -1431,7 +1431,7 @@ function readChildPolicy(): ChildPolicy {
 	const read = (
 		scope: "global" | "project",
 	): Record<string, unknown> | undefined => {
-		const pim = readScopeSettings(scope)["piToolMasking"];
+		const pim = readSettingsJsonSafe(scope)["piToolMasking"];
 		if (!pim || typeof pim !== "object" || Array.isArray(pim)) return undefined;
 		return pim as Record<string, unknown>;
 	};

@@ -1281,6 +1281,19 @@ describe("Allowlist resolution mode", () => {
 		});
 	});
 
+	it("exclusion mode with a stale allowlist — the dead allowlist is not surfaced", () => {
+		const { mock, pi } = createEnv();
+		// Hand-edited/legacy entry: mode is exclusion but an allowlist lingers.
+		mock.appendEntry(
+			"toolset-resolution-mode",
+			{ mode: "exclusion", allowlist: ["a", "b"] },
+		);
+		expect(readBranchModeState(reader(pi).getBranch())).toEqual({
+			mode: "exclusion",
+			allowlist: [],
+		});
+	});
+
 	it("null-tombstoned mode entry supersedes a prior allowlist → exclusion, allowlist []", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "tool-a", description: "" });
