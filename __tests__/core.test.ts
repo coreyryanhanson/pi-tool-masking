@@ -212,7 +212,7 @@ describe("defineToolset — restore handler registration", () => {
 		emitSpy.mockRestore();
 	});
 
-	it("restore is /reload-safe — stale boolean no longer blocks fresh extension", () => {
+	it("restore is /reload-safe — the per-pi handler dedup lets a fresh pi re-install and restore", () => {
 		const { mock: mock1, pi: pi1 } = createEnv();
 		mock1.registerTool({ name: "tool-a", description: "" });
 		const spec = makeSpec({ names: new Set(["tool-a"]) });
@@ -816,7 +816,7 @@ describe("Toolset with empty names", () => {
 // not getAllTools: a disabled toolset's members must never be revived.
 // ===================================================================
 
-describe("Peer composition — disable reads getActiveTools, not getAllTools", () => {
+describe("Peer composition — disable filters the active set, never reviving a peer", () => {
 	it("disable(A) does not re-activate B when disable(B) is called", () => {
 		const { mock, pi } = createEnv();
 		mock.registerTool({ name: "a-only", description: "" });

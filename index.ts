@@ -1321,8 +1321,11 @@ export function forceToolsetEnabled(
 // Settings.json reader — toolsetDefaults tier
 // ---------------------------------------------------------------------------
 
-/** On-disk settings shape: `toolsetDefaults[persistKey] = { enabled }`. */
-type ToolsetDefaultsMap = Record<string, { enabled: boolean }>;
+/** On-disk settings shape: `toolsetDefaults[persistKey] = { enabled }`.
+ *  Exported because it appears in the signatures of exported functions
+ *  (`parseToolsetDefaults`, `readMergedToolsetDefaults`,
+ *  `writeToolsetDefaults`, `getEffectiveDefault`, `effectiveEnabled`). */
+export type ToolsetDefaultsMap = Record<string, { enabled: boolean }>;
 
 function settingsPath(scope: "global" | "project"): string {
 	const agentDir =
