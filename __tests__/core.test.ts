@@ -53,6 +53,18 @@ function setDefaultsOverride(
 	);
 }
 
+/** Executor-level plumbing shared by planner/executor describe blocks:
+ *  one branch read + one settings snapshot per call, then plan → execute. */
+function execute(mock: MockPI, ops: BatchOp[]) {
+	const branch = mock.branchReader().getBranch();
+	return executeBatchPlan(
+		planBatch(ops),
+		mock as unknown as ExtensionAPI,
+		branch,
+		readMergedToolsetDefaults(),
+	);
+}
+
 function makeSpec(
 	overrides: Partial<{
 		id: string;
@@ -2755,16 +2767,6 @@ describe("Batch execution (executor-level)", () => {
 		return { mock, pi };
 	}
 
-	function execute(mock: MockPI, ops: BatchOp[]) {
-		const branch = mock.branchReader().getBranch();
-		return executeBatchPlan(
-			planBatch(ops),
-			mock as unknown as ExtensionAPI,
-			branch,
-			readMergedToolsetDefaults(),
-		);
-	}
-
 	it("cross-target overlap dedupes exactly-once: shared dep applied and reported once", () => {
 		const { mock } = rig();
 		const results = execute(mock, [
@@ -2895,16 +2897,6 @@ describe("Racing-writer residuals", () => {
 			}),
 		);
 		return { mock, pi };
-	}
-
-	function execute(mock: MockPI, ops: BatchOp[]) {
-		const branch = mock.branchReader().getBranch();
-		return executeBatchPlan(
-			planBatch(ops),
-			mock as unknown as ExtensionAPI,
-			branch,
-			readMergedToolsetDefaults(),
-		);
 	}
 
 	it("post-execution-emit listener write: emitted payload carries plan.intent; the listener's entry wins at the next restore", () => {
