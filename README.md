@@ -133,7 +133,7 @@ For **decision and authoring paths only** — consumer flows that never route th
 
 ### `isDeferredChild()`
 
-`true` when this process is a governance-deferring child — a defer-publisher ancestor suspended masking for its subtree (see [Subagent inheritance](#subagent-inheritance-child-policy-defer)). Env-only: reads the `PI_TOOLMASKING_DEFER` pid tag, never settings, so a mid-session policy flip cannot flip a child that restored under defer. Exported so consumers gate their own actuation and governance-authoring flows with the identical signal the library's dispatcher and toggle gate use. In a deferring child every library toggle is a silent no-op (`[]`), and `setDefaultResolutionMode` / `clearToolsetEntry` / `clearAllToolsetEntries` write nothing (validation still throws); the deliberate write/actuation APIs — `forceToolsetEnabled`, raw `appendEntry`, the settings writers — stay live.
+`true` when this process is a governance-deferring child — a defer-publisher ancestor suspended masking for its subtree (see [Subagent inheritance](#subagent-inheritance-child-policy-defer)). Env-only: reads the `PI_TOOLMASKING_DEFER` pid tag, never settings, so a mid-session policy flip cannot flip a child that restored under defer. Exported so consumers gate their own actuation and governance-authoring flows with the identical signal the library's dispatcher and toggle gate use. In a deferring child every library toggle is a silent no-op (`[]`), `setDefaultResolutionMode` / `clearToolsetEntry` / `clearAllToolsetEntries` write nothing (validation still throws), and `computeDrift` returns `[]`; the deliberate write/actuation APIs — `forceToolsetEnabled`, raw `appendEntry`, the settings writers — stay live.
 
 ### `getRegisteredToolsets()`
 
@@ -162,10 +162,37 @@ Returns `{ enabled, persistedEntry }` — read `.enabled` for display (intent re
 
 This is what display surfaces should read (see [Intent vs observation](#intent-vs-observation)); **never a toggle pre-check** — call the toggle and catch. `getEffectiveDefault` differs: it resolves settings → packaged only, ignoring the branch and mode. There is no `mode` parameter — allowlist detection comes from the branch itself.
 
+### `getActuatableNames(pi)`
+
+The set of tool names that can actually be active: registered and not `hidden`-exposure. One `getAllTools()` pass; it scans every tool, not only members of registered toolsets (predicates intersect with `spec.names` themselves). This is masking's named actuation boundary — the add path, the re-assert mask, and `computeDrift` all filter through it.
+
+**Known over-approximation.** `registered && !hidden` is an upper bound on activatable, not the exact set: pi's `_isActivatable` additionally refuses MCP tools not named by the session's `--tools` allowlist (`direct`-exposure unconditionally; other exposures only when `tool_search` is not registered) and `_applyToolLoadout` silently drops it. `defaultTools` does not gate activatability (it is a settings-level initial selection, not a filter), and `--exclude-tools` unregisters the tool outright — inert, not drift. pi exposes no activatability query, so the exact set is not computable from masking's side; `computeDrift` treats members in this gap as a known false-positive class (below).
+
+### `computeDrift(pi, branch)`
+
+The drift predicate: per registered toolset, compare declared intent (`effectiveEnabled` over the passed branch, with the merged settings defaults read once per invocation) against the live set (`pi.getActiveTools()`), both restricted to the actuatable subset. Returns `DriftFact[]` — one entry per mismatched toolset, empty when everything is aligned:
+
+```ts
+// intent off, 3 members active over a disabled toolset (leak)
+[{ id: "my-plugin.web", fact: "my-plugin.web (intent off, 3 active)" }]
+// intent on, 1 of 3 actuatable members active (force-removal)
+[{ id: "my-plugin.web", fact: "my-plugin.web (intent on, 1 of 3 active)" }]
+```
+
+The fact-string format is pinned by masking's tests — build on the predicate, never on reconstructing the comparison from `getActuatableNames`.
+
+Rules:
+
+- **Zero actuatable members registered — inert, never flagged** (the MCP-server-not-connected case). The same rule makes a partially-registered toolset report against its actuatable count, so a legitimate partial does not flag. Zero active with actuatable members present is repairable, not inert.
+- **Excluded from comparison**, matching only the activation (add) direction of the actuation filter: `hidden`-exposure members, not-yet-registered members, and MCP tools dropped from a server list before the re-scan. `defaultActive: false` members are NOT excluded — they sit in `expected` under intent-on like any other member (not observable through `getAllTools()`). The remove direction is deliberately broader: a disable filters by raw `spec.names`, so a stale-but-active member excluded here is still removed by `forceToolsetEnabled(pi, spec, false)` — a clean report does not mean a disable would be a no-op.
+- **The over-approximation gap is a false-positive class:** an intent-on toolset holding an MCP tool refused by the `--tools` gate reads as permanent force-removal — verify your own repair writes and report the residual instead of assuming success. Mirror case under intent-off: a `--tools`-forced name in an off toolset oscillates with masking's re-assert (pi core re-adds it on every registry refresh — the residual noted in AGENTS.md's architecture notes), so a repair-until-clean loop can spin on that one toolset even though every repair write succeeded.
+
+Read-only: no write, no persistence, no events, no branch mode (read `readBranchModeState` yourself where your flow needs it). Pass the branch snapshot — `ctx.sessionManager.getBranch()` inside a handler. Returns `[]` in a deferring child (see [Subagent inheritance](#subagent-inheritance-child-policy-defer)): masking's intent does not govern the live set there, so the comparison is meaningless.
+
 ### `TOOLSET_EVENTS`
 
 | Event | When |
-|---|---|
+| --- | --- |
 | `changed` | A toggle, a re-assert, or `forceToolsetEnabled` applied a state; exclusion-mode restore also emits it for a toolset with no persisted entry (settings/packaged fallback) |
 | `restored` | Exclusion-mode restore of a persisted branch entry; allowlist-mode restore of **every** registered toolset (a branch replay of the allowlist, not a live toggle) |
 
@@ -184,6 +211,7 @@ Returns the last `type === "custom"` entry in the branch matching `customType`, 
 | `BranchReader` | Anything with a synchronous `getBranch()` — pi's `ReadonlySessionManager` satisfies it; pass `ctx.sessionManager` itself |
 | `RegistryEntry` | `{ spec: ToolsetSpec; toolset: Toolset }` — a single registered toolset |
 | `DefaultResolutionMode` | `"exclusion" \| "allowlist"` |
+| `DriftFact` | `{ id, fact }` — one entry of `computeDrift`'s report: the mismatched toolset id plus its id-prefixed fact string |
 | `MalformedSettingsError` | Thrown by `writeToolsetDefaults` / `clearToolsetDefaults` when settings.json is corrupt or non-object (never silently overwritten). Catch with `instanceof` — safe because those writers are imported from the same module instance as the catcher. |
 | `AllowlistModeError` | Thrown by every toggle under allowlist governance (`enable`/`disable` and `toggleBatch`). Catch by `err?.name === "AllowlistModeError"`, **never** `instanceof` — handles come from the shared `globalThis` registry and may belong to a different physical copy of the library, so cross-instance `instanceof` fails silently. `specId` is set on single-op refusals (through the `enable`/`disable` wrappers), absent (`undefined`) on batch refusals — the refusal is mode-global and attributes nothing. |
 | `CycleError` | Thrown by the planner when a cycle is reachable from any requested op, **before any write or emit**. Catch by `err?.name === "CycleError"`, same name-based contract as `AllowlistModeError`; messages are diagnostics, never string-matched. Carries the cycle path as `cyclePath`. |
@@ -511,7 +539,7 @@ ids with a stable namespace (<product-family>.<subset>, e.g. "foo.web").
 - **Defaults tiers:** each toolset's restore default resolves chat-branch entry → `toolsetDefaults` settings pin → packaged `spec.defaultEnabled`. Settings pins are read fresh from disk on each restore.
 - **Null-tombstone-aware restore:** a `null` last branch entry (written by `clearToolsetEntry`) falls through to the settings tier instead of any stale prior entry; mode resolution is likewise null-tombstone-aware (`readBranchModeState` maps an unrecognized, absent, or tombstoned last entry to `"exclusion"`). Tombstones aren't sticky — a later toggle supersedes them.
 - **Events:** a live toggle is silent (no write, no emit) only when both the intent delta is zero and no loadout write occurred — i.e. the resolved intent already matches the requested state and the active set needed no repair. Persist + emit iff the intent changes or a loadout write occurred; this fixes the witnessed-off asymmetry where a user's off toggle on an externally-clobbered toolset was dropped outright. Cascade repeats are silent by construction — the planner's visited set makes each id appear exactly once per call. Emits fire only after all writes complete, so a `changed` listener observes the batch's final state, never an intermediate one. Restore always emits, so side-effect owners stay in sync across reloads and tree navigations.
-- **Child-policy defer:** the top of every restore reads `piToolMasking.childPolicy` (default `"defer"`) and manages a static pid-tagged env var (`PI_TOOLMASKING_DEFER`): a defer-policy parent publishes it when absent, a foreign-pid var makes restore and the per-turn re-assert no-op (deferring to the spawner) — and makes `enable`/`disable` silent no-ops (`[]`) and `setDefaultResolutionMode`/`clearToolsetEntry`/`clearAllToolsetEntries` write nothing, while `forceToolsetEnabled`, raw `appendEntry`, and the settings writers stay live — and a `"settings"` policy deletes the var and masks normally. See [Subagent inheritance](#subagent-inheritance-child-policy-defer).
+- **Child-policy defer:** the top of every restore reads `piToolMasking.childPolicy` (default `"defer"`) and manages a static pid-tagged env var (`PI_TOOLMASKING_DEFER`): a defer-policy parent publishes it when absent, a foreign-pid var makes restore and the per-turn re-assert no-op (deferring to the spawner) — and makes `enable`/`disable` silent no-ops (`[]`) and `setDefaultResolutionMode`/`clearToolsetEntry`/`clearAllToolsetEntries` write nothing and `computeDrift` return `[]`, while `forceToolsetEnabled`, raw `appendEntry`, and the settings writers stay live — and a `"settings"` policy deletes the var and masks normally. See [Subagent inheritance](#subagent-inheritance-child-policy-defer).
 
 ---
 

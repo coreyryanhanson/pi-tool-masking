@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`computeDrift(pi, branch)`** — the drift predicate as an export: per
+  registered toolset, compares declared intent (`effectiveEnabled` over the
+  caller's branch) against the live set, both restricted to the actuatable
+  subset. Returns `DriftFact[]` — mismatched toolset ids with a per-id fact
+  string (`web (intent off, 3 active)` = leak; `web (intent on, 1 of 3
+  active)` = force-removal). Read-only: no write, no persistence, no events,
+  no branch mode. Zero-actuatable toolsets are never flagged;
+  `hidden`-exposure, not-yet-registered, and dropped-MCP members are excluded
+  from both sides.
+- **`getActuatableNames(pi)`** — masking's named actuation boundary, now
+  exported: registered tools whose `exposure` is not `hidden`. A documented
+  over-approximation of pi's activatable set (MCP tools excluded by the
+  session's `--tools` allowlist are still returned) — see README.
+
 ## [2.0.1] - 2026-10-05
 
 This is a breaking release centered on one idea: toggles are a **batch-first,

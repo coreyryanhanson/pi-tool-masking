@@ -155,8 +155,24 @@ const CHILD_POLICY_WARNED_KEY = "__piToolMaskingChildPolicyWarned";
 
 /** One getAllTools() pass collecting tools that can actually be active:
  *  registered and not `hidden`-exposure. The cast keeps consumers whose pi
- *  types pre-date `exposure` compiling (this library ships raw TS). */
-function getActuatableNames(pi: ExtensionAPI): Set<string> {
+ *  types pre-date `exposure` compiling (this library ships raw TS).
+ *
+ *  @public — masking's named actuation boundary: the add path, the mask,
+ *  and {@link computeDrift} all filter through it, so consumers reason in
+ *  its terms instead of reconstructing the comparison from raw names.
+ *  Known over-approximation: `registered && !hidden` is an upper bound on
+ *  activatable, not the exact set — pi's `_isActivatable` additionally
+ *  refuses MCP tools not named by the session's `--tools` allowlist
+ *  (`direct`-exposure unconditionally; other exposures only when
+ *  `tool_search` is not registered), and `_applyToolLoadout`
+ *  silently drops it. `defaultTools` does not gate activatability (it is a
+ *  settings-level initial selection, not a filter), and `--exclude-tools`
+ *  unregisters the tool outright — inert, not drift. pi exposes no
+ *  activatability query, so the exact set is not computable from masking's
+ *  side; this export documents the bound rather than pretending exactness.
+ *  Consumers building on the predicate ({@link computeDrift}) treat members
+ *  in this gap as a known false-positive class. */
+export function getActuatableNames(pi: ExtensionAPI): Set<string> {
 	const actuatable = new Set<string>();
 	for (const tool of pi.getAllTools()) {
 		if ((tool as { exposure?: string }).exposure === "hidden") continue;
@@ -253,6 +269,30 @@ export function readBranchModeState(branch: readonly SessionEntry[]): {
 // Effective-enabled resolution — shared by restore and the turn re-assert
 // ---------------------------------------------------------------------------
 
+/** Mode-dependent intent resolution, shared by `effectiveEnabled` and
+ *  `computeDrift` — one definition of the allowlist-vs-ledger rule. Under
+ *  allowlist, the allowlist is authoritative and `settingsDefaults` is never
+ *  read (the parameter exists only for the exclusion path). */
+function resolveIntent(
+	spec: ToolsetSpec,
+	mode: DefaultResolutionMode,
+	allowlist: readonly string[],
+	branch: readonly SessionEntry[],
+	settingsDefaults: ToolsetDefaultsMap,
+): { enabled: boolean; persistedEntry: boolean } {
+	if (mode === "allowlist") {
+		const lastEntry = lastCustomEntry<{ enabled?: boolean } | null>(
+			branch,
+			spec.persistKey,
+		);
+		return {
+			enabled: allowlist.includes(spec.id),
+			persistedEntry: typeof lastEntry?.data?.enabled === "boolean",
+		};
+	}
+	return resolveExclusionTier(spec, branch, settingsDefaults);
+}
+
 /**
  * Resolve a toolset's effective enabled state through the same tier chain
  * restore applies: chat-branch entry → settings pin → `defaultEnabled ?? true`
@@ -274,26 +314,16 @@ export function effectiveEnabled(
 	settingsDefaults: ToolsetDefaultsMap,
 ): { enabled: boolean; persistedEntry: boolean } {
 	const { mode, allowlist } = readBranchModeState(branch);
-	if (mode === "allowlist") {
-		const lastEntry = lastCustomEntry<{ enabled?: boolean } | null>(
-			branch,
-			spec.persistKey,
-		);
-		return {
-			enabled: allowlist.includes(spec.id),
-			persistedEntry: typeof lastEntry?.data?.enabled === "boolean",
-		};
-	}
-	return resolveExclusionTier(spec, branch, settingsDefaults);
+	return resolveIntent(spec, mode, allowlist, branch, settingsDefaults);
 }
 
 /** Exclusion tier chain: chat-branch entry → settings pin → packaged
- *  `defaultEnabled ?? true`. Internal call sites (`effectiveEnabled`'s
+ *  `defaultEnabled ?? true`. Internal call sites (`resolveIntent`'s
  *  exclusion path, restore's per-toolset loop, the exclusion re-assert,
  *  `executeBatchPlan`'s delta basis, `getEffectiveDefault` via an empty
- *  branch) use this directly — mode is loop-invariant and already
- *  resolved to exclusion at those sites, so re-reading the branch mode
- *  entry per toolset would be wasted work. */
+ *  branch) use this directly — mode is loop-invariant and already resolved
+ *  to exclusion at those sites, so re-reading the branch mode entry per
+ *  toolset would be wasted work. */
 function resolveExclusionTier(
 	spec: ToolsetSpec,
 	branch: readonly SessionEntry[],
@@ -313,6 +343,110 @@ function resolveExclusionTier(
 			? settingsEnabled
 			: (spec.defaultEnabled ?? true);
 	return { enabled: resolved, persistedEntry: false };
+}
+
+// ---------------------------------------------------------------------------
+// Drift predicate — intent vs. the live set, read-only
+// ---------------------------------------------------------------------------
+
+/** One drifted toolset: the id plus an id-prefixed fact string (format pinned
+ *  by masking's tests — see the examples below). */
+export interface DriftFact {
+	/** The toolset's spec.id. */
+	id: string;
+	/** e.g. `web (intent off, 3 active)` (leak) or
+	 *  `web (intent on, 1 of 3 active)` (force-removal); the denominator is
+	 *  the actuatable member count, so a partially-registered toolset does not
+	 *  overstate the missing set. */
+	fact: string;
+}
+
+/**
+ * Drift predicate: per registered toolset, compare declared intent against
+ * the live set, restricted to the actuatable subset
+ * ({@link getActuatableNames}). Intent resolves through the same tier chain
+ * as restore — the merged settings defaults are read once per invocation
+ * (`readMergedToolsetDefaults()`), the branch comes from the caller.
+ *
+ * Classification:
+ * - observed ≠ expected — drift. Under intent-off that is a leak (a member
+ *   active over a disabled toolset); under intent-on that is force-removal,
+ *   including the all-members-removed clobber (zero active with actuatable
+ *   members present is repairable, not inert).
+ * - zero actuatable members registered — inert, never flagged (the
+ *   MCP-server-not-connected case; `expected` is empty in both directions).
+ * - Excluded from comparison, matching only the activation (add) direction of
+ *   the actuation filter: `hidden`-exposure members, not-yet-registered
+ *   members, and MCP tools dropped from a server list before the re-scan.
+ *   `defaultActive: false` members are NOT excluded — they sit in `expected`
+ *   under intent-on like any other member (not observable through
+ *   `getAllTools()`). The remove direction is
+ *   deliberately broader: a disable filters raw spec names, so a
+ *   stale-but-active member excluded here is still removed by a disable —
+ *   clean to this predicate does not mean a disable is a no-op.
+ * - The known over-approximation of {@link getActuatableNames} (MCP tools
+ *   refused by pi's `--tools` gate) surfaces here as a false-positive class:
+ *   an intent-on toolset holding such a member reads as permanent
+ *   force-removal. pi exposes no activatability query, so the class is
+ *   documented, not filtered away — callers verify their own repair writes
+ *   and report the residual.
+ *
+ * Read-only: performs no write, persists nothing, emits nothing, returns no
+ * branch mode (callers needing the mode read {@link readBranchModeState}
+ * themselves). Not a toggle pre-check — it is a diagnostic over the state
+ * the caller already resolved; the fact-string format is part of this
+ * contract. In a deferring child ({@link isDeferredChild}) masking's intent
+ * does not govern the live set (the spawner's explicit tool request wins),
+ * so the comparison is meaningless there and returns `[]`.
+ *
+ * @param branch the caller's branch snapshot (`ctx.sessionManager.getBranch()`
+ *   inside a handler; read once — no mid-call re-read)
+ */
+export function computeDrift(
+	pi: ExtensionAPI,
+	branch: readonly SessionEntry[],
+): DriftFact[] {
+	// A deferring child's live set is the spawner's deliberate choice, not
+	// something masking's intent should be measured against.
+	if (isDeferredChild()) return [];
+	const registry = getRegistry();
+	if (registry.size === 0) return [];
+	// Mode is loop-invariant, resolved once here (see resolveExclusionTier).
+	const { mode, allowlist } = readBranchModeState(branch);
+	// Settings are read only in exclusion mode — allowlist never consults them.
+	const settingsDefaults =
+		mode === "allowlist" ? {} : readMergedToolsetDefaults();
+	const actuatable = getActuatableNames(pi);
+	const active = new Set(pi.getActiveTools());
+	const facts: DriftFact[] = [];
+	for (const [, entry] of registry) {
+		let expected = 0;
+		let observed = 0;
+		for (const name of entry.spec.names) {
+			if (!actuatable.has(name)) continue;
+			expected++;
+			if (active.has(name)) observed++;
+		}
+		const enabled = resolveIntent(
+			entry.spec,
+			mode,
+			allowlist,
+			branch,
+			settingsDefaults,
+		).enabled;
+		// observed ⊆ expected by construction, so set equality reduces to a
+		// count comparison: intent-off drifts iff any member is active, intent-on
+		// iff any actuatable member is missing from the active set.
+		const drifted = enabled ? observed < expected : observed > 0;
+		if (!drifted) continue;
+		facts.push({
+			id: entry.spec.id,
+			fact: enabled
+				? `${entry.spec.id} (intent on, ${observed} of ${expected} active)`
+				: `${entry.spec.id} (intent off, ${observed} active)`,
+		});
+	}
+	return facts;
 }
 
 // ---------------------------------------------------------------------------

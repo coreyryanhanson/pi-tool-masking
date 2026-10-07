@@ -2,11 +2,11 @@
 
 ## Repo shape
 
-Single-file library (`index.ts`) published to npm as `pi-tool-masking`. No
-build step — TypeScript is consumed directly (`noEmit: true`,
-`moduleResolution: nodenext`, `exports`/`main` point at `index.ts`, `files`
-ships only `index.ts`). No linter or formatter. Full behavioral contracts live
-in `README.md`; read it before changing the public API.
+Single-file library (`index.ts`) published to npm as `pi-tool-masking`. No build
+step — TypeScript is consumed directly (`noEmit: true`, `moduleResolution:
+nodenext`; `exports`/`main`/`files` all point at `index.ts`). No linter or
+formatter. `index.ts` is densely TSDoc'd, and `README.md` holds the full
+behavioral contracts — grep the definition site before restating either.
 
 ## Commands
 
@@ -14,27 +14,24 @@ in `README.md`; read it before changing the public API.
 npm test            # vitest run (CI runs exactly this)
 npm run test:watch  # vitest watch
 npx tsc --noEmit    # typecheck — NOT a package script
+npm run publish:dry # npm publish --access public --dry-run
 
 npx vitest run __tests__/core.test.ts   # one file
 npx vitest run -t "restore"             # one test-name pattern
 ```
 
 `prepublishOnly` is `npm test && npx tsc --noEmit`, so typecheck only gates a
-publish; CI also runs it. Run `tsc --noEmit` yourself before shipping.
-
-## Strict TypeScript
-
-`tsconfig.json` adds `exactOptionalPropertyTypes`, `noUncheckedIndexedAccess`,
-`isolatedModules`, `noUncheckedSideEffectImports`, `moduleDetection: force` on
-top of `strict`. Indexed access is `T | undefined`; optional props can't be set
-to `undefined`. Typecheck fails otherwise.
+publish; CI also runs it. Run `tsc --noEmit` yourself before shipping. `tsconfig`
+adds `exactOptionalPropertyTypes` + `noUncheckedIndexedAccess` on top of
+`strict` — indexed access is `T | undefined`, optional props can't be set to
+`undefined`.
 
 ## Tests
 
 Vitest, globals on, `testTimeout: 15_000`. No external services, fixtures, or
 snapshots. `__tests__/`:
-- `core.test.ts`, `registry-convergence.test.ts`, `child-policy-defer.test.ts` —
-  use the shared `helpers.ts` rig.
+- `core.test.ts`, `registry-convergence.test.ts`, `child-policy-defer.test.ts`,
+  `drift.test.ts` — use the shared `helpers.ts` rig.
 - `custom-entry.test.ts` — pure `lastCustomEntry` unit test, no rig.
 - `mock-pi.ts` — `MockPI`, a subset of `ExtensionAPI`.
 
@@ -44,128 +41,105 @@ Rig (`helpers.ts`): `createEnv()` → `{ mock, pi }`; `reader(pi)` → `BranchRe
 call `cleanRegistry()` in `beforeEach` (`cleanGlobalKeys()` when the defer env
 var must survive). Registry, restore-event guard, and the invalid-childPolicy
 warn flag are process-global — leakage between tests is a real failure mode.
-`child-policy-defer.test.ts` saves/restores `process.env["PI_TOOLMASKING_DEFER"]`
-in `beforeEach`/`afterEach`.
+`child-policy-defer.test.ts` saves/restores the defer env var around each test.
+`drift.test.ts` calls `useTempSettingsDir()` at module scope (`computeDrift`
+reads merged settings on every call) and hand-sets the defer env in a `finally`.
 
-## CI
+## CI & release
 
-`.github/workflows/test.yml`: `npm ci && npm test && npx tsc --noEmit` on PRs
-and pushes to `main` (Node `lts/*`).
-
-## Release
+CI (`.github/workflows/test.yml`): `npm ci && npm test && npx tsc --noEmit` on
+PRs and pushes to `main` (Node `lts/*`).
 
 ```bash
-node scripts/release.mjs patch|minor|major|<x.y.z>
+node scripts/release.mjs patch|minor|major|<x.y.z>   # npm run release:patch etc.
 ```
 
-Requires a clean tree. Runs `npm test`, bumps version, promotes `[Unreleased]`
-in `CHANGELOG.md` to `[version] - date`, commits, tags `v<version>`,
-`npm publish --access public`, reinstates `[Unreleased]`, commits, pushes `main`
-+ tag. Draft `[Unreleased]` entries first (warns but proceeds if empty).
+Requires a clean tree. Draft `[Unreleased]` `CHANGELOG.md` entries first (warns
+but proceeds if empty). Runs `npm test`, bumps version, promotes `[Unreleased]`
+to `[version] - date`, commits, tags `v<version>`, publishes (re-running test +
+typecheck via `prepublishOnly`), reinstates `[Unreleased]`, commits, pushes
+`main` + tag.
 
-## API traps
+## Traps
 
-Not a full API reference — see `README.md`.
+Caller-facing first, internals last. Details in `README.md`.
 
-- `defineToolset(pi, spec)` is idempotent by `spec.id`: deep-equal spec → same
-  handle; same id + changed spec → warns and replaces (old handles die).
-  Registration guards throw atomically: `PersistKeyCollisionError` when another
-  toolset claims the `persistKey`; plain `Error` on tool-name overlap (each tool
-  belongs to one toolset) and on the reserved `toolset-resolution-mode`
-  persistKey. Ids are namespaced `<product-family>.<subset>`.
-- Toggles (`toggleBatch`, `Toolset.enable`/`.disable`) take a `BranchReader` —
-  pass `ctx.sessionManager` itself, never a bare `getBranch` method reference
-  (unbound → throws). They are **exclusion-mode only**: under allowlist
-  governance they throw `AllowlistModeError` before any write. Actuation under
-  focus is `forceToolsetEnabled`. Gate order: defer →
-  empty `ops` → allowlist refusal → plan → settings snapshot → execute. The pure
-  planner refuses cycles (`CycleError.cyclePath`) and incoherent intents
-  (`ContradictionError`) atomically, pre-write; an explicit unknown id throws,
-  implied unregistered `requires` deps are skipped.
-- `toggleBatch` returns a flattened intent delta (`ToggleResult[]`; `[]` = silent
-  no-op). One batch = one coherent intent — "disable a dependency then enable
-  something requiring it" needs two calls. Emits fire only after all writes, in
-  planner order.
-- `requires` cascades: enable pulls deps on, disable pulls dependents off. The
-  planner's visited set makes `plan.order` unique, so cascade repeats are silent.
-- `setDefaultResolutionMode` is the only mode write; every governance decision
-  reads the branch back via `readBranchModeState` (copy-on-read; corrupt
-  allowlist fails closed: non-array → `[]`, non-string members dropped). The
-  writer copies its input before `appendEntry` (pi stores `data` by reference).
-  In a deferring child it is validate-then-suppress.
-- `effectiveEnabled(...).enabled` is mode-dependent (branch ledger under
-  exclusion, `allowlist.includes(id)` under allowlist) — display only, never a
-  toggle pre-check. Tiers: allowlist → chat-branch entry → settings pin →
-  `defaultEnabled ?? true`. `persistedEntry` is true only for a boolean `enabled`
-  entry (tombstone/absent → false). `getEffectiveDefault` ignores mode.
-- `getRegisteredToolsets()` entries are **live**: `entry.spec.names = new
-  Set(next)` is the runtime-membership mutation (data only — no
-  actuate/persist/emit; `/reload` resets to the code spec). Never re-call
-  `defineToolset` to change members.
-- Catch `AllowlistModeError` / `CycleError` / `ContradictionError` /
-  `PersistKeyCollisionError` by `err?.name`, **never `instanceof`** (cross-copy
-  via the `globalThis` registry). `MalformedSettingsError` is the deliberate
-  opposite — `instanceof` is safe there.
-- `forceToolsetEnabled(pi, spec, enabled)` always applies and always emits,
-  persists nothing, no cascade — call once per spec. Primary actuation under
-  allowlist; stays live in a deferring child.
-- Settings (`toolsetDefaults`, `piToolMasking.childPolicy`): global
+- **Pass `ctx.sessionManager` itself** to `toggleBatch` / `Toolset.enable`/`.disable`
+  — never a bare `getBranch` method reference (unbound → throws). Toggles are
+  **exclusion-mode only**: under allowlist governance they throw
+  `AllowlistModeError` before any write; actuate under focus with
+  `forceToolsetEnabled` instead.
+- **Catch `AllowlistModeError` / `CycleError` / `ContradictionError` /
+  `PersistKeyCollisionError` by `err?.name`, never `instanceof`** — the
+  `globalThis` registry lets multiple physical copies of the library coexist.
+  `MalformedSettingsError` is the deliberate opposite (`instanceof` is safe).
+- **One `toggleBatch` call is one coherent intent.** "Disable a dependency, then
+  enable something requiring it" needs two calls. The result is a flattened delta
+  (`[]` = silent no-op); emits fire only after all writes, in planner order. The
+  pure planner refuses cycles/contradictions pre-write; an explicit unknown id
+  throws, while implied unregistered `requires` deps are skipped.
+- **`effectiveEnabled(...).enabled` is display-only — never a toggle pre-check.**
+  It is mode-dependent (branch ledger under exclusion, `allowlist.includes` under
+  allowlist). Call the toggle and catch instead. `getEffectiveDefault` ignores
+  mode.
+- **`getRegisteredToolsets()` entries are live.** `entry.spec.names = new
+  Set(next)` is the runtime-membership mutation (data only — no actuate/persist/
+  emit; `/reload` resets to the code spec). Never re-call `defineToolset` to
+  change members.
+- **`getActuatableNames(pi)` is the actuation boundary** and a documented
+  *over*-approximation: it returns MCP tools the session's `--tools` gate still
+  refuses. A toolset with zero actuatable members is *inert* — toggles
+  persist/emit intent, `isEnabled()` (observation) stays false while
+  `effectiveEnabled()` (intent) reports the recorded state. Pick the right signal.
+- **`computeDrift` is defer-aware**, returning `[]` in a deferring child
+  (masking's intent doesn't govern the live set there). The over-approximation
+  above is its known false-positive class (an intent-on toolset holding a
+  `--tools`-refused member reads as permanent force-removal) — verify repair
+  writes, don't loop until clean.
+- **`TOOLSET_EVENTS` type diverges by path.** Exclusion restore emits `restored`
+  for a persisted entry but `changed` for a settings/packaged fallback; allowlist
+  restore emits `restored` for every registered toolset; re-assert and
+  `forceToolsetEnabled` always emit `changed`.
+- **`defineToolset` is idempotent by `spec.id`**: deep-equal spec → same handle;
+  same id + changed spec → warns and replaces (old handles die). Registration
+  guards throw atomically: `PersistKeyCollisionError` on a `persistKey`
+  collision, a plain `Error` on tool-name overlap (one toolset per tool) or the
+  reserved `toolset-resolution-mode` persistKey.
+- **Settings** (`toolsetDefaults`, `piToolMasking.childPolicy`): global
   `$PI_CODING_AGENT_DIR/settings.json` (default `~/.pi/agent/settings.json`),
   project `<cwd>/.pi/settings.json`, project wins per entry; `childPolicy` is a
   scalar per scope (never spread-merge). Readers never throw (malformed → `{}`);
-  writers throw `MalformedSettingsError`. Tests run against temp settings dirs
-  (see `__tests__/helpers.ts` `useTempSettingsDir`), never the real `~/.pi`.
-  Test-only internals (`planBatch`, `executeBatchPlan`, `parseToolsetDefaults`)
-  live under `__internal` — may change or vanish between any releases.
-- `TOOLSET_EVENTS`: `changed` / `restored`. Type diverges by path — exclusion
-  restore emits `restored` for a persisted entry but `changed` for a
-  settings/packaged fallback; allowlist restore emits `restored` for every
-  registered toolset; re-assert and `forceToolsetEnabled` always emit `changed`.
-
-## Architecture notes
-
-- Registry lives on `globalThis` (`__piToolMaskingRegistry`) so it survives
-  `/reload` across module instances. The invalid-childPolicy warn flag is also
-  on `globalThis`. No module-state governance mirror: restore, resolver,
-  re-assert dispatcher, and the toggle refusal all read the branch via
-  `readBranchModeState`.
-- Persistence: `pi.appendEntry(persistKey, { enabled })` +
-  `pi.sessionManager.getBranch()`. Restore runs on every
-  `session_start`/`session_tree` (one handler pair installed per `pi`, deduped
-  by a WeakSet — restore itself re-runs on each event). A `null` tombstone
-  falls through to the settings/packaged tier.
-- `before_agent_start` re-asserts each turn, arm chosen from the branch:
-  allowlist mode undoes both drift directions (removes non-allowlisted
-  force-adds, restores force-removed allowlisted members); exclusion mode removes
-  force-re-added members of effectively-off toolsets (leak direction only).
-  `changed` is emitted per actually-drifted toolset, no-op when nothing drifted.
-  The mask shares `computeAllowlistDesired` with restore; handlers install once
-  per `pi` (WeakSet). **Residual:** runs at this extension's load-order position —
-  a later-loading force-add reconciler re-adds after us, and pi core re-adds
-  `--tools` names on every registry refresh, so a forced name in an off toolset
-  oscillates (bounded one write/side/turn). A robust fix needs a pi-core
-  `setActiveTools` masking primitive.
-- **Actuatable members only:** loadout writes and masks filter through
-  `getActuatableNames(pi)`; a `hidden`-exposure tool can never be active and is
-  never handed to `setActiveTools` (older pi without `exposure`: all names
-  actuatable). A toolset
-  with zero actuatable members is *inert*: toggles persist/emit intent but
-  `isEnabled()` (observation) stays false while `effectiveEnabled()` (intent)
-  reports the recorded state — pick the right signal.
+  writers throw `MalformedSettingsError`. Tests must use temp settings dirs
+  (`useTempSettingsDir`), never the real `~/.pi`.
+- **`__internal`** (`planBatch`, `executeBatchPlan`, `parseToolsetDefaults`) may
+  change or vanish between any releases.
+- **Registry lives on `globalThis`** (`__piToolMaskingRegistry`) to survive
+  `/reload` across module instances; the invalid-childPolicy warn flag too. There
+  is no module-state governance mirror — restore, resolver, re-assert, and the
+  toggle refusal all read the branch via `readBranchModeState`.
+- **Persistence** is `pi.appendEntry(persistKey, { enabled })` +
+  `pi.sessionManager.getBranch()`. Restore re-runs on every
+  `session_start`/`session_tree` (handler pair installed once per `pi` via
+  WeakSet). A `null` tombstone falls through to the settings/packaged tier.
+- **`before_agent_start` re-asserts each turn**: allowlist mode undoes both drift
+  directions; exclusion mode removes force-re-added members of effectively-off
+  toolsets (leak direction only). `changed` emits per actually-drifted toolset.
+  **Residual:** it runs at this extension's load-order position, so a later
+  force-add reconciler or pi core's `--tools` re-add can oscillate one write/side/
+  turn. A real fix needs a pi-core `setActiveTools` masking primitive.
 - **Toggle path:** `planBatch` (pure) → `executeBatchPlan`; `toggleBatch` wraps
-  it and `Toolset.enable`/`.disable` delegate. The plan is the intent authority
-  inside a call; the pre-call `before` state resolves from the single branch read
-  at the boundary. No mid-call re-read — adding one would race the plan. Each
-  public call re-reads at its own boundary, so cascades/loops stay correct.
+  it, `Toolset.enable`/`.disable` delegate. The plan is the authority inside a
+  call — the `before` state comes from the single branch read at the call
+  boundary, no mid-call re-read (that would race the plan). Each public call
+  re-reads at its own boundary, so cascades/loops stay correct.
 - **Child-policy defer:** `piToolMasking.childPolicy` (`"defer"` default |
-  `"settings"`). At the top of `doRestore`, a defer-policy parent publishes
-  `PI_TOOLMASKING_DEFER` (= own pid); a **foreign** pid makes restore and the
-  per-turn re-assert no-op entirely (both tiers) and leaves the var untouched —
-  republishing own pid would flip the child to enforcing at its next same-process
-  restore. `"settings"` deletes the var and masks normally. `isDeferredChild()`
-  is the env-only predicate. In a deferring child, branch-governance writes are
-  silent no-ops (toggles `[]`, `setDefaultResolutionMode` validate-then-suppress,
-  tombstone helpers write nothing) while deliberate write/actuation stays live
-  (`forceToolsetEnabled`, raw `appendEntry`, settings writers). No
-  `session_shutdown` cleanup (republish trap). Deferring children emit no mask
-  events. Masking is context hygiene, not a security boundary.
+  `"settings"`). A defer-policy parent publishes `PI_TOOLMASKING_DEFER` (= own
+  pid); a **foreign** pid no-ops restore and the per-turn re-assert entirely and
+  leaves the var untouched (republishing own pid would flip the child back to
+  enforcing). `"settings"` deletes the var. `isDeferredChild()` is env-only. In a
+  deferring child, branch-governance writes are silent no-ops (toggles `[]`,
+  `setDefaultResolutionMode` validate-then-suppress, tombstone helpers write
+  nothing) while deliberate writes stay live (`forceToolsetEnabled`, raw
+  `appendEntry`, settings writers). No `session_shutdown` cleanup (republish
+  trap). Deferring children emit no mask events. Masking is context hygiene, not
+  a security boundary.
